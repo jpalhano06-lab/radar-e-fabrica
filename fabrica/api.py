@@ -808,8 +808,36 @@ def iniciar_criacao(nome: str, tarefa: Optional[Dict[str, Any]] = None) -> str:
     return task_id
 
 
+ENTREGA_ATRASADA_DIAS = 3
+
+
+def entregas_que_faltam() -> list:
+    """Os vídeos prontos dos últimos dias que não chegaram à pasta do computador: a fábrica desligou depois do render e
+    antes da entrega (o 20-criaturas-marinhas, 2026-11-09, religada às 17:44 com o final.mp4 gravado às 17:44:30)."""
+    if not PROJETOS.exists():
+        return []
+    limite = time.time() - ENTREGA_ATRASADA_DIAS * 86400
+    faltam = []
+    for pasta in sorted(PROJETOS.iterdir()):
+        final = pasta / "final.mp4"
+        try:
+            if not final.is_file() or final.stat().st_mtime < limite:
+                continue
+            entrega = pasta / "entrega_pc.json"
+            if entrega.exists() and entrega.stat().st_mtime >= final.stat().st_mtime:
+                continue
+        except OSError:
+            continue
+        estado = _ler_criacao(pasta.name) or {}
+        if estado.get("status") in ("processando", "aguardando"):
+            continue  # ainda criando: a entrega vem no fim dela
+        faltam.append(pasta.name)
+    return faltam
+
+
 def retomar_criacoes_interrompidas() -> None:
-    """Na partida da fábrica: toda criação que estava andando quando ela desligou volta a andar."""
+    """Na partida da fábrica: toda criação que estava andando quando ela desligou volta a andar, e o vídeo pronto que
+    não chegou à pasta do computador é entregue (com o kit, as capas e os shorts que faltarem)."""
     if not PROJETOS.exists():
         return
     for pasta in sorted(PROJETOS.iterdir()):
@@ -817,6 +845,9 @@ def retomar_criacoes_interrompidas() -> None:
         if estado and estado.get("status") in ("processando", "aguardando"):
             print(f"  retomando a criação de {pasta.name}, que foi interrompida")
             iniciar_criacao(pasta.name)
+    for nome in entregas_que_faltam():
+        print(f"  {nome} ficou pronto e não chegou à pasta do computador: entregando agora")
+        iniciar_publicacao(nome)
 
 
 # -----------------------------------------------------------------------------
@@ -2265,12 +2296,21 @@ def iniciar_publicacao(nome: str, forcar: bool = False) -> bool:
     def trabalhar():
         # o kit, as 3 thumbnails e os shorts, nessa ordem (as capas usam os textos do kit). Cada um que falhar não
         # impede os outros
+        # a entrega no computador vem logo depois do kit (pedido do usuário em 2026-11-09: "o vídeo depois de feito
+        # demora muito pra ir pra pasta"). Ela só precisa do vídeo e da descrição; antes esperava as 3 thumbnails e os
+        # shorts, que ela nem leva quando entrega.so_o_video está ligado (o padrão). Com ele desligado, a entrega roda
+        # de novo no fim, para levar as capas e os shorts
+        def entregar_de_novo(pr):
+            if not entrega_pc.config(pr).get("so_o_video", True):
+                entrega_pc.entregar(pr, log=print)
+
         try:
             for etapa, funcao in (("kit de publicação", lambda pr: publicacao.gerar(pr, log=print, forcar=forcar)),
-                                  ("thumbnails", lambda pr: thumbnail.gerar(pr, log=print)),
-                                  ("shorts", lambda pr: shorts.gerar(pr, log=print) if shorts.config(pr)["ativo"] else None),
                                   # a pasta do vídeo pronto no computador, com a descrição (entrega_pc.py)
                                   ("entrega no computador", lambda pr: entrega_pc.entregar(pr, log=print)),
+                                  ("thumbnails", lambda pr: thumbnail.gerar(pr, log=print)),
+                                  ("shorts", lambda pr: shorts.gerar(pr, log=print) if shorts.config(pr)["ativo"] else None),
+                                  ("entrega com capas e shorts", entregar_de_novo),
                                   ("google drive", lambda pr: drive.enviar(pr, log=print)),
                                   # o disco aperta depressa: as sobras dos vídeos antigos saem aqui (faxina.py)
                                   ("faxina de disco", lambda pr: faxina.faxinar(log=print))):
