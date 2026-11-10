@@ -247,6 +247,10 @@ def _escolher_conferindo(projeto, cena, ordem, candidatos_da_cena, frases, usado
         if julgamento is None:
             return candidato, {"conferida": False, "legenda": frase}
         nota = julgamento["nota"]
+        from .corrigir import de_outro_pais
+        if de_outro_pais(julgamento):
+            # texto, preço ou loja de outro país: nem a nota alta salva, nem entra como "o melhor que havia"
+            continue
         if nota >= corte:
             return candidato, {"conferida": True, "nota": nota, "legenda": frase, "reprovados_antes": len(testados)}
         testados.append((nota, i, frase, julgamento))

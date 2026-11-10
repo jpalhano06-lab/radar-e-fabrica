@@ -635,6 +635,40 @@ def o_que_mostrar(cena):
     return mostrar
 
 
+IDIOMAS = {"en": "English", "pt": "Portuguese", "es": "Spanish", "nl": "Dutch", "ja": "Japanese", "ko": "Korean",
+           "de": "German", "fr": "French", "it": "Italian", "tl": "Filipino", "fil": "Filipino"}
+
+
+def lugar_do_canal(perfil) -> dict | None:
+    """O país, a moeda e o idioma do que aparece escrito na imagem, ou None quando o canal não diz nenhum.
+
+    O país e a moeda vêm de `lugar` no perfil (pais, moeda, idioma); o idioma, quando não vem ali, é o da voz. Caso real:
+    12-new-aldi-rules-coming-this-autumn-in (UK CartWatch, 2026-11-09): sem o país no pedido, o modelo pôs preço em $,
+    € e R$ num vídeo para o Reino Unido."""
+    perfil = perfil or {}
+    lugar = perfil.get("lugar") or {}
+    voz = perfil.get("voz") or {}
+    codigo = str(voz.get("idioma") or voz.get("idioma_da_voz") or "").lower().split("-")[0]
+    idioma = lugar.get("idioma") or IDIOMAS.get(codigo)
+    pais, moeda = lugar.get("pais"), lugar.get("moeda")
+    if not (pais or moeda or idioma):
+        return None
+    return {"pais": pais, "moeda": moeda, "idioma": idioma}
+
+
+def _linha_do_lugar(lugar) -> str | None:
+    if not lugar:
+        return None
+    frases = []
+    if lugar.get("pais"):
+        frases.append(f"Setting: {lugar['pais']}.")
+    if lugar.get("moeda"):
+        frases.append(f"Any visible price is in {lugar['moeda']}.")
+    if lugar.get("idioma"):
+        frases.append(f"Any visible writing (signs, labels, packaging, screens) is in {lugar['idioma']}.")
+    return " ".join(frases)
+
+
 def prompt_final(cena, perfil, com_referencia):
     img = perfil.get("imagens") or {}
     personagem = perfil.get("personagem") or {}
@@ -654,9 +688,14 @@ def prompt_final(cena, perfil, com_referencia):
                       "framing. Nothing modern in the image.")
     elif img.get("estilo"):
         partes.append(f"Style: {img['estilo'].strip()}")
-    if cena.get("ia_motivo") and o_que_mostrar(cena):
-        # a cena veio para a IA porque a foto do banco mostrava outra coisa: o que ela tem que mostrar, sem erro
-        partes.append(f"The image must clearly show: {o_que_mostrar(cena)}")
+    lugar = _linha_do_lugar(lugar_do_canal(perfil))
+    if lugar:
+        partes.append(lugar)
+    if cena.get("ia_motivo") and o_que_mostrar(cena) and (cena.get("sujeito") or "").strip():
+        # a cena veio para a IA porque a foto do banco mostrava outra coisa: o que ela tem que mostrar, sem erro. Vai
+        # o sujeito (em inglês), não o "mostrar" (em português): o modelo escrevia o "mostrar" no produto ("Manta
+        # térmica elétrica" na embalagem, cena 4 do 12-new-aldi-rules-coming-this-autumn-in)
+        partes.append(f"The image must clearly show: {cena['sujeito'].strip()}")
     if img.get("evitar"):
         partes.append(f"Do not include: {img['evitar'].strip()}")
     return "\n".join(partes)

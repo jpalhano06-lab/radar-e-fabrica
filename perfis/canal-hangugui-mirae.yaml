@@ -14,3 +14,8 @@ imagens:
   provedor_reserva: openrouter
   # reserva_api: false saiu em 2026-11-08 a pedido do usuário ("sempre que acabar o crédito de um vai pro outro"):
   # sem o ChatGPT, as imagens saem pelo OpenRouter, e sem crédito no OpenRouter, pelo ChatGPT
+
+# País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
+lugar:
+  pais: South Korea
+  moeda: "₩ (Korean won)"

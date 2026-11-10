@@ -16,3 +16,8 @@ imagens:
 # Depois da primeira narração, troque pelo número que a fábrica mostrar.
 ritmo:
   caracteres_por_minuto: 360
+
+# País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
+lugar:
+  pais: Japan
+  moeda: "¥ (Japanese yen)"

@@ -32,3 +32,8 @@ publicacao:
 imagens:
   provedor: assinatura
   provedor_reserva: openrouter
+
+# País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
+lugar:
+  pais: the United Kingdom
+  moeda: "£ (pounds sterling)"

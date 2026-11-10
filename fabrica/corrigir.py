@@ -29,6 +29,7 @@ NOTA_PARA_TROCAR = 20  # só abaixo disso o sistema troca sozinho. Entre os dois
 # contra o pedido ideal "dois leões entre tendas à noite" e seriam trocados à toa)
 NOTA_SUJEITO_ERRADO = 35
 NOTA_EPOCA_ERRADA = 30  # cena de época com foto de hoje
+NOTA_LUGAR_ERRADO = 30  # texto, preço ou loja de outro país num canal de um país (lugar.pais no perfil)
 LADO_MAXIMO = 640  # imagem reduzida: uns 300 tokens em vez de 800. O plano gratuito do Groq limita tokens por minuto
 
 VEREDITOS = ("combina", "em_parte", "nao_combina")
@@ -312,11 +313,27 @@ PERGUNTA_EPOCA = {
 }
 
 
+PERGUNTA_LUGAR = {
+    "type": "noul",
+    "instructions": ("O vídeo é para o público do país em pais_do_video. Pela descrição, o que aparece escrito na "
+                     "imagem (placa, etiqueta, preço, embalagem, tela, marca de loja) é desse país, no idioma e na "
+                     "moeda de lá? Imagem sem nada escrito, sem preço e sem marca conta como sim."),
+    "criteria": {
+        "true": "nada escrito, ou texto, preço e marcas do país do vídeo, no idioma e na moeda de lá",
+        "false": ("texto em outro idioma, preço em outra moeda (R$, € ou $ num vídeo do Reino Unido, por exemplo), ou "
+                  "marca ou loja de outro país"),
+    },
+}
+
+
 def _perguntas(estado) -> dict:
-    """As perguntas da cena, numa chamada só e pelo mesmo preço: combina, sujeito e, em cena de época, época."""
+    """As perguntas da cena, numa chamada só e pelo mesmo preço: combina, sujeito e, em cena de época, época; em canal
+    de um país (lugar.pais no perfil), se o que aparece escrito é de lá."""
     perguntas = {**PERGUNTAS_JEV, "sujeito": PERGUNTA_SUJEITO}
     if estado.get("epoca_da_cena"):
         perguntas["epoca"] = PERGUNTA_EPOCA
+    if estado.get("pais_do_video"):
+        perguntas["lugar"] = PERGUNTA_LUGAR
     return perguntas
 
 
@@ -365,6 +382,13 @@ def veredito(legenda, nota, sujeito=None, epoca=None, quem="o Jev") -> dict:
             "nota": nota, "sujeito": sujeito, "epoca": epoca, "motivo": motivo, "busca_nova": "", "prompt_novo": ""}
 
 
+def de_outro_pais(avaliacao) -> bool:
+    """O Jev viu texto, preço ou loja de outro país num canal de um país. Vale mesmo com nota alta de combinar: a placa
+    "Liebe Kunden" levou 86 por mostrar as prateleiras certas (12-new-aldi-rules-coming-this-autumn-in, cena 1)."""
+    lugar = (avaliacao or {}).get("lugar")
+    return lugar is not None and lugar < NOTA_LUGAR_ERRADO
+
+
 def errada(avaliacao, nota_para_trocar=NOTA_PARA_TROCAR) -> bool:
     """A cena mostra outra coisa (sujeito errado), é de outra época, ou não combina de jeito nenhum. Só essa troca
     sozinha, e com a IA ligada vai para a IA. Sujeito certo com nota baixa é cena genérica e fica."""
@@ -374,6 +398,8 @@ def errada(avaliacao, nota_para_trocar=NOTA_PARA_TROCAR) -> bool:
     if sujeito is not None and sujeito < NOTA_SUJEITO_ERRADO:
         return True
     if epoca is not None and epoca < NOTA_EPOCA_ERRADA:
+        return True
+    if de_outro_pais(avaliacao):
         return True
     return avaliacao["nota"] < nota_para_trocar and (sujeito is None or sujeito < 60)
 
@@ -524,6 +550,10 @@ def _julgar_com_jev(projeto, cena, legenda, vizinhas, log):
         estado["o_que_a_cena_deve_mostrar"] = cena["mostrar"]
     if midia.e_de_epoca(cena):
         estado["epoca_da_cena"] = str(cena["epoca"])
+    lugar = imagens.lugar_do_canal(getattr(projeto, "perfil", None))
+    if lugar and lugar.get("pais"):
+        # placa "Liebe Kunden" (loja alemã) num vídeo do Reino Unido levou 86: o Jev não sabia o país do vídeo
+        estado["pais_do_video"] = ", ".join(str(v) for v in (lugar["pais"], lugar.get("idioma"), lugar.get("moeda")) if v)
     pessoa = _pessoa_da_cena(projeto, cena)
     if pessoa:
         estado["pessoa_citada"] = pessoa
@@ -554,14 +584,20 @@ def _julgar_com_jev(projeto, cena, legenda, vizinhas, log):
         except (KeyError, TypeError, ValueError):
             return None
     sujeito, epoca = outra("sujeito"), outra("epoca") if "epoca_da_cena" in estado else None
+    lugar = outra("lugar") if "pais_do_video" in estado else None
     veredito = "combina" if nota >= 80 else "em_parte" if nota >= 50 else "nao_combina"
     motivo = f"o Jev deu {nota}% de chance de combinar com a narração"
     if sujeito is not None:
         motivo += f", {sujeito}% de mostrar o sujeito certo"
     if epoca is not None:
         motivo += f" e {epoca}% de ser da época"
-    return {"legenda": legenda, "veredito": veredito, "nota": nota, "sujeito": sujeito, "epoca": epoca,
-            "motivo": motivo, "busca_nova": "", "prompt_novo": ""}
+    if lugar is not None:
+        motivo += f" e {lugar}% de o texto e o preço serem do país do vídeo"
+    avaliacao = {"legenda": legenda, "veredito": veredito, "nota": nota, "sujeito": sujeito, "epoca": epoca,
+                 "motivo": motivo, "busca_nova": "", "prompt_novo": ""}
+    if lugar is not None:
+        avaliacao["lugar"] = lugar
+    return avaliacao
 
 
 _MAPAS = {}
@@ -806,7 +842,7 @@ def _conferencia(a, **extra) -> dict:
     """A conferência como fica guardada na cena. Uma forma só para _guardar e _restaurar: a restauração gravava sem o
     sujeito e a época, e uma foto de sujeito errado (20%) deixava de contar como errada depois de voltar."""
     return {"legenda": a["legenda"], "veredito": a["veredito"], "nota": a["nota"], "motivo": a["motivo"], **extra,
-            **{k: a[k] for k in ("sujeito", "epoca", "prompt_novo") if a.get(k) is not None}}
+            **{k: a[k] for k in ("sujeito", "epoca", "lugar", "prompt_novo") if a.get(k) is not None}}
 
 
 def _guardar(projeto, avaliacoes, rodada):
