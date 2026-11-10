@@ -11,6 +11,7 @@ voz:
 
 imagens:
   provedor: assinatura
+  pessoas: true     # gente na tela: comprador na ação, pessoa comum falando para a câmera (2026-11-09)
   provedor_reserva: openrouter
 
 # País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)

@@ -152,6 +152,15 @@ Escreva o prompt em todas as cenas, inclusive nas reais, porque ele é usado cas
 
 SEM_MIDIA = "Tipo das cenas\nTodas as cenas são do tipo ia, com busca vazia."
 
+# imagens.pessoas no perfil (canal de mercado). Caso real em 2026-11-09: o vídeo do Aldi da Austrália do Robô do Dotti
+# segurou 7 min e o nosso do UK CartWatch 3 min; nos quadros dele frase de explicação vira gente falando para a câmera
+# e frase concreta vira a cena com gente, e no nosso a frase abstrata virava prateleira vazia
+SECAO_PESSOAS = """Pessoas na tela
+Este canal fala com quem faz compras, e quem assiste fica quando vê gente parecida com ele. Esta regra vale mais que a regra 8.
+- Frase concreta (entrar na loja, pegar o carrinho, pagar, comparar preço, ler a etiqueta): a cena mostra um comprador comum fazendo a ação narrada, com o rosto ou as mãos à vista. Nada de prateleira vazia ou corredor sem ninguém, a não ser que a narração fale disso.
+- Frase abstrata, de explicação, número, notícia ou opinião (lucro da empresa, preço subindo, regra nova, conselho): a cena mostra uma pessoa comum do país do canal falando para a câmera, filmada no celular, como num vlog: no carro, na cozinha, no sofá, no estacionamento do mercado. Varie a pessoa, a idade e o lugar entre essas cenas.
+- As pessoas parecem gente de verdade do dia a dia, com roupa comum e luz natural, e não modelos nem atores. Descreva no prompt quem é, o que faz e a expressão."""
+
 
 SEM_TEXTOS = (
     "Textos na tela\nEste canal não usa textos na tela. Em texto_tela use tipo nenhum, "
@@ -1940,6 +1949,8 @@ def _secoes(perfil):
         )
     else:
         secao_personagem = "Personagem\nEste canal não tem personagem fixa. Marque personagem como false em todas as cenas."
+    if (perfil.get("imagens") or {}).get("pessoas"):
+        secao_personagem += "\n\n" + SECAO_PESSOAS
 
     return dict(secao_midia=secao_midia, secao_bancos=secao_bancos, secao_textos=secao_textos, secao_efeitos=secao_efeitos,
                 secao_personagem=secao_personagem, diretrizes=(perfil.get("diretrizes") or "Nenhuma.").strip())

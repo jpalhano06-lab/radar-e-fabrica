@@ -691,6 +691,10 @@ def prompt_final(cena, perfil, com_referencia):
     lugar = _linha_do_lugar(lugar_do_canal(perfil))
     if lugar:
         partes.append(lugar)
+    if img.get("pessoas"):
+        # canal de mercado (cenas.SECAO_PESSOAS): a gente da cena parece cliente de verdade, não foto de banco de imagens
+        partes.append("People in the image look like ordinary everyday local people, not models: casual clothes, "
+                      "natural expressions, candid phone-photo feel.")
     if cena.get("ia_motivo") and o_que_mostrar(cena) and (cena.get("sujeito") or "").strip():
         # a cena veio para a IA porque a foto do banco mostrava outra coisa: o que ela tem que mostrar, sem erro. Vai
         # o sujeito (em inglês), não o "mostrar" (em português): o modelo escrevia o "mostrar" no produto ("Manta
