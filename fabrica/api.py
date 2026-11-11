@@ -835,9 +835,70 @@ def entregas_que_faltam() -> list:
     return faltam
 
 
+# O render só existia na memória da fábrica: ela caindo no meio dele (pedido 92, 2026-11-10 22:01, criação concluída
+# e sem final.mp4) deixava o vídeo parado para sempre, porque a partida só retomava criações e entregas. Esta marca
+# fica na pasta do projeto enquanto o render roda e sai quando ele termina, bem ou com erro.
+RENDER_ANDAMENTO = "render_andamento.json"
+RENDER_RETOMADAS_MAX = 2  # o mesmo render derrubando a fábrica (falta de memória) não vira um ciclo sem fim
+
+
+def _marcar_render(pasta: Path, payload: "RenderPayload") -> None:
+    marca = pasta / RENDER_ANDAMENTO
+    retomadas = 0
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        retomadas = int(json.loads(marca.read_text(encoding="utf-8")).get("retomadas", 0))
+    with contextlib.suppress(OSError):
+        marca.write_text(json.dumps({"inicio": datetime.now().isoformat(timespec="seconds"), "retomadas": retomadas,
+                                     "payload": payload.model_dump(mode="json")}, ensure_ascii=False), encoding="utf-8")
+
+
+def renders_interrompidos() -> list:
+    """Os projetos cujo render estava rodando quando a fábrica desligou, com o pedido do render e quantas vezes ele
+    já foi retomado."""
+    if not PROJETOS.exists():
+        return []
+    achados = []
+    for pasta in sorted(PROJETOS.iterdir()):
+        marca = pasta / RENDER_ANDAMENTO
+        try:
+            if not marca.is_file():
+                continue
+            dados = json.loads(marca.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        achados.append((pasta.name, dados.get("payload") or {}, int(dados.get("retomadas") or 0)))
+    return achados
+
+
+def retomar_renders_interrompidos() -> list:
+    """Volta a renderizar o que a fábrica desligada interrompeu. Devolve os projetos retomados."""
+    retomados = []
+    for nome, pedido, retomadas in renders_interrompidos():
+        marca = PROJETOS / nome / RENDER_ANDAMENTO
+        if retomadas >= RENDER_RETOMADAS_MAX:
+            print(f"  o render de {nome} já foi retomado {retomadas} vezes e a fábrica caiu de novo: "
+                  "não retomo mais, clique em Renderizar")
+            with contextlib.suppress(OSError):
+                marca.unlink()
+            continue
+        try:
+            with contextlib.suppress(OSError):
+                marca.write_text(json.dumps({**json.loads(marca.read_text(encoding="utf-8")),
+                                             "retomadas": retomadas + 1}, ensure_ascii=False), encoding="utf-8")
+            disparar_render(nome, RenderPayload(**pedido), _RodaJa(nome))
+            print(f"  retomando o render de {nome}, que a fábrica desligada interrompeu")
+            retomados.append(nome)
+        except HTTPException as erro:
+            print(f"  o render de {nome} não foi retomado: {erro.detail}")
+        except (Exception, SystemExit) as erro:
+            print(f"  o render de {nome} não foi retomado: {str(erro)[:200]}")
+    return retomados
+
+
 def retomar_criacoes_interrompidas() -> None:
-    """Na partida da fábrica: toda criação que estava andando quando ela desligou volta a andar, e o vídeo pronto que
-    não chegou à pasta do computador é entregue (com o kit, as capas e os shorts que faltarem)."""
+    """Na partida da fábrica: toda criação que estava andando quando ela desligou volta a andar, o render interrompido
+    volta a renderizar, e o vídeo pronto que não chegou à pasta do computador é entregue (com o kit, as capas e os
+    shorts que faltarem)."""
     if not PROJETOS.exists():
         return
     for pasta in sorted(PROJETOS.iterdir()):
@@ -845,7 +906,10 @@ def retomar_criacoes_interrompidas() -> None:
         if estado and estado.get("status") in ("processando", "aguardando"):
             print(f"  retomando a criação de {pasta.name}, que foi interrompida")
             iniciar_criacao(pasta.name)
+    renderizando = set(retomar_renders_interrompidos())  # o render que termina já entrega
     for nome in entregas_que_faltam():
+        if nome in renderizando:
+            continue
         print(f"  {nome} ficou pronto e não chegou à pasta do computador: entregando agora")
         iniciar_publicacao(nome)
 
@@ -2819,6 +2883,15 @@ def disparar_render(nome: str, payload: RenderPayload, bg_tasks: BackgroundTasks
         }
 
     def render_worker():
+        _marcar_render(pasta, payload)
+        try:
+            _render_worker()
+        finally:
+            # terminou (bem ou com erro): só a fábrica caindo no meio deixa a marca para a partida retomar
+            with contextlib.suppress(OSError):
+                (pasta / RENDER_ANDAMENTO).unlink()
+
+    def _render_worker():
         try:
             total_clipes = 1
             clipes_prontos = 0
