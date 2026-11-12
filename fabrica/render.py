@@ -1083,7 +1083,10 @@ def _trilha(projeto, duracao, extras=(), sons=(), atraso=0.0, musica_abertura=No
         valor = max(round(segundos * 1000), 0)
         return f"adelay={valor}|{valor}"
 
-    partes.append(f"[{entrada(voz)}:a]{ms(atraso)}[voz]")
+    # narracao_no_video: false (o perfil sem-narracao, o Canal de teste de 5 min do Radar): a voz do computador só mediu
+    # o tempo das cenas e entra muda. Ela continua no grafo (volume 0) para o tamanho da trilha não mudar
+    muda = ",volume=0" if projeto.perfil.get("narracao_no_video") is False else ""
+    partes.append(f"[{entrada(voz)}:a]{ms(atraso)}{muda}[voz]")
     fontes.append("[voz]")
     if musica:
         partes.append(f"[{entrada(musica)}:a]{ms(atraso)}[musica]")
