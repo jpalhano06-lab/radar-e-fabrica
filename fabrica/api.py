@@ -421,6 +421,40 @@ def _marcar_sem_foto_no_banco(p: Projeto, log=print) -> list[int]:
     return [c["n"] for c in marcadas]
 
 
+def _estender_anterior(p: Projeto, log=print) -> list[int]:
+    """Canal sem IA: a cena que nenhum banco tem fica com a imagem da cena anterior, que segue na tela.
+
+    Pedido do usuário em 2026-11-13: no a-journey-through-orions-belt (No narration, sem IA) a criação parou a 96%
+    pedindo foto de 4 cenas (constelação se desfazendo, sistema estelar de Mintaka). Agora a imagem de antes se
+    estende por cima delas. A cópia leva fonte "estendida" para a varredura de repetidas não tirá-la de novo. Sem
+    cena anterior com imagem (a primeira do vídeo), usa a seguinte."""
+    dados = p.ler_json("cenas.json")
+    cenas = sorted(dados["cenas"], key=lambda c: c["n"])
+    sem = set(_cenas_sem_arquivo(p.pasta, cenas))
+    if not sem:
+        return []
+
+    def com_imagem(c):
+        return c["n"] not in sem and (c.get("midia") or {}).get("arquivo")
+
+    estendidas = []
+    for i, c in enumerate(cenas):
+        if c["n"] not in sem:
+            continue
+        fonte = next((o for o in reversed(cenas[:i]) if com_imagem(o)), None) \
+            or next((o for o in cenas[i + 1:] if com_imagem(o)), None)
+        if not fonte:
+            continue
+        m = fonte["midia"]
+        c["midia"] = {"arquivo": m["arquivo"], "tipo": m.get("tipo", "foto"), "fonte": "estendida", "de": fonte["n"]}
+        sem.discard(c["n"])
+        estendidas.append(c["n"])
+    if estendidas:
+        p.salvar_json("cenas.json", dados)
+        log("  canal sem IA: a imagem da cena anterior se estende por " + ", ".join(map(str, estendidas)))
+    return estendidas
+
+
 def _executar_criacao(nome: str, task_id: str) -> None:
     """A esteira inteira. Pode ser chamada de novo a qualquer momento: pula o que já foi feito."""
     with TAREFAS_LOCK:
@@ -686,6 +720,11 @@ def _esteira(nome: str, task_id: str) -> None:
         _atualizar(task_id, progresso_pct=97,
                    mensagem=f"Imagem de IA para {len(cenas_sem_arquivo(p))} cena(s) que os bancos não tinham...")
         _etapa(task_id, "Imagens de IA", lambda: imagens.gerar(p, log=log_w))
+    if cenas_sem_arquivo(p) and not midia.ia_ativa(p):
+        # canal sem IA: em vez de parar pedindo foto, a imagem da cena anterior continua (pedido de 2026-11-13)
+        _atualizar(task_id, progresso_pct=97,
+                   mensagem=f"Estendendo a imagem anterior sobre {len(cenas_sem_arquivo(p))} cena(s) sem foto nos bancos...")
+        _estender_anterior(p, log_w)
     if cenas_sem_arquivo(p):
         # nada do assunto nos bancos nem em outra cena do mesmo assunto: pôr outra coisa seria gafe, então pede ajuda
         por_n = {c["n"]: c for c in p.ler_json("cenas.json")["cenas"]}

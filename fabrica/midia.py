@@ -2294,7 +2294,8 @@ def cenas_repetidas(projeto) -> list[int]:
     vistas_chave, vistas_arquivo, vistas_impressao, repetidas = {}, {}, [], []
     for c in sorted(projeto.ler_json("cenas.json").get("cenas", []), key=lambda x: x["n"]):
         m = c.get("midia") or {}
-        if not m.get("arquivo") or m.get("fonte") in ("motion_ia", "animation_ai"):
+        if not m.get("arquivo") or m.get("fonte") in ("motion_ia", "animation_ai", "estendida"):
+            # "estendida": canal sem IA, a cena sem foto nos bancos segue com a imagem da anterior (api._estender_anterior)
             continue  # clipe de motion não é foto: as capas têm o mesmo fundo creme e pareciam repetidas (31 de 96 trocadas por foto)
         chave = f"{m.get('fonte')}:{m.get('id')}" if m.get("fonte") and m.get("id") else None
         caminho = _imagem_de_comparar(projeto, m)
