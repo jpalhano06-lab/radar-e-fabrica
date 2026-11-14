@@ -29,9 +29,11 @@ ESTILO_MINIMO_FOTOS = 0.70  # do material real, pelo menos isso tem que ser foto
 # nunca pedia vídeo e, sem a regra do começo, o 25-cavalos saiu com 505 fotos e nenhum vídeo de banco. A cena que não
 # acha vídeo do assunto cai para foto na busca (midia.Buscador.candidatos), então o mínimo nunca deixa cena vazia
 ESTILO_MINIMO_VIDEO = 0.25
-# fatias de vídeo por trecho do começo: (até o segundo, fatia). Vazio desde 2026-11-06, a pedido do usuário: o começo segue
-# a mesma regra do resto do vídeo. Era 100% de vídeo nos 40 s iniciais e 70% até os 5 minutos (pedido de 2026-10-25)
-ESTILO_VIDEO_NO_INICIO = ()
+# fatias de vídeo por trecho do começo: (até o segundo, fatia). Os primeiros 40 s são o gancho: todo material real é vídeo;
+# depois, 70% vídeo até os 5 minutos (pedido de 2026-10-25, tirado em 2026-11-06 e de volta em 2026-11-14, a pedido do
+# usuário). Só não é vídeo quando não há vídeo do assunto: a busca de vídeo sem nenhum que cite o assunto procura foto
+# (Buscador.candidatos). Época, arquivo e enumeração seguem como foto
+ESTILO_VIDEO_NO_INICIO = ((40.0, 1.0), (300.0, 0.70))
 # Sem teto de IA (desde 2026-10-03, pedido do usuário): cena que não existe em foto ou que veio errada recebe imagem de
 # IA, quantas forem. O teto de 15% transformava em foto de banco as cenas que o agente marcou como IA, e foi assim que
 # o virou-filme-em-1996 saiu com 86 cenas de outra coisa. Com a IA desligada (ia.ativa: false), nenhuma cena é de IA

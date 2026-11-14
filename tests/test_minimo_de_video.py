@@ -2,7 +2,15 @@
 
 O 25-cavalos saiu com 505 fotos e nenhum vídeo de banco: o agente não tinha o tipo video_real e, sem a regra do
 começo, nada trocava foto por vídeo."""
+import pytest
+
 from fabrica import cenas, roteirista
+
+
+@pytest.fixture(autouse=True)
+def _sem_a_regra_do_comeco(monkeypatch):
+    """Estes testes medem o mínimo e o teto do vídeo inteiro; a regra do começo (2026-11-14) tem teste próprio."""
+    monkeypatch.setattr(cenas, "ESTILO_VIDEO_NO_INICIO", ())
 
 
 def _fotos(n, **extra):

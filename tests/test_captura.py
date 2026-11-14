@@ -94,15 +94,8 @@ def test_cena_de_epoca_vai_ao_arquivo_e_nunca_vira_video():
     assert all(c["tipo"] == "foto_real" for c in lista if c.get("epoca"))
 
 
-def test_o_comeco_nao_ganha_video_a_mais():
-    """O mínimo de vídeo vale para o vídeo inteiro por igual: o começo não ganha mais que o resto."""
-    lista = [{"n": i, "tipo": "foto_real", "ini": i * 4.0, "personagem": False} for i in range(150)]  # 10 min
-    cenas_mod._balancear_foto_e_video(lista, log=lambda *a: None)
-    comeco = [c for c in lista if c["ini"] < 60]
-    assert sum(c["tipo"] == "video_real" for c in comeco) <= round(len(comeco) * cenas_mod.ESTILO_MINIMO_VIDEO) + 1
-
-
-def test_video_continua_com_o_teto_de_30_por_cento():
+def test_video_continua_com_o_teto_de_30_por_cento(monkeypatch):
+    monkeypatch.setattr(cenas_mod, "ESTILO_VIDEO_NO_INICIO", ())  # o teto do resto do vídeo, sem a regra do começo
     lista = [{"n": i, "tipo": "video_real", "ini": i * 4.0, "personagem": False} for i in range(100)]
     cenas_mod._balancear_foto_e_video(lista, log=lambda *a: None)
     assert sum(c["tipo"] == "video_real" for c in lista) == 30
@@ -373,3 +366,15 @@ def test_completadas_sem_julgamento_vao_ao_jev(monkeypatch):
     monkeypatch.setattr(corrigir, "corrigir", lambda projeto, numeros, **kw: pedidas.setdefault("n", numeros))
     corrigir.conferir_completadas(P(), log=lambda *x: None)
     assert pedidas["n"] == {51}
+
+
+def test_comeco_volta_a_ser_de_video():
+    """Pedido do usuário em 2026-11-14: os primeiros 40 s todo vídeo e 70% de vídeo até os 5 minutos."""
+    from fabrica import cenas
+
+    assert cenas.ESTILO_VIDEO_NO_INICIO == ((40.0, 1.0), (300.0, 0.70))
+    lista = [{"n": i, "ini": i * 4.0, "tipo": "foto_real", "busca": f"street market {i}"} for i in range(120)]
+    cenas._balancear_foto_e_video(lista, log=lambda *_: None)
+    assert all(c["tipo"] == "video_real" for c in lista if c["ini"] < 40)
+    ate_5min = [c for c in lista if 40 <= c["ini"] < 300]
+    assert round(sum(c["tipo"] == "video_real" for c in ate_5min) / len(ate_5min), 1) == 0.7
