@@ -16,6 +16,7 @@ por padrão, trechos curtos, sem o som original, crédito automático). ``garimp
 qualquer vídeo, como o Robô do Dotti faz, e aí o trecho é obra de terceiro: pode render reivindicação de direitos.
 O registro guarda o canal e o segundo de cada trecho, para o CREDITS.txt do vídeo.
 """
+import io
 import json
 import os
 import random
@@ -248,6 +249,100 @@ def _miniatura(entrada, vid) -> str:
 def _licenca(canal: str, cc: bool) -> str:
     base = "Trecho do YouTube em Creative Commons" if cc else "Trecho do YouTube"
     return f"{base}, canal {canal}" if canal else base
+
+
+PRAZO_QUADROS = 30  # segundos para o storyboard do vídeo chegar; sem ele, o corte volta a ser sorteado
+QUADROS_NA_FOLHA = 16  # quadros do vídeo mostrados ao modelo de visão (4 x 4)
+
+
+def _storyboard(candidato, conta) -> dict:
+    """O formato de storyboard do vídeo (o sb0, maior, ou o sb1), lido pelo yt-dlp -j. Vazio quando não vem."""
+    comando = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-playlist", "-j",
+               "--socket-timeout", "20"]
+    if conta:
+        comando += ["--cookies", str(conta)]
+    try:
+        codigo, _erro, saida = _rodar_com_prazo(comando + [candidato["arquivo"]], PRAZO_QUADROS)
+        if codigo != 0:
+            return {}
+        formatos = {f.get("format_id"): f for f in (json.loads(saida).get("formats") or [])}
+    except (TrechoIndisponivel, ValueError):
+        return {}
+    return next((formatos[i] for i in ("sb0", "sb1") if formatos.get(i, {}).get("fragments")), {})
+
+
+def tempos_dos_quadros(storyboard: dict) -> list:
+    """[(segundo, fragmento, linha, coluna)] de cada quadro do storyboard: cada fragmento é uma grade de quadros."""
+    linhas, colunas = int(storyboard.get("rows") or 0), int(storyboard.get("columns") or 0)
+    if not linhas or not colunas:
+        return []
+    fps = float(storyboard.get("fps") or 0)
+    quadros, agora = [], 0.0
+    for i, fragmento in enumerate(storyboard.get("fragments") or []):
+        duracao = float(fragmento.get("duration") or 0)
+        passo = 1 / fps if fps else duracao / (linhas * colunas)
+        # o último fragmento tem menos quadros: o resto da grade é preto
+        quantos = min(linhas * colunas, max(1, round(duracao / passo))) if passo else linhas * colunas
+        for k in range(quantos):
+            quadros.append((round(agora + k * passo, 1), i, k // colunas, k % colunas))
+        agora += duracao
+    return quadros
+
+
+def escolher_quadros(quadros: list, duracao: float, segundos: float, quantos: int = QUADROS_NA_FOLHA) -> list:
+    """Os quadros espalhados pelo vídeo, depois da abertura e longe do fim (o trecho inteiro tem de caber)."""
+    cedo = max(2.0, duracao * PULO_DA_ABERTURA) if duracao > segundos * 3 else 0.0
+    validos = [q for q in quadros if cedo <= q[0] <= max(cedo, duracao - segundos - 2.0)]
+    if len(validos) <= quantos:
+        return validos
+    return [validos[round(i * (len(validos) - 1) / (quantos - 1))] for i in range(quantos)]
+
+
+def folha_de_quadros(candidato, destino, cfg=None, http=None) -> dict:
+    """Monta em ``destino`` (jpg) uma folha numerada com quadros do vídeo inteiro, tirados do storyboard do YouTube (um
+    pedido leve, sem baixar o vídeo). Devolve {número: segundo do quadro}; vazio quando o vídeo não tem storyboard."""
+    import httpx
+    from PIL import Image, ImageDraw
+
+    cfg = cfg or {}
+    segundos = float(cfg.get("segundos") or TRECHO)
+    duracao = float(candidato.get("yt_duracao") or 0)
+    if ip_quente() or duracao < segundos + 4:
+        return {}
+    livres = _contas_livres(contas_de_cookies(cfg))
+    with _copia_da_conta(livres[0] if livres else None) as copia:
+        storyboard = _storyboard(candidato, copia)
+    escolhidos = escolher_quadros(tempos_dos_quadros(storyboard), duracao, segundos)
+    if not escolhidos:
+        return {}
+    largura, altura = int(storyboard.get("width") or 160), int(storyboard.get("height") or 90)
+    cliente = http or httpx.Client(timeout=20, follow_redirects=True)
+    grades = {}
+    try:
+        for i in sorted({q[1] for q in escolhidos}):
+            r = cliente.get(storyboard["fragments"][i]["url"])
+            r.raise_for_status()
+            grades[i] = Image.open(io.BytesIO(r.content)).convert("RGB")
+    except (httpx.HTTPError, OSError, KeyError):
+        return {}
+    finally:
+        if http is None:
+            cliente.close()
+    lado = 4
+    celula = (320, 180)
+    folha = Image.new("RGB", (celula[0] * lado, celula[1] * lado), "black")
+    desenho = ImageDraw.Draw(folha)
+    tempos = {}
+    for numero, (segundo, i, linha, coluna) in enumerate(escolhidos, 1):
+        quadro = grades[i].crop((coluna * largura, linha * altura, (coluna + 1) * largura, (linha + 1) * altura))
+        x, y = ((numero - 1) % lado) * celula[0], ((numero - 1) // lado) * celula[1]
+        folha.paste(quadro.resize(celula), (x, y))
+        desenho.rectangle((x, y, x + 34, y + 24), fill="black")
+        desenho.text((x + 6, y + 5), str(numero), fill="yellow")
+        tempos[numero] = segundo
+    Path(destino).parent.mkdir(parents=True, exist_ok=True)
+    folha.save(destino, quality=85)
+    return tempos
 
 
 def _inicio_do_trecho(duracao, segundos) -> float:
@@ -589,8 +684,11 @@ def _motivo_do_erro(texto: str) -> str:
     return ((erros or linhas or ["sem mensagem"])[-1])[:160]
 
 
-def baixar_trecho(candidato, destino, cfg=None, log=print) -> dict:
+def baixar_trecho(candidato, destino, cfg=None, log=print, inicio=None) -> dict:
     """Baixa um trecho do vídeo do candidato em ``destino`` (mp4). Devolve onde o trecho começa e termina.
+
+    ``inicio``: o segundo que o modelo de visão apontou na folha de quadros (midia._momento_pelos_quadros). Sem ele o
+    corte é sorteado, e só 13 de 639 trechos sorteados passavam no julgamento (nota mediana 8, 2026-11-14).
 
     Tenta cada conta fora de castigo e por último sem conta. Reclamação de conta castiga a conta e passa para a
     seguinte; erro do vídeo (apagado, bloqueado) não é culpa da conta e encerra na hora. Tudo que falha aqui sai
@@ -600,12 +698,14 @@ def baixar_trecho(candidato, destino, cfg=None, log=print) -> dict:
     prazo = float(cfg.get("prazo") or PRAZO_TRECHO)
     duracao = float(candidato.get("yt_duracao") or 0) or segundos + 4.0
     segundos = min(segundos, max(2.0, duracao - 2.0))
-    inicio = _inicio_do_trecho(duracao, segundos)
-    fim = min(duracao, inicio + segundos)
     destino = Path(destino)
 
     if ip_quente():
         raise TrechoIndisponivel("o YouTube barrou este endereço; o garimpo volta em até uma hora")
+    escolhido = inicio is not None
+    inicio = (round(min(max(0.0, float(inicio)), max(0.0, duracao - segundos)), 1) if escolhido
+              else _inicio_do_trecho(duracao, segundos))
+    fim = min(duracao, inicio + segundos)
     motivo, saida = "", ""
     for conta in [*_contas_livres(contas_de_cookies(cfg)), None]:
         with _copia_da_conta(conta) as copia:
@@ -625,7 +725,7 @@ def baixar_trecho(candidato, destino, cfg=None, log=print) -> dict:
     if not destino.exists():
         raise TrechoIndisponivel("o garimpo baixou, mas o arquivo do trecho não apareceu")
     canal = next((_imprimivel(l).strip() for l in saida.splitlines() if l.strip() and l.strip() != "NA"), "")
-    return {"inicio": inicio, "fim": fim, "canal": canal}
+    return {"inicio": inicio, "fim": fim, "canal": canal, "escolhido": escolhido}
 
 
 def em_pe(arquivo) -> bool:

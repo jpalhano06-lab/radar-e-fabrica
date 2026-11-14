@@ -2509,6 +2509,46 @@ def _baixar_midia_agora(projeto, cena, candidato, http):
     return registro
 
 
+INSTRUCOES_QUADRO = """Você escolhe o momento de um vídeo do YouTube que vai virar um trecho de 10 segundos numa cena de
+um documentário. A folha tem quadros numerados, tirados do vídeo inteiro em ordem. Escolha o número do quadro que mostra
+o que a cena pede, grande e bem visível, como imagem de verdade (lugar, objeto, gente na ação). Evite quadro com texto
+grande na tela, legenda, logotipo de outro canal, apresentador falando para a câmera, tela preta ou vinheta. Se nenhum
+quadro mostra o que a cena pede, responda 0."""
+ESQUEMA_QUADRO = {"type": "object", "properties": {"numero": {"type": "integer"}, "motivo": {"type": "string"}},
+                  "required": ["numero"]}
+
+
+def _momento_pelos_quadros(projeto, cena, candidato, base) -> float | None:
+    """O segundo do vídeo em que o trecho do garimpo começa, apontado pelo modelo de visão numa folha com quadros do
+    vídeo inteiro. Antes o corte era sorteado e só 13 de 639 trechos passavam no julgamento (nota mediana 8,
+    2026-11-14). None (corte sorteado, como antes) sem storyboard, sem visão ou quando nenhum quadro serve.
+    garimpo.corte_pelos_quadros: false desliga."""
+    from . import garimpo, openrouter_local
+
+    cfg = garimpo.cfg_do_projeto(projeto)
+    if cfg.get("corte_pelos_quadros") is False or projeto.offline:
+        return None
+    folha = projeto.caminho("garimpo_provas", f"{base}_{candidato.get('id', 'video')}_quadros.jpg")
+    try:
+        tempos = garimpo.folha_de_quadros(candidato, folha, cfg)
+        if not tempos:
+            return None
+        cena_pede = cena.get("busca") or cena.get("mostrar") or ""
+        resposta = openrouter_local.VISAO.perguntar(
+            projeto, "garimpo: momento do trecho", INSTRUCOES_QUADRO,
+            f"A narração da cena: {cena.get('texto', '')}\nO que a cena tem de mostrar: {cena_pede}\n"
+            f"Números válidos: 1 a {len(tempos)}, ou 0.", ESQUEMA_QUADRO, imagens=[folha], temperatura=0) or {}
+        numero = int(resposta.get("numero", 0))
+    except (Exception, SystemExit):  # noqa: BLE001 - sem a folha ou sem visão, o corte é sorteado como antes
+        return None
+    if numero == 0:
+        # o vídeo inteiro não mostra a cena: nem baixa (o trecho sorteado seria reprovado), passa para o próximo
+        garimpo.guardar_prova(projeto, cena, {**candidato, "arquivo": ""}, "reprovado", "nenhum quadro mostra a cena")
+        raise garimpo.TrechoIndisponivel(f"nenhum quadro de {candidato.get('id')} mostra a cena")
+    # o quadro do storyboard é uma amostra de poucos segundos: o trecho começa um pouco antes dele
+    return max(0.0, tempos[numero] - 1.0) if numero in tempos else None
+
+
 def _trazer_midia(projeto, cena, candidato, http, base):
     n = cena["n"]
     if candidato["tipo"] == "video":
@@ -2520,7 +2560,8 @@ def _trazer_midia(projeto, cena, candidato, http, base):
             # de onde ele veio exatamente, e a capa é um quadro do trecho, não a arte da miniatura
             from . import garimpo
 
-            trecho = garimpo.baixar_trecho(candidato, arquivo, garimpo.cfg_do_projeto(projeto))
+            trecho = garimpo.baixar_trecho(candidato, arquivo, garimpo.cfg_do_projeto(projeto),
+                                           inicio=_momento_pelos_quadros(projeto, cena, candidato, base))
             garimpo.capa_do_trecho(arquivo, capa)
             canal = candidato.get("autor") or trecho.get("canal") or ""
             candidato = {**candidato, "pagina": f"{candidato['pagina']}&t={int(trecho['inicio'])}", "autor": canal,

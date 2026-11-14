@@ -855,3 +855,43 @@ def test_testar_conta_diz_se_esta_logada(monkeypatch):
 def test_testar_conta_que_nao_existe():
     with pytest.raises(ValueError):
         garimpo.testar_conta("nada")
+
+
+
+# ---- o corte cai no quadro que o modelo de visão aponta no storyboard (2026-11-14: só 13 de 639 sorteados passavam)
+
+_SB = {"rows": 2, "columns": 2, "fps": 0.2, "width": 160, "height": 90,
+       "fragments": [{"url": "a", "duration": 20.0}, {"url": "b", "duration": 20.0}, {"url": "c", "duration": 6.0}]}
+
+
+def test_tempos_dos_quadros_seguem_a_grade_e_o_ultimo_fragmento_tem_menos():
+    quadros = garimpo.tempos_dos_quadros(_SB)
+    assert quadros[:4] == [(0.0, 0, 0, 0), (5.0, 0, 0, 1), (10.0, 0, 1, 0), (15.0, 0, 1, 1)]
+    assert quadros[4] == (20.0, 1, 0, 0)
+    assert [q for q in quadros if q[1] == 2] == [(40.0, 2, 0, 0)]  # 6 s a 1 quadro a cada 5 s: um só, sem preto
+
+
+def test_escolher_quadros_pula_a_abertura_e_o_fim_e_espalha():
+    quadros = [(float(s), 0, 0, 0) for s in range(0, 600, 5)]
+    escolhidos = garimpo.escolher_quadros(quadros, 600, 10, quantos=4)
+    assert len(escolhidos) == 4
+    assert escolhidos[0][0] >= 600 * garimpo.PULO_DA_ABERTURA and escolhidos[-1][0] <= 600 - 10 - 2
+
+
+def test_sem_storyboard_nao_ha_quadros():
+    assert garimpo.tempos_dos_quadros({}) == []
+
+
+def test_inicio_escolhido_vale_e_fica_dentro_do_video(monkeypatch, tmp_path):
+    monkeypatch.setattr(garimpo, "ip_quente", lambda: False)
+    monkeypatch.setattr(garimpo, "contas_de_cookies", lambda cfg=None: [])
+    vistos = []
+
+    def rodar(comando, prazo):
+        vistos.append(comando[comando.index("--download-sections") + 1])
+        (tmp_path / "t.mp4").write_bytes(b"x")
+        return 0, "", "Canal"
+
+    monkeypatch.setattr(garimpo, "_rodar_com_prazo", rodar)
+    r = garimpo.baixar_trecho({"id": "v", "arquivo": "u", "yt_duracao": 100}, tmp_path / "t.mp4", {}, inicio=95)
+    assert r["escolhido"] and r["inicio"] == 90.0 and vistos == ["*90.0-100.0"]
