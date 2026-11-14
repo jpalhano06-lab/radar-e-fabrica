@@ -2889,6 +2889,59 @@ def _salvar_cenas(nome: str, payload: SalvarCenasPayload):
     return {"sucesso": True, "cenas_count": len(cenas_limpas)}
 
 
+SEM_ESPACO =re.compile(r"no space left|errno 28|not enough space|espa[çc]o insuficiente|disk full|disco cheio",
+                        re.I)
+FAXINA_FOLGA_RENDER_GB = 80  # render que caiu por falta de espaço: a faxina libera até essa folga antes de tentar
+
+
+def _erro_do_render(task_id: str) -> Optional[str]:
+    """O erro do render, ou None quando ele deu certo."""
+    with TAREFAS_LOCK:
+        t = TAREFAS.get(task_id) or {}
+        return str(t.get("erro") or "erro sem mensagem") if t.get("status") == "erro" else None
+
+
+def _render_de_novo(nome: str, task_id: str, erro: str) -> None:
+    """Prepara a segunda e última tentativa do render. Faltou espaço: a faxina tira as sobras dos vídeos antigos antes."""
+    print(f"[render] {nome} falhou: {erro[:300]}. Tentando mais uma vez")
+    if SEM_ESPACO.search(erro):
+        cfg = {**faxina._config(), "ativo": True}
+        cfg["livre_gb"] = max(float(cfg.get("livre_gb", faxina.LIVRE_GB)), FAXINA_FOLGA_RENDER_GB)
+        try:
+            liberado = faxina.faxinar(log=print, cfg=cfg)
+            print(f"[render] {nome}: faltou espaço no disco; a faxina liberou {liberado / 2**30:.1f} GB, "
+                  f"livres agora {shutil.disk_usage(PROJETOS).free / 2**30:.1f} GB")
+        except (Exception, SystemExit) as erro_fax:
+            print(f"[render] {nome}: a faxina falhou: {str(erro_fax)[:200]}")
+    with TAREFAS_LOCK:
+        t = TAREFAS.get(task_id)
+        if t is not None:
+            t.update(status="renderizando", erro=None, concluido=False, progresso_pct=5,
+                     etapa_atual="O render falhou; tentando mais uma vez...")
+            t["logs"].append(f"[AVISO]: o render falhou ({erro[:300]}); tentando mais uma vez")
+
+
+def _avisar_render_falhou(nome: str, erro: str) -> None:
+    """A segunda tentativa também falhou: a criação do vídeo fica parada com o erro, e é isso que o Radar lê para avisar
+    no celular e mostrar o botão Retomar (radar/avisos.py, parada)."""
+    falta_espaco = bool(SEM_ESPACO.search(erro))
+    livre_gb = shutil.disk_usage(PROJETOS).free / 2**30
+    motivo = (f"falta espaço no disco ({livre_gb:.0f} GB livres): libere espaço e clique em Retomar" if falta_espaco
+              else "clique em Retomar para renderizar de novo")
+    texto = f"O render falhou duas vezes, {motivo}. Erro: {erro[:300]}"
+    print(f"[render] {nome}: {texto}")
+    estado = _ler_criacao(nome)
+    if not estado or not estado.get("tarefa_id"):
+        return
+    tid = estado["tarefa_id"]
+    with TAREFAS_LOCK:
+        t = TAREFAS.setdefault(tid, estado)
+        t.update(status="erro", etapa="erro", concluido=False, pronto_para_edicao=False, precisa_voce=True,
+                 erro=texto, mensagem=f"Parado, precisa de você: {texto}")
+        t.setdefault("logs", []).append(f"[ERRO]: {texto}")
+    _salvar_criacao(tid)
+
+
 @app.post("/api/projetos/{nome}/render")
 def disparar_render(nome: str, payload: RenderPayload, bg_tasks: BackgroundTasks):
     """Dispara a montagem e renderização do vídeo (FFmpeg) em segundo plano."""
@@ -2925,6 +2978,15 @@ def disparar_render(nome: str, payload: RenderPayload, bg_tasks: BackgroundTasks
         _marcar_render(pasta, payload)
         try:
             _render_worker()
+            # o render que falha tenta mais uma vez sozinho e, se falhar de novo, avisa (pedido do usuário em
+            # 2026-11-14: o 15-animais falhou à 01:21 por falta de espaço e ficou 14 h parado sem ninguém saber)
+            erro = _erro_do_render(task_id)
+            if erro is not None:
+                _render_de_novo(nome, task_id, erro)
+                _render_worker()
+                erro = _erro_do_render(task_id)
+                if erro is not None:
+                    _avisar_render_falhou(nome, erro)
         finally:
             # terminou (bem ou com erro): só a fábrica caindo no meio deixa a marca para a partida retomar
             with contextlib.suppress(OSError):
