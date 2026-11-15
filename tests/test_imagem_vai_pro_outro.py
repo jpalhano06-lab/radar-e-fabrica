@@ -56,6 +56,45 @@ def test_as_duas_acabaram_a_mensagem_diz_as_duas(monkeypatch, tmp_path, sem_cust
     assert "revogado" in str(erro.value) and "limite semanal" in str(erro.value)
 
 
+def _google_sem_cota(prov, *a, **k):
+    """O 429 do Google que travou o pedido 116 em 2026-11-15: chega como APIError, não como SemCota."""
+    from google.genai import errors
+    if prov == "google":
+        raise errors.ClientError(429, {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message":
+                                                 "You exceeded your current quota, please check your plan and billing details."}})
+    return b"png", {"provedor": prov, "custo_usd": 0.005}
+
+
+def test_google_sem_cota_gratis_vai_para_o_chatgpt(monkeypatch, tmp_path, sem_custos):
+    projeto = _projeto(tmp_path, "google")
+    monkeypatch.setattr(imagens, "_imagem_por_api", _google_sem_cota)
+    monkeypatch.setattr(chatgpt_assinatura, "disponivel", lambda: True)
+    monkeypatch.setattr(chatgpt_assinatura, "gerar", lambda *a, **k: (b"png", {"provedor": "assinatura", "custo_usd": 0.0}))
+    imagens._gerar_uma(projeto, dict(CENA), [], 2)
+    registro = json.loads(projeto.imagem(3).with_suffix(".json").read_text(encoding="utf-8"))
+    assert registro["provedor"] == "assinatura" and "falta de cota" in registro["reserva_da_api"]
+
+
+def test_google_sem_cota_e_chatgpt_fora_vai_para_a_chave_paga(monkeypatch, tmp_path, sem_custos):
+    projeto = _projeto(tmp_path, "google")
+    monkeypatch.setattr(imagens, "_imagem_por_api", _google_sem_cota)
+    monkeypatch.setattr(imagens, "_conferir_chave", lambda *a, **k: None)
+    monkeypatch.setattr(chatgpt_assinatura, "disponivel", lambda: False)
+    imagens._gerar_uma(projeto, dict(CENA), [], 2)
+    registro = json.loads(projeto.imagem(3).with_suffix(".json").read_text(encoding="utf-8"))
+    assert registro["provedor"] == "openrouter"
+
+
+def test_google_sem_cota_sem_nenhuma_reserva_para_com_falta_de_cota(monkeypatch, tmp_path, sem_custos):
+    """Sem ChatGPT e sem chave paga, para com "falta de cota", que o Radar reconhece e avisa no celular."""
+    projeto = _projeto(tmp_path, "google")
+    monkeypatch.setattr(imagens, "_imagem_por_api", _google_sem_cota)
+    monkeypatch.setattr(imagens, "_conferir_chave", lambda *a, **k: (_ for _ in ()).throw(SystemExit("sem chave")))
+    monkeypatch.setattr(chatgpt_assinatura, "disponivel", lambda: False)
+    with pytest.raises(imagens.SemCota, match="falta de cota"):
+        imagens._gerar_uma(projeto, dict(CENA), [], 2)
+
+
 def test_login_recusado_fica_desconectado_ate_um_login_novo(monkeypatch, tmp_path):
     login = tmp_path / "auth.json"
     login.write_text(json.dumps({"tokens": {"access_token": "x"}}), encoding="utf-8")

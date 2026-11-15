@@ -10,8 +10,7 @@ voz:
   idioma_da_voz: es
 
 imagens:
-  provedor: assinatura
-  provedor_reserva: openrouter
+  provedor: openrouter
 
 # País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
 lugar:

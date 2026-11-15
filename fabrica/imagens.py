@@ -718,6 +718,53 @@ def _avisar_reserva(projeto, prov, erro):
     print(f"  {origem} não atendeu: as imagens que faltam saem pela {prov}. {str(erro)[:200]}")
 
 
+def _provedor_pago(projeto, prov):
+    """A chave paga que atende quando a do canal fica sem cota: a reserva do perfil e, sem ela, o OpenRouter (GPT Image,
+    uns US$ 0,005 por imagem). None quando não sobra outra, ou a chave dela não está no .env."""
+    reserva = provedor_de_api(projeto.perfil)
+    for candidato in (reserva, "openrouter"):
+        if candidato in (prov, SEM_RESERVA, "assinatura") or not candidato:
+            continue
+        try:
+            _conferir_chave(candidato)
+        except (Exception, SystemExit):
+            continue
+        return candidato
+    return None
+
+
+def _reserva_da_api(projeto, prov, e, prompt, img, usar):
+    """A chave de API do canal acabou (sem crédito, limite da semana ou a cota grátis do Google). Pedido do usuário em
+    2026-11-08 ("sempre que acabar o crédito de um vai pro outro") e em 2026-11-15 ("quando acaba a de graça use a paga
+    ou o chatgpt"): primeiro a assinatura do ChatGPT, que não custa por imagem; sem ela, a chave paga
+    (_provedor_pago). As duas fora, SemCota com os motivos, e o Radar avisa no celular."""
+    motivos = [f"{prov}: {e}"]
+    if _assinatura_de_reserva(projeto):
+        try:
+            # a assinatura só entende referência em bytes; link da fal.ai fica de fora
+            em_bytes = [r for r in usar if isinstance(r, tuple)]
+            dados, registro = chatgpt_assinatura.gerar(
+                prompt, img.get("qualidade") or "low", img.get("proporcao", "16:9"), em_bytes)
+            _avisar_reserva(projeto, "assinatura do ChatGPT", e)
+            registro["reserva_da_api"] = str(e)[:200]
+            return dados, registro
+        except (chatgpt_assinatura.SemLogin, chatgpt_assinatura.LimiteDaAssinatura) as sem:
+            motivos.append(f"ChatGPT: {sem}")
+        except chatgpt_assinatura.SemImagemNaResposta as sem:
+            raise SemImagem(str(sem)) from sem
+    pago = _provedor_pago(projeto, prov)
+    if pago:
+        _avisar_reserva(projeto, pago, e)
+        try:
+            dados, registro = _imagem_por_api(pago, prompt, img, usar if pago == "google" else [], projeto)
+        except SemCota as sem:
+            motivos.append(f"{pago}: {sem}")
+        else:
+            registro["reserva_da_api"] = str(e)[:200]
+            return dados, registro
+    raise SemCota("As fontes de imagem pararam por falta de cota. " + " | ".join(motivos))
+
+
 def _imagem_por_api(prov, prompt, img, usar, projeto):
     """A imagem por um provedor de chave de API (o caminho de sempre, que também é a reserva da assinatura)."""
     if prov == "google":
@@ -800,23 +847,14 @@ def _gerar_uma(projeto, cena, referencias, tentativas):
             else:
                 try:
                     dados, registro = _imagem_por_api(prov, prompt, img, usar, projeto)
-                except SemCota as e:
-                    # o caminho de volta (pedido do usuário em 2026-11-08: "sempre que acabar o crédito de um vai pro
-                    # outro"): a chave de API sem crédito ou no limite da semana, e o ChatGPT conectado, a imagem sai
-                    # pela assinatura, que não custa por imagem
-                    if not _assinatura_de_reserva(projeto):
+                except (SemCota, erros_google.APIError) as falha:
+                    # o 429 de cota do Google chega como APIError, não como SemCota: sem esta conversão a reserva
+                    # nunca entrava e o pedido 116 ficou 7 h repetindo "falta de cota" (2026-11-15)
+                    if isinstance(falha, erros_google.APIError) and not _sem_cota(falha):
                         raise
-                    _avisar_reserva(projeto, "assinatura do ChatGPT", e)
-                    try:
-                        # a assinatura só entende referência em bytes; link da fal.ai fica de fora
-                        em_bytes = [r for r in usar if isinstance(r, tuple)]
-                        dados, registro = chatgpt_assinatura.gerar(
-                            prompt, img.get("qualidade") or "low", img.get("proporcao", "16:9"), em_bytes)
-                    except (chatgpt_assinatura.SemLogin, chatgpt_assinatura.LimiteDaAssinatura) as sem:
-                        raise SemCota(f"As duas fontes de imagem pararam. {prov}: {e} ChatGPT: {sem}") from sem
-                    except chatgpt_assinatura.SemImagemNaResposta as sem:
-                        raise SemImagem(str(sem)) from sem
-                    registro["reserva_da_api"] = str(e)[:200]
+                    e = falha if isinstance(falha, SemCota) else SemCota(
+                        f"O Google recusou as imagens por falta de cota (a gratuita acabou). {str(falha)[:160]}")
+                    dados, registro = _reserva_da_api(projeto, prov, e, prompt, img, usar)
             temporario = destino.with_name(destino.stem + ".baixando")
             temporario.write_bytes(dados)
             temporario.replace(destino)

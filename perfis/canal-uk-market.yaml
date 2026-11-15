@@ -30,8 +30,7 @@ publicacao:
     Nothing on this channel constitutes medical, legal or professional advice. Viewers should verify relevant information with appropriate official sources before making decisions.
 
 imagens:
-  provedor: assinatura
-  provedor_reserva: openrouter
+  provedor: openrouter
 
 # País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
 lugar:

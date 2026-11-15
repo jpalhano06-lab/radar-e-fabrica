@@ -9,8 +9,7 @@ voz:
   idioma_da_voz: ja
 
 imagens:
-  provedor: assinatura
-  provedor_reserva: openrouter
+  provedor: openrouter
 
 # Estimativa, ainda sem medir esta voz: japonês fala bem menos letras por minuto que os 914 do português.
 # Depois da primeira narração, troque pelo número que a fábrica mostrar.
