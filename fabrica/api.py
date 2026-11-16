@@ -331,9 +331,31 @@ def _esperar(nome, segundos) -> None:
                 ACORDAR.pop(nome, None)
 
 
+# O botão Pausar do Radar (pedido do usuário em 2026-11-16: pausar os vídeos para um pedido urgente passar na frente).
+# O arquivo projetos/NOME/pausado segura a criação na próxima etapa ou no próximo aviso da esteira, e vale mesmo
+# depois de a fábrica reiniciar. Nada é perdido: ao despausar, a etapa continua de onde parou.
+ARQ_PAUSADO = "pausado"
+
+
+def _pausado(nome) -> bool:
+    return bool(nome) and (PROJETOS / nome / ARQ_PAUSADO).exists()
+
+
+def _segurar_se_pausado(task_id: str, nome) -> None:
+    if not _pausado(nome):
+        return
+    with TAREFAS_LOCK:
+        antes = (TAREFAS.get(task_id) or {}).get("mensagem")
+    _atualizar(task_id, pausado=True, mensagem="Pausado (botão Pausar do Radar)")
+    while _pausado(nome) and (PROJETOS / nome / "projeto.json").exists():
+        _esperar(nome, 5)  # o despausar acorda na hora (acordar)
+    _atualizar(task_id, pausado=False, mensagem=antes or "Retomando...")
+
+
 def _etapa_tentando(task_id: str, nome, rotulo: str, funcao):
     tentativa = 0
     while True:
+        _segurar_se_pausado(task_id, nome)
         try:
             return funcao()
         except (Exception, SystemExit) as err:
@@ -524,7 +546,14 @@ def _esperar_o_agente(task_id: str, p, cenas_prontas) -> None:
 
 def _esteira(nome: str, task_id: str) -> None:
     p = Projeto(nome)
-    log_w = lambda msg: _log_tarefa(task_id, msg)
+    fio = threading.current_thread()
+
+    def log_w(msg):
+        _log_tarefa(task_id, msg)
+        # a pausa no meio de uma etapa longa (as imagens), só no fio da esteira: um fio de trabalho parado aqui
+        # poderia segurar uma vaga que outro vídeo usa
+        if threading.current_thread() is fio:
+            _segurar_se_pausado(task_id, nome)
     with TAREFAS_LOCK:
         feitas = set(TAREFAS[task_id].setdefault("feitas", []))
     # projeto de antes da esteira: o que já está no disco conta como feito
@@ -1455,6 +1484,26 @@ def retomar_criacao(nome: str, payload: Optional[RetomarPayload] = None):
         return {**resumo, "status": "aguardando_confirmacao"}
     task_id = iniciar_criacao(nome)
     return JSONResponse(status_code=202, content={**resumo, "status": "processando", "tarefa_id": task_id})
+
+
+class PausarPayload(BaseModel):
+    pausado: bool = True
+
+
+@app.post("/api/projetos/{nome}/pausar")
+def pausar_criacao(nome: str, payload: Optional[PausarPayload] = None):
+    """Pausa (pausado: true) ou continua (false) a criação do vídeo. Pausado, ele segura na próxima etapa."""
+    pasta = PROJETOS / nome
+    if not (pasta / "projeto.json").exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    pausado = payload.pausado if payload else True
+    arq = pasta / ARQ_PAUSADO
+    if pausado:
+        arq.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+    else:
+        arq.unlink(missing_ok=True)
+        acordar(nome)
+    return {"ok": True, "nome": nome, "pausado": pausado}
 
 
 @app.get("/api/projetos/{nome}/mapa")
