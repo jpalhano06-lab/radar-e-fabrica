@@ -734,6 +734,45 @@ Animações, `animacoes()` em `radar/web/app.js`) e a fábrica é quem confere e
 - **Estilo novo em `TEMAS` ou animação nova em `CATALOGO`:** precisa de nome em `TEMAS_INFO` e `TIPOS_INFO` e de um
   exemplo em `EXEMPLOS`, senão a página fica sem ele (um teste reprova).
 
+## Efeitos de câmera nas fotos
+
+`fabrica/efeitos_foto.py`, seção `efeitos_foto` no `config.yaml` (fora da seção `render` de propósito: os ajustes dela
+entram no nome de todo clipe). Pedido do usuário em 2026-11-17, de um vídeo de "16 efeitos que o Claude cria" (um
+pacote para quem grava o próprio rosto). Ficaram os que servem a um documentário com fotos de banco:
+
+- **revelar** (recuo que revela): começa no detalhe (o assunto ou o rosto) e recua até a foto inteira.
+- **profundidade** (camadas em profundidade): o assunto recortado anda na frente e o fundo, com o assunto apagado
+  (`cv2.inpaint`), mais devagar atrás.
+- **moldura** (quebra de moldura): a foto num quadro de borda branca sobre ela mesma desfocada, e o assunto cresce
+  para fora do quadro.
+- **rabisco** (rabisco tremido): um contorno amarelo à mão se desenha em volta do assunto e treme (o traço é
+  redesenhado a cada 3 quadros, como animação à mão).
+- **celular** (mockup de celular): a foto na tela de um celular, só quando a fala cita app, site ou rede social e a
+  foto não é ela mesma um celular ou uma tela (`pede_celular`).
+- **atravessar** (zoom que atravessa): na troca de bloco, entre duas fotos sem outro efeito, a câmera mergulha no fim
+  de uma e sai de dentro da seguinte, com desfoque.
+- Ficaram de fora, de propósito: tela verde (a fábrica barra chroma), zoom digital com "REC", vertigem, mundo de
+  interface e órbita (de quem aparece falando, ou propaganda de software).
+
+Como entra: `render._efeitos_da_linha` pede a escolha (`escolher`) e `render._clipe` grava a cena escolhida por
+`renderizar`, quadro a quadro em numpy e OpenCV, que segue o caminho dos outros clipes (título, símbolo, visual do
+canal). **Poucos e espaçados**: um a cada `intervalo` (15 s) de foto, nunca o mesmo duas vezes seguidas, e o recuo no
+máximo a cada `intervalo_revelar` (30 s): sem esse limite ele era 46 dos 68 efeitos do everything-you-need-to-answer.
+Só na tela deitada, só em cena de foto inteira (não cortada pelo personagem) de 2,5 s ou mais. **O nome do clipe sem
+efeito não muda** (`assinatura` vazia): nenhum vídeo antigo renderiza de novo por causa disto.
+
+- **O recorte só em cena de animal ou com rosto** (`pode_ter_assunto`, `tem_assunto`): em cena aberta o GrabCut pega
+  qualquer coisa (o céu da caverna do ouro-da-serra-gaucha, uma fileira de casas). Com rosto, o GrabCut parte do
+  corpo abaixo dele, e o rosto tem de ficar dentro do recorte; foto de grupo (mais de 2 rostos) e gente pequena
+  (rosto com menos de 6% da largura) ficam fora. O recorte passa nas contas de acabamento de `recorte.limpo`. Sem
+  recorte bom, a cena fica com o recuo.
+- **Rápido**: o GrabCut roda na foto reduzida (420 px, lida já reduzida do JPEG com `draft`) e só nas cenas que podem
+  ter o assunto; a máscara fica em `render/efeitos/` pelo arquivo e pela data. Medido: a escolha de um vídeo de 20 min
+  leva uns 23 s na primeira vez, e cada clipe com efeito de 3 a 8 s. A mistura das camadas é `cv2.blendLinear` (em
+  numpy a moldura levava 70 s por clipe).
+- **Nunca para o vídeo**: falhou a escolha, ninguém ganha efeito; falhou o desenho, a cena sai com o movimento lento.
+- Conferido num render completo de uma cópia do teste-animacao-1min (fora de `projetos/`) e em `tests/test_efeitos_foto.py`.
+
 ## Texto na tela: saiu da fábrica
 
 Desde 2026-10-05, a pedido do usuário, a fábrica **não tem mais o texto na tela desenhado pelo FFmpeg** (destaque,

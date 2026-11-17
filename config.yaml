@@ -426,6 +426,15 @@ vertical:
   recorte: 1.0                # a foto ou vídeo deitado perde as laterais até ficar quadrado, sobre o fundo desfocado
   # estilo_legenda: "..."     # estilo da legenda só na versão em pé
 
+# Efeitos de câmera nas fotos (fabrica/efeitos_foto.py, grátis, no próprio computador): recuo que revela, camadas em
+# profundidade, quebra de moldura, rabisco em volta do assunto, foto na tela de um celular e o zoom que atravessa na
+# troca de assunto. Fica fora da seção render de propósito: os ajustes dela entram no nome de todo clipe.
+efeitos_foto:
+  ativo: true
+  intervalo: 15               # segundos entre um efeito e outro
+  intervalo_revelar: 30       # o recuo cabe em quase toda foto: no máximo um a cada 30 s
+  atravessar: true            # o zoom que atravessa na troca de bloco
+
 # Trilha e efeitos compostos pelo modelo principal e tocados pelo código (grátis). Entram quando o perfil não tem
 # músicas próprias, ou sempre com substituir: true. fabrica trilha NOME --forcar pede uma partitura nova.
 trilha:
