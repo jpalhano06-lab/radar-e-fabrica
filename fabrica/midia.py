@@ -13,6 +13,7 @@ import base64
 import contextlib
 import copy
 import hashlib
+from collections import Counter
 import html
 import io
 import json
@@ -194,7 +195,26 @@ def nota_minima_da_conferencia(projeto) -> int:
     return max(NOTA_MINIMA_FIXA, int((projeto.config.get("corrigir") or {}).get("nota_minima", NOTA_MINIMA_FIXA)))
 
 
-def _escolher_conferindo(projeto, cena, ordem, candidatos_da_cena, frases, usados, vizinhas, log):
+def _adiantar_notas(projeto, por_n, ordens, candidatos, descricoes, usados, vizinhas, log) -> dict:
+    """{(cena, candidato): julgamento} do lote, com o Jev em paralelo. A escolha anda cena a cena, porque uma foto não
+    pode servir duas, e cada julgamento esperava o anterior: 489 chamadas de 0,7 s eram mais de 5 min parados no
+    speed-test. Julgar um candidato a mais custa US$ 0,00007."""
+    limite = (projeto.config.get("midia") or {}).get("candidatos_conferidos", 3)
+    tarefas = []
+    for n, ordem in ordens.items():
+        frases = descricoes.get(n) or {}
+        livres = [i for i in ordem if frases.get(i) and _chave(candidatos[n][i]) not in usados]
+        tarefas += [(n, i) for i in livres[:limite]]
+
+    def julgar(tarefa):
+        n, i = tarefa
+        return _nota_do_candidato(projeto, por_n[n], candidatos[n][i], descricoes[n][i], vizinhas, log)
+
+    with ThreadPoolExecutor(max(1, int((projeto.config.get("jev") or {}).get("processos", 6)))) as executor:
+        return {(n, _chave(candidatos[n][i])): nota for (n, i), nota in zip(tarefas, executor.map(julgar, tarefas))}
+
+
+def _escolher_conferindo(projeto, cena, ordem, candidatos_da_cena, frases, usados, vizinhas, log, notas=None):
     """Percorre a ordem do modelo e devolve (candidato, dados da conferência) do primeiro que o Jev aprova.
 
     Sem descrição não há como julgar, então esse candidato passa como antes. Se nenhum dos testados for
@@ -210,9 +230,20 @@ def _escolher_conferindo(projeto, cena, ordem, candidatos_da_cena, frases, usado
         if _chave(candidato) in usados:
             continue
         frase = (frases or {}).get(i)
+        # trecho do YouTube com texto de outro editor queimado na imagem não entra: sai antes do juiz,
+        # porque o veto não depende de nota e uma chamada de modelo a menos é uma chamada a menos
+        if frase and candidato.get("fonte") == "youtube":
+            from . import garimpo
+
+            vetado = garimpo.texto_queimado(frase, garimpo.cfg_do_projeto(projeto))
+            if vetado:
+                log(f"  garimpo {candidato.get('id')}: vetado: texto_queimado ({vetado})")
+                continue
         if not frase:
             return candidato, {"conferida": False}
-        julgamento = _nota_do_candidato(projeto, cena, candidato, frase, vizinhas, log)
+        chave_da_nota = (cena.get("n"), _chave(candidato))
+        julgamento = (notas[chave_da_nota] if notas and chave_da_nota in notas
+                      else _nota_do_candidato(projeto, cena, candidato, frase, vizinhas, log))
         if julgamento is None:
             return candidato, {"conferida": False, "legenda": frase}
         nota = julgamento["nota"]
@@ -268,6 +299,17 @@ def teto_da_ia(projeto):
     except (TypeError, ValueError):
         return None
     return teto if 0 < teto < 1 else None
+
+
+def fracao_da_ia(projeto):
+    """ia.fracao: a parte das cenas que sai em imagem de IA (0,75), escolhida para o vídeo. None: quem decide é o agente."""
+    if not ia_ativa(projeto):
+        return None
+    try:
+        fracao = float((projeto.config.get("ia") or {}).get("fracao") or 0)
+    except (TypeError, ValueError):
+        return None
+    return fracao if 0 < fracao <= 1 else None
 
 
 def precisa_ia(cena) -> bool:
@@ -823,8 +865,8 @@ def tentar_banco_nas_nao_existe(projeto, log=print) -> list:
     derrubando uma árvore, que os bancos têm. Como ele achou que não existe, a regra é estrita: só fica a foto que o
     Jev aprovou antes de baixar, com a nota mínima e sem suspeita; o resto volta para a IA. Cada cena é tentada uma
     vez (banco_tentado). Devolve as cenas que ficaram com material real."""
-    if projeto.offline or not ia_ativa(projeto):
-        return []  # sem IA, cenas.py já devolve essas cenas ao acervo
+    if projeto.offline or not ia_ativa(projeto) or fracao_da_ia(projeto):
+        return []  # sem IA, cenas.py já devolve essas cenas ao acervo; com a parte da IA escolhida, ela já está contada
     dados = projeto.ler_json("cenas.json")
     alvo = [c for c in dados["cenas"]
             if c.get("onde_existe") == "nao_existe" and c.get("tipo") == "ia" and not c.get("banco_tentado")
@@ -887,7 +929,26 @@ def _buscar(projeto, apenas=None, log=print, permissivo=False):
         buscador.fechar()  # o servidor chama isto o dia todo: cada Buscador abria um cliente HTTP que nunca fechava
 
 
+def _sem_youtube_se_a_cota_fechou(cota, ordem, candidatos_da_cena, escolhidos, log=print) -> list:
+    """A ordem de candidatos desta cena, sem os trechos do YouTube quando a cota já fechou.
+
+    Este é o freio que vale: as buscas de todas as cenas acontecem antes do primeiro download, então a cota olhada
+    na busca está sempre zerada. `escolhidos` entra na conta porque o lote só baixa depois de escolher tudo."""
+    no_lote = sum(1 for e in escolhidos.values() if e.get("fonte") == "youtube")
+    pode, motivo = cota.pode_garimpar(no_lote)
+    if pode:
+        return ordem
+    cota.avisar_se_fechou(motivo)
+    return [i for i in ordem if candidatos_da_cena[i].get("fonte") != "youtube"]
+
+
 def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
+    from . import garimpo
+
+    garimpo.esquecer_cota(projeto)  # o servidor vive dias: a cota desta busca nasce do que está no disco agora
+    cota_do_garimpo = garimpo.cota(projeto, garimpo.cfg_do_projeto(projeto), log)
+    if "youtube" in ((getattr(buscador, "cfg", None) or {}).get("fontes_video") or ()):
+        garimpo.avisar_contas(garimpo.cfg_do_projeto(projeto), log)
     # 1. candidatos de cada cena, já com a segunda leva: a mesma busca traz o dobro, sem pedido a mais aos bancos.
     # O modelo vê os 12 primeiros; se ele (ou o Jev) recusar todos, vê os 12 seguintes antes de a cena ir para a IA
     leva = buscador.quantidade
@@ -922,7 +983,8 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
 
     def aplicar(ordens_parciais):
         """Baixa o material escolhido dessas cenas, sem repetir o de outra, e grava o cenas.json."""
-        escolhidos = {}
+        escolhidos, ordens = {}, {}
+        notas = _adiantar_notas(projeto, por_n, ordens_parciais, candidatos, descricoes, usados, vizinhas, log) if conferir else {}
         for n, ordem in ordens_parciais.items():
             decididas.add(n)
             if not ordem and not permissivo and segunda_leva.get(n) and n not in na_segunda and not projeto.offline:
@@ -938,9 +1000,11 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
                 # a pessoa escolheu os termos: depois dos preferidos do modelo, o resto do que a busca achou vale mais do
                 # que nada (a escolha dele pode ter caído em imagens já usadas em outra cena), e ela decide olhando
                 ordem = list(ordem) + [i for i in range(len(candidatos[n])) if i not in ordem]
+            ordem = _sem_youtube_se_a_cota_fechou(cota_do_garimpo, ordem, candidatos[n], escolhidos, log)
+            ordens[n] = ordem
             if conferir and descricoes.get(n):
                 candidato, info = _escolher_conferindo(projeto, por_n[n], ordem, candidatos[n], descricoes[n],
-                                                       usados, vizinhas, log)
+                                                       usados, vizinhas, log, notas)
                 if candidato is not None:
                     usados.add(_chave(candidato))
                     escolhidos[n] = candidato
@@ -967,7 +1031,12 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
             return
         vistas_do_lote = {}  # n -> impressão da imagem já baixada neste lote (ver _igual_no_lote)
         with ThreadPoolExecutor(geral.get("processos", 4)) as executor:
-            futuros = {executor.submit(_baixar_midia, projeto, por_n[n], esc, buscador.http): n
+            def sobrando(n, esc):
+                """Os outros candidatos da ordem desta cena que ninguém pegou, na ordem do modelo."""
+                return [candidatos[n][i] for i in ordens.get(n, ())
+                        if _chave(candidatos[n][i]) != _chave(esc) and _chave(candidatos[n][i]) not in usados]
+
+            futuros = {executor.submit(_baixar_com_alternativas, projeto, por_n[n], esc, sobrando(n, esc), buscador.http): n
                        for n, esc in escolhidos.items()}
             for futuro in as_completed(futuros):
                 n = futuros[futuro]
@@ -979,9 +1048,12 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
                     igual = _igual_no_lote(projeto, n, baixada, vistas_do_lote)
                     if igual is not None:
                         _descartar_baixado(projeto, por_n[n], baixada)
+                        if baixada.get("fonte") == "youtube":
+                            cota_do_garimpo.devolver_aceito()
                         log(f"  cena {n}: recusada porque a imagem é a mesma da cena {igual}, baixada junto; buscando outra")
                         continue
                     por_n[n]["midia"] = baixada
+                    usados.add(_chave(baixada))  # pode ser uma alternativa, e não o escolhido
                     if infos.get(n):
                         por_n[n]["captura"] = infos[n]
                 except ImagemRepetida as erro:
@@ -1045,6 +1117,8 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
         log(f"  Jev conferiu {contagem['conferidas']} cena(s) antes de baixar: {contagem['reprovados']} candidato(s) "
             f"reprovados e trocados pelo próximo, {contagem['suspeitas']} cena(s) ficaram com o melhor que havia, sob suspeita")
     log(f"  {encontrados} cenas com material real, {len(alvo) - encontrados - sem_resposta} vão usar imagem de IA")
+    if cota_do_garimpo.downloads or cota_do_garimpo.aceitos:
+        log("  " + cota_do_garimpo.resumo())  # só sai nos canais que garimpam
     if sem_resposta:
         log(f"  {sem_resposta} cena(s) ficaram pendentes por falha de escolha, de miniatura ou de download. Rode o mesmo comando de novo para tentar outra vez")
     escrever_creditos(projeto)
@@ -1292,10 +1366,15 @@ def _candidatos_da_cena(buscador, cena):
     return [c for c in buscador.candidatos(cena) if _chave(c) not in rejeitadas]
 
 
+VAGAS_DO_GARIMPO_EM_FOTO = 3  # trechos por busca numa cena de foto: o resto das vagas continua com as fotos
+
+
 class Buscador:
     def __init__(self, projeto, log):
+        from . import garimpo
+
         self.projeto = projeto
-        self.cfg = projeto.perfil.get("midia_real") or {}
+        self.cfg = garimpo.com_youtube(projeto, projeto.perfil.get("midia_real") or {})
         self.log = log
         geral = projeto.config.get("midia") or {}
         # o Wikimedia só aceita pedidos que dizem quem está buscando
@@ -1372,6 +1451,8 @@ class Buscador:
                 continue
             vistas.add(busca.lower())
             novos = self._das_fontes(tipo, busca, preferida, acervo)
+            if tipo == "foto" and not acervo:
+                novos = self._do_garimpo(busca) + novos
             # em cena de animal vale a própria espécie: "snake" nas tags de vídeos de píton e de cobra-do-milho
             # passava por mamba-negra, e a foto da mamba nunca era procurada
             if tipo == "video" and not [n for n in novos if _cita_o_assunto(especie or assunto, n)]:
@@ -1389,11 +1470,37 @@ class Buscador:
             if len(uteis) >= 3:
                 break
         # material de edição (chroma, botão de inscrição animado) nunca entra: nem chega à escolha
-        achados = [a for a in achados if not de_edicao(a)]
+        achados = [a for a in achados if not de_edicao(a) and not self._de_outro_item(a, cena)]
         # os que citam o assunto vão na frente, para não ficarem de fora do corte da quantidade
         # e quem cita a própria espécie vem antes de quem cita só o tipo do bicho ("mamba" antes de "snake")
         achados.sort(key=lambda a: (bool(especie) and not _cita_o_assunto(especie, a), not _cita_o_assunto(assunto, a)))
         return achados[:self.quantidade]
+
+    def _de_outro_item(self, candidato, cena) -> bool:
+        """O título do trecho do YouTube é de outro item do vídeo? Num vídeo de lista ("12 redes de mercado"), a busca
+        da seção da FreshCo traz vídeos da Costco, e o download seria gasto à toa. Palavra que está na âncora de dois ou
+        mais blocos não decide nada ("canada", "food"): só a que é de um bloco só."""
+        if candidato.get("fonte") != "youtube" or not cena.get("bloco"):
+            return False
+        ancoras = {i: _radicais(b.get("ancora") or "") for i, b in (self.blocos or {}).items()}
+        vezes = Counter(r for grupo in ancoras.values() for r in grupo)
+        minhas = {r for r in ancoras.get(cena["bloco"], ()) if vezes[r] == 1}
+        alheias = {r for i, grupo in ancoras.items() if i != cena["bloco"] for r in grupo if vezes[r] == 1}
+        titulo = _radicais(candidato.get("descricao") or "")
+        return bool(minhas) and not (titulo & minhas) and bool(titulo & alheias)
+
+    def _do_garimpo(self, busca) -> list:
+        """Trechos do YouTube para uma cena de foto, nos canais que garimpam. Sem isto o garimpo só veria as cenas
+        video_real, que nos projetos de 2026-11 eram de 12% a 15% das cenas (só o roteiro-2 tinha 40%), e um alvo de
+        25% nunca seria alcançado. A render usa o tipo da mídia, não o da cena, então um vídeo em cena de foto entra
+        como vídeo. garimpo.em_cenas_de_foto: false desliga."""
+        if "youtube" not in (self.cfg.get("fontes_video") or ()):
+            return []
+        from . import garimpo
+
+        if garimpo.cfg_do_projeto(self.projeto).get("em_cenas_de_foto") is False:
+            return []
+        return self._buscar("youtube", "video", busca)[:VAGAS_DO_GARIMPO_EM_FOTO]
 
     def _das_fontes(self, tipo, busca, preferida=None, acervo=False):
         """Busca em todos os bancos do perfil AO MESMO TEMPO e intercala os resultados (o 1º de cada banco, depois o
@@ -1406,6 +1513,12 @@ class Buscador:
         from . import bancos
 
         padrao = ["pexels", "pixabay"] if tipo == "video" else ["wikimedia", "pexels", "pixabay"]
+        # midia.acervo: "sem" tira os museus deste vídeo e "sempre" põe em toda cena (a Nova produção do Radar escolhe)
+        modo = (self.projeto.config.get("midia") or {}).get("acervo")
+        if modo == "sem":
+            acervo = False
+        elif modo == "sempre" and not acervo:
+            acervo = True
         if acervo == "epoca":
             tipo = "foto"  # cena de época: vídeo de banco é sempre de hoje
         fontes = list(self.cfg.get("fontes_video" if tipo == "video" else "fontes_foto") or padrao)
@@ -1442,6 +1555,16 @@ class Buscador:
     def _buscar(self, fonte, tipo, busca):
         if not busca or fonte in self.desligadas:
             return []
+        if fonte == "youtube":
+            # numa retomada ou no tapa-buraco a cota já pode estar fechada, e aí nem a busca se gasta. Na primeira
+            # passada ela está sempre aberta aqui: o freio de verdade é o da escolha (_sem_youtube_se_a_cota_fechou)
+            from . import garimpo
+
+            cota = garimpo.cota(self.projeto, garimpo.cfg_do_projeto(self.projeto), self.log)
+            pode, motivo = cota.pode_garimpar()
+            if not pode:
+                cota.avisar_se_fechou(motivo)
+                return []
         from . import bancos
         funcoes = {"wikimedia": self._wikimedia, "wikimedia_categoria": self._wikimedia_categoria,
                    "pexels": self._pexels, "pixabay": self._pixabay,
@@ -2259,6 +2382,83 @@ def _guardando_o_que_havia(caminhos):
         copia.unlink(missing_ok=True)
 
 
+class TrechoReprovado(ImagemRepetida):
+    """O quadro real do trecho do YouTube não passou. Herda de ImagemRepetida para seguir o mesmo caminho: a cena fica
+    sem mídia, sem ser um download que falhou, e segue para a IA."""
+
+
+def _descrever_o_trecho(projeto, cena, registro, log) -> str:
+    from . import corrigir
+
+    com_midia = {**cena, "midia": registro}
+    quadros = corrigir._quadros(projeto, com_midia)
+    return corrigir._descrever_lote(projeto, [(com_midia, quadros)], log).get(cena["n"], "") if quadros else ""
+
+
+def _conferir_o_trecho(projeto, cena, registro, log=print) -> None:
+    """Julga o que o trecho mostra de verdade, com o mesmo modelo de visão e o mesmo juiz das outras cenas.
+
+    Quem escolheu o trecho só viu a miniatura, que é uma arte feita para o clique, e o corte cai num ponto sorteado do
+    vídeo. Levanta TrechoReprovado quando há texto de outro editor ou a nota não alcança garimpo.nota_minima. Sem
+    descrição (modelo de visão fora do ar) o trecho fica marcado como não conferido, como a captura sem descrição:
+    derrubá-lo faria uma queda do modelo levar todos os trechos do vídeo. garimpo.conferir_trecho: false desliga."""
+    from . import corrigir, garimpo
+
+    cfg = garimpo.cfg_do_projeto(projeto)
+    if garimpo.em_pe(projeto.pasta / registro["arquivo"]):
+        garimpo.guardar_prova(projeto, cena, registro, "reprovado", "vídeo em pé")
+        raise TrechoReprovado(f"o trecho {registro.get('id')} é de vídeo em pé")
+    if cfg.get("conferir_trecho") is False or projeto.offline:
+        return
+    legenda = _descrever_o_trecho(projeto, cena, registro, log)
+    if not legenda:
+        registro["trecho_conferido"] = False
+        return
+    vetado = garimpo.texto_queimado(legenda, cfg)
+    if vetado and garimpo.vem_de_baixo(vetado):
+        log(f"  garimpo {registro.get('id')}: {vetado[:60]}; cortando a faixa de baixo")
+        garimpo.cortar_embaixo(projeto.pasta / registro["arquivo"], projeto.pasta / registro["capa"])
+        legenda = _descrever_o_trecho(projeto, cena, registro, log) or legenda
+        vetado = garimpo.texto_queimado(legenda, cfg)
+    if vetado:
+        garimpo.guardar_prova(projeto, cena, registro, "reprovado", f"texto de outro editor: {vetado}")
+        raise TrechoReprovado(f"o trecho {registro.get('id')} tem texto de outro editor ({vetado[:60]})")
+    try:
+        julgamento = corrigir._julgar_com_jev(projeto, {**cena, "midia": {"pagina": registro.get("pagina", "")}},
+                                              legenda, None, log)
+    except (RuntimeError, SystemExit) as erro:
+        log(f"  o Jev não julgou o trecho da cena {cena['n']} ({str(erro)[:80]})")
+        julgamento = None
+    registro["legenda"] = legenda
+    if not julgamento:
+        registro["trecho_conferido"] = False
+        return
+    corte = max(int(cfg.get("nota_minima", garimpo.NOTA_MINIMA)), nota_minima_da_conferencia(projeto))
+    if julgamento["nota"] < corte:
+        garimpo.guardar_prova(projeto, cena, registro, "reprovado", f"nota abaixo de {corte}", julgamento["nota"])
+        raise TrechoReprovado(f"o trecho {registro.get('id')} tirou {julgamento['nota']}, abaixo de {corte}")
+    registro["trecho_conferido"], registro["nota_do_trecho"] = True, julgamento["nota"]
+    garimpo.guardar_prova(projeto, cena, registro, "aceito", "", julgamento["nota"])
+
+
+def _baixar_com_alternativas(projeto, cena, candidato, alternativas, http):
+    """Baixa o escolhido e, se for um trecho do YouTube reprovado, tenta os próximos da ordem do modelo, até
+    garimpo.tentativas. O trecho cai num ponto sorteado do vídeo e pode ser recusado mesmo com miniatura boa: sem isto,
+    uma recusa mandava a cena direto para a IA com bons candidatos sobrando."""
+    from . import garimpo
+
+    if candidato.get("fonte") != "youtube":
+        return _baixar_midia(projeto, cena, candidato, http)
+    limite = int(garimpo.cfg_do_projeto(projeto).get("tentativas", 3))
+    fila = [candidato, *alternativas][:max(1, limite)]
+    for posicao, atual in enumerate(fila, 1):
+        try:
+            return _baixar_midia(projeto, cena, atual, http)
+        except (TrechoReprovado, garimpo.TrechoIndisponivel):
+            if posicao == len(fila):
+                raise
+
+
 def _baixar_midia(projeto, cena, candidato, http):
     with tempos.parte(projeto, "download"):
         return _baixar_midia_agora(projeto, cena, candidato, http)
@@ -2278,20 +2478,54 @@ def _baixar_midia_agora(projeto, cena, candidato, http):
     else:
         base = nome_livre(projeto, n, (".jpg",))
         alvos = [projeto.caminho("midia", f"{base}.jpg")]
-    with _guardando_o_que_havia(alvos):
-        return _trazer_midia(projeto, cena, candidato, http, base)
+    if candidato.get("fonte") != "youtube":
+        with _guardando_o_que_havia(alvos):
+            return _trazer_midia(projeto, cena, candidato, http, base)
+    # o trecho ocupa a vaga da cota antes de baixar, para downloads em paralelo não passarem juntos pelo último lugar
+    from . import garimpo
+
+    cota = garimpo.cota(projeto, garimpo.cfg_do_projeto(projeto))
+    cota.reservar()
+    try:
+        with _guardando_o_que_havia(alvos):
+            registro = _trazer_midia(projeto, cena, candidato, http, base)
+            _conferir_o_trecho(projeto, cena, registro, cota.log)
+    except (garimpo.TrechoIndisponivel, TrechoReprovado):
+        cota.liberar()
+        # vídeo apagado, bloqueado ou reprovado não volta sozinho: a próxima rodada desta cena tenta outro candidato
+        cena.setdefault("rejeitadas", []).append(_chave(candidato))
+        for alvo in alvos:
+            alvo.unlink(missing_ok=True)
+        raise
+    except BaseException:
+        cota.liberar()
+        raise
+    cota.anotar_aceito()
+    return registro
 
 
 def _trazer_midia(projeto, cena, candidato, http, base):
     n = cena["n"]
     if candidato["tipo"] == "video":
         arquivo = projeto.caminho("midia", f"{base}.mp4")
-        _baixar(http, candidato["arquivo"], arquivo)
         capa = projeto.caminho("midia", f"{base}_capa.jpg")
-        try:
-            _baixar(http, candidato["miniatura"], capa)
-        except httpx.HTTPError:
-            capa = None
+        if candidato.get("fonte") == "youtube":
+            # o garimpo não tem endereço de arquivo: o yt-dlp corta um trecho de poucos segundos do vídeo.
+            # O endereço da página passa a apontar o segundo em que o trecho começa, para o crédito dizer
+            # de onde ele veio exatamente, e a capa é um quadro do trecho, não a arte da miniatura
+            from . import garimpo
+
+            trecho = garimpo.baixar_trecho(candidato, arquivo, garimpo.cfg_do_projeto(projeto))
+            garimpo.capa_do_trecho(arquivo, capa)
+            canal = candidato.get("autor") or trecho.get("canal") or ""
+            candidato = {**candidato, "pagina": f"{candidato['pagina']}&t={int(trecho['inicio'])}", "autor": canal,
+                         "licenca": garimpo._licenca(canal, bool(candidato.get("yt_cc")))}
+        else:
+            _baixar(http, candidato["arquivo"], arquivo)
+            try:
+                _baixar(http, candidato["miniatura"], capa)
+            except httpx.HTTPError:
+                capa = None
     else:
         arquivo = projeto.caminho("midia", f"{base}.jpg")
         _baixar(http, candidato["arquivo"], arquivo)
@@ -2363,13 +2597,32 @@ def _baixar(http, url, destino, prazo=None):
         temporario.unlink(missing_ok=True)
 
 
+# lado maior que uma foto de banco precisa ter: o render entrega 1920x1080 e a superamostragem usa no máximo 3x
+# disso. Acima daqui a foto é reduzida logo depois do download (2026-11-05, pedido do usuário: acelerar a entrega).
+# No asdas-80-billion-empire-is-collapsing-an o Wikimedia mandou JPEGs de 130 milhões de pixels (o PIL avisava
+# DecompressionBombWarning): cada abertura dela no render, no recorte, na miniatura e na descrição relia o arquivo
+# inteiro. Reduzir uma vez, no começo, não muda nada na tela e tira esse peso de todas as etapas seguintes.
+LADO_MAXIMO_DA_FOTO = 7680
+# teto de pixels só para o PIL abrir o arquivo sem reclamar antes de a gente reduzir. Acima do dobro deste valor o
+# PIL levanta DecompressionBombError, e a foto cai como um candidato que não deu certo (quem chamou testa o próximo)
+PIXELS_MAXIMOS_DA_FOTO = 400_000_000
+
+
 def _garantir_jpeg(arquivo):
     from PIL import Image
 
+    if Image.MAX_IMAGE_PIXELS is not None and Image.MAX_IMAGE_PIXELS < PIXELS_MAXIMOS_DA_FOTO:
+        Image.MAX_IMAGE_PIXELS = PIXELS_MAXIMOS_DA_FOTO
     with Image.open(arquivo) as imagem:
-        if imagem.format == "JPEG":
+        grande = max(imagem.size) > LADO_MAXIMO_DA_FOTO
+        if imagem.format == "JPEG" and not grande:
             return
         convertida = imagem.convert("RGB")
+        if grande:
+            escala = LADO_MAXIMO_DA_FOTO / max(imagem.size)
+            largura = max(1, round(imagem.width * escala))
+            altura = max(1, round(imagem.height * escala))
+            convertida = convertida.resize((largura, altura), Image.LANCZOS)
     convertida.save(arquivo, "JPEG", quality=92)
 
 
@@ -2408,6 +2661,8 @@ def escrever_creditos(projeto):
     linhas = []
     for c in projeto.ler_json("cenas.json")["cenas"]:
         m = c.get("midia")
+        if m and m.get("fonte") == "video_ia":
+            continue  # feito aqui, não há autor a creditar
         if m and m.get("fonte") == "animation_ai":
             # cena animada feita pela fábrica: só as fotos de banco que os itens mostram (animation_ai.fotos_dos_itens)
             for f in c.get("anim_fotos") or []:

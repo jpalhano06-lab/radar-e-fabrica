@@ -59,7 +59,7 @@ function LigarFabrica {
 $servicos = @(
     # /api/saude responde na hora; a /api/projetos passava dos 20 s com a criacao ocupada e o vigia reiniciava a
     # fabrica no meio do video (2026-10-27). Fabrica antiga, sem a /api/saude, responde 404: conta como viva
-    @{ Nome = 'fabrica'; Porta = $PORTA;     Url = "http://localhost:$PORTA/api/saude"; Ligar = ${function:LigarFabrica}; Falhas = 0 },
+    @{ Nome = 'fabrica'; Porta = $PORTA;     Url = "http://localhost:$PORTA/api/saude"; Ligar = ${function:LigarFabrica}; Falhas = 0 }
 )
 
 Anotar 'vigia ligado'

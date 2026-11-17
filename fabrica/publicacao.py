@@ -205,12 +205,15 @@ def descricao(textos, caps, aviso_voz=True, topo="", fim="") -> str:
     referência"). A fábrica continua escrevendo o `creditos.txt` na pasta do projeto, para quem precisar
     conferir de onde veio cada imagem; o que não acontece mais é essa lista sair publicada embaixo do vídeo.
     """
+    from . import idioma
+
     partes = [topo, textos.get("resumo") or ""]
+    lingua = idioma.lingua_do_texto(textos.get("resumo") or "")
     if caps:
-        partes.append("Capítulos\n" + "\n".join(f"{mmss(c['inicio'])} {n}"
+        partes.append(idioma.frase("capitulos", lingua) + "\n" + "\n".join(f"{mmss(c['inicio'])} {n}"
                                                 for c, n in zip(caps, textos["nomes_capitulos"])))
     if aviso_voz:
-        partes.append("A narração deste vídeo é feita com voz sintética.")
+        partes.append(idioma.frase("voz", lingua))
     if fim:
         partes.append(fim)
     if textos.get("hashtags"):

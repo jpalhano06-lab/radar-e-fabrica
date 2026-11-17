@@ -1217,6 +1217,16 @@ def cmd_pago(a):
 PROXIES_CONFIAVEIS = "127.0.0.1,::1"
 
 
+def cmd_maquina(a):
+    """Pede vídeos a um Radar em outra máquina e faz aqui (robo.py). O `fabrica robo` é o do PALHANO, outro sistema."""
+    from . import robo
+
+    radar, chave = a.radar or os.environ.get("ROBO_RADAR"), a.chave or os.environ.get("ROBO_CHAVE")
+    if not radar or not chave:
+        raise SystemExit("Falta ROBO_RADAR e ROBO_CHAVE no .env. Rode o INSTALAR-ROBO.ps1 com a chave do Radar.")
+    robo.Robo(radar, chave, fabrica=a.fabrica, token=os.environ.get("FABRICA_TOKEN", "")).rodar()
+
+
 def cmd_servidor(a):
     import uvicorn
     from .api import criar_app
@@ -1513,6 +1523,12 @@ def main():
     s.add_argument("numero", type=int)
     s.add_argument("--nome", required=True)
     s.set_defaults(funcao=cmd_voz_salvar)
+
+    s = sub.add_parser("maquina", help="pede vídeos a um Radar em outra máquina e faz aqui, com a fábrica desta máquina")
+    s.add_argument("--radar", default=None, help="endereço do Radar (padrão: ROBO_RADAR do .env)")
+    s.add_argument("--chave", default=None, help="chave desta máquina (padrão: ROBO_CHAVE do .env)")
+    s.add_argument("--fabrica", default="http://127.0.0.1:8080", help="a fábrica desta máquina")
+    s.set_defaults(funcao=cmd_maquina)
 
     s = sub.add_parser("servidor", help="inicia o servidor de API HTTP (FastAPI) para o frontend")
     s.add_argument("--porta", type=int, default=8000, help="porta do servidor (padrão: 8000)")

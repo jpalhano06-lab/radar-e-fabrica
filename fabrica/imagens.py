@@ -14,6 +14,7 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from google import genai
 from google.genai import errors as erros_google
 from google.genai import types
 
-from . import chatgpt_assinatura, custos, midia
+from . import banco_proprio, chatgpt_assinatura, custos, midia
 from .config import RAIZ, caminho_relativo, chave
 from .util import mmss
 
@@ -59,6 +60,9 @@ class SemImagem(Exception):
     """O provedor respondeu, mas não entregou imagem, em geral por bloqueio de conteúdo."""
 
 
+FOLGA_DO_TETO = 0.7  # das vagas do teto de IA, esta parte pode sair antes da busca. O resto é das cenas reprovadas
+
+
 class SemCota(Exception):
     """O Google recusou por falta de cota, em geral porque o faturamento do projeto não está ativo."""
 
@@ -81,6 +85,13 @@ def provedor_de_api(perfil):
 # usuário em 2026-11-02: "nem está para fazer imagem pela api"). Sem login, o vídeo para pedindo a reconexão; no
 # limite, espera ele voltar. O provedor_reserva fica guardado só para quando o canal voltar para a chave de API
 SEM_RESERVA = "nenhuma"
+
+
+def _assinatura_de_reserva(projeto) -> bool:
+    """A assinatura do ChatGPT entra quando a chave de API do canal acaba. imagens.reserva_assinatura: false desliga."""
+    if (projeto.perfil.get("imagens") or {}).get("reserva_assinatura") is False:
+        return False
+    return chatgpt_assinatura.disponivel()
 
 
 def _parada_da_assinatura(erro) -> str:
@@ -136,6 +147,8 @@ def _prioridade_da_ia(cena) -> int:
     personagem, que só a IA desenha)."""
     if cena.get("personagem") or cena.get("prompt_manual") or cena.get("imagem_da_pessoa"):
         return 0
+    if cena.get("garantia"):
+        return 0  # a foto de banco ainda não combinava no fim (corrigir.garantir): só a IA resolve
     if cena.get("teto_ia"):
         # já teve a chance no banco pelo teto: se voltou para a IA, a foto do assunto não existia ou foi reprovada
         # pelo Jev (nunca outra coisa no vídeo). Uma vez só, senão a cena ia e voltava entre o banco e a IA
@@ -238,6 +251,9 @@ def _gerar(projeto, apenas=None, log=print, direto=False):
         except (Exception, SystemExit) as erro:
             # deixa as imagens saírem com os prompts que já tinham
             log(f"  a revisão dos prompts em sequência falhou, seguindo com os prompts atuais: {str(erro)[:160]}")
+        pendentes = banco_proprio.atender(projeto, pendentes, log)
+        if not pendentes:
+            return gerar_revisao(projeto)
 
     referencias = []
     if not projeto.offline:
@@ -268,7 +284,13 @@ def _gerar(projeto, apenas=None, log=print, direto=False):
         return gerar_revisao(projeto)
 
     falhas = []
-    with ThreadPoolExecutor(geral.get("processos", 6)) as executor:
+    teto = int(geral.get("processos", 6))
+    prov_da_vez = provedor(projeto.perfil)
+    juntas = concorrencia(prov_da_vez, teto)
+    _LIMITES_VISTOS[prov_da_vez] = 0
+    if juntas < teto:
+        log(f"  imagens: {juntas} ao mesmo tempo, o que {prov_da_vez} aguentou da última vez (teto {teto})")
+    with ThreadPoolExecutor(juntas) as executor:
         futuros = {
             executor.submit(_gerar_uma, projeto, c, referencias, geral.get("tentativas", 3)): c
             for c in pendentes
@@ -286,6 +308,7 @@ def _gerar(projeto, apenas=None, log=print, direto=False):
             else:
                 if i % 5 == 0 or i == len(futuros):
                     log(f"  imagens {i}/{len(futuros)}")
+    aprender_concorrencia(prov_da_vez, teto, juntas, _LIMITES_VISTOS.get(prov_da_vez, 0))
     if falhas:
         log(f"  {len(falhas)} imagens falharam ({', '.join(map(str, sorted(falhas)))}). "
             "Rode o mesmo comando para tentar só essas, ou troque a descrição com fabrica refazer --prompt.")
@@ -316,7 +339,8 @@ Regras:
 4. Respeite o que o pedido exige: época, lugar, roupas, a espécie exata, e pessoa real vista de costas ou sem o rosto
    quando o pedido diz isso. Mesma época e mesmos personagens em todo o trecho, coerentes entre si.
 5. Cenas marcadas "JÁ TEM IMAGEM" não mudam: só servem para você não repetir o que elas mostram.
-6. Prompt em inglês, de 1 a 3 frases: sujeito, ação, enquadramento e ambiente. Nunca peça texto escrito na imagem.
+6. Prompt em inglês, de 1 a 3 frases: sujeito, ação, enquadramento e ambiente. Texto na imagem só a loja, a marca ou o
+   preço que a fala cita, escrito entre aspas, com até 4 palavras. Nunca invente nenhum deles.
    Responda um item para cada cena que pode mudar."""
 
 ESQUEMA_SEQUENCIA = {
@@ -329,6 +353,126 @@ ESQUEMA_SEQUENCIA = {
     "required": ["cenas"],
 }
 _TRECHO_MAXIMO = 8  # cenas por pedido; trecho maior vai em partes, cada parte vendo o fim da anterior
+
+
+def adiantar(projeto, log=print):
+    """Começa as imagens de IA enquanto a busca de acervo roda, e devolve a linha para esperar (ou None).
+
+    Pedido do usuário em 2026-11-06: o 15-animais-pre-historicos passou 33 min em busca e conferência e só depois gastou
+    38 min gerando imagens que não dependiam delas. As cenas nascidas para a IA já têm o pedido pronto. O que escreve no
+    cenas.json fica antes de a linha começar: daqui em diante ela só grava arquivos de imagem, então não briga com a busca.
+    Fica de fora o que depende do resultado da busca: a cena de personagem (precisa das referências) e uma folga do teto
+    de IA, que é das cenas que o Jev reprovar. Nunca para o vídeo: o que não sair agora, imagens.gerar faz depois."""
+    if projeto.offline or not (projeto.config.get("imagens") or {}).get("adiantar", True) or not midia.ia_ativa(projeto):
+        return None
+    cenas = projeto.ler_json("cenas.json")["cenas"]
+    pendentes = [c for c in pendentes_ia(projeto, cenas) if not c.get("personagem")]
+    if not pendentes:
+        return None
+    try:
+        if prompts_em_sequencia(projeto, {c["n"] for c in pendentes}, log):
+            cenas = projeto.ler_json("cenas.json")["cenas"]
+            pendentes = [c for c in pendentes_ia(projeto, cenas) if not c.get("personagem")]
+    except (Exception, SystemExit) as erro:
+        log(f"  a revisão dos prompts em sequência falhou, seguindo com os prompts atuais: {str(erro)[:160]}")
+    teto = midia.teto_da_ia(projeto)
+    if teto:
+        pendentes = sorted(pendentes, key=lambda c: (_prioridade_da_ia(c), c["n"]))[:int(teto * len(cenas) * FOLGA_DO_TETO)]
+    geral = projeto.config.get("imagens") or {}
+
+    def rodar():
+        try:
+            faltam = banco_proprio.atender(projeto, pendentes, log)
+            with ThreadPoolExecutor(concorrencia(provedor(projeto.perfil), int(geral.get("processos", 6)))) as executor:
+                futuros = [executor.submit(_gerar_uma, projeto, c, [], geral.get("tentativas", 3)) for c in faltam]
+                for futuro in as_completed(futuros):
+                    try:
+                        futuro.result()
+                    except SemCota as erro:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        log(f"  imagens adiantadas paradas: {str(erro)[:160]}")
+                        return
+                    except Exception:  # noqa: BLE001 (a cena que falhou aqui é refeita em imagens.gerar)
+                        pass
+        except (Exception, SystemExit) as erro:
+            log(f"  as imagens adiantadas pararam, seguem depois da busca: {str(erro)[:160]}")
+
+    log(f"  adiantando {len(pendentes)} imagens de IA enquanto a busca roda")
+    _ADIANTADAS[projeto.nome] = {c["n"] for c in pendentes}
+    linha = threading.Thread(target=rodar, daemon=True, name=f"imagens-{projeto.nome}")
+    linha.start()
+    return linha
+
+
+# as cenas que a linha das adiantadas já levou, por projeto: o gerador de fundo não faz a mesma cena junto com ela
+_ADIANTADAS: dict = {}
+
+
+@contextmanager
+def ao_fundo(projeto, log=print, intervalo=15.0, onde=""):
+    """Gera as imagens de IA enquanto a conferência roda, em vez de esperar ela acabar (pedido do usuário em 2026-11-09,
+    "juntar as ondas"). Medido no 25-cavalos: a Conferência levou 24 min sem nenhuma imagem sendo feita e só depois
+    vieram 27 min de imagens; a Conferência das completadas e a garantia repetiam isso no fim.
+
+    A cada `intervalo` segundos, a cena que a conferência já mandou para a IA começa a ser gerada. Ficam para o
+    imagens.gerar de depois, como antes: a cena de personagem (precisa das referências) e a cena de um trecho de IA
+    seguido, porque o prompts_em_sequencia reescreve os prompts do trecho no cenas.json, e reescrever aqui brigaria com
+    a conferência, que grava o mesmo arquivo. Daqui só saem arquivos de imagem, nunca o cenas.json. A cena que a
+    conferência devolver ao acervo depois fica com a imagem de IA sem uso (US$ 0,004 no máximo). imagens.ao_fundo:
+    false desliga."""
+    geral = projeto.config.get("imagens") or {}
+    if projeto.offline or geral.get("ao_fundo") is False or not midia.ia_ativa(projeto):
+        yield
+        return
+    parar = threading.Event()
+    feitas = {"n": 0}
+
+    def rodar():
+        no_ar, ja = {}, set(_ADIANTADAS.get(projeto.nome, set()))
+        with ThreadPoolExecutor(concorrencia(provedor(projeto.perfil), int(geral.get("processos", 6)))) as executor:
+            while True:
+                for n, futuro in list(no_ar.items()):
+                    if not futuro.done():
+                        continue
+                    no_ar.pop(n)
+                    erro = futuro.exception()
+                    if isinstance(erro, SemCota):
+                        log(f"  imagens de fundo paradas: {str(erro)[:160]}")
+                        parar.set()
+                    elif erro is None:
+                        feitas["n"] += 1
+                if parar.is_set():
+                    break
+                try:
+                    cenas = projeto.ler_json("cenas.json")["cenas"]
+                    pendentes = [c for c in pendentes_ia(projeto, cenas)
+                                 if not c.get("personagem") and c["n"] not in no_ar and c["n"] not in ja]
+                    em_trecho = {x["n"] for t in _trechos_de_ia(cenas, {c["n"] for c in pendentes}) for x in t}
+                    pendentes = [c for c in pendentes if c["n"] not in em_trecho]
+                    if pendentes:
+                        faltam = banco_proprio.atender(projeto, pendentes, log)
+                        for c in faltam:
+                            ja.add(c["n"])
+                            no_ar[c["n"]] = executor.submit(_gerar_uma, projeto, c, [], geral.get("tentativas", 3))
+                except (Exception, SystemExit) as erro:  # noqa: BLE001 (o fundo nunca para o vídeo: gerar faz depois)
+                    log(f"  imagens de fundo: {str(erro)[:160]}")
+                parar.wait(intervalo)
+            for futuro in no_ar.values():     # as que estão no ar terminam antes de a criação seguir
+                try:
+                    futuro.result()
+                    feitas["n"] += 1
+                except Exception:  # noqa: BLE001
+                    pass
+
+    linha = threading.Thread(target=rodar, daemon=True, name=f"imagens-fundo-{projeto.nome}")
+    linha.start()
+    try:
+        yield
+    finally:
+        parar.set()
+        linha.join()
+        if feitas["n"]:
+            log(f"  {feitas['n']} imagem(ns) de IA feitas durante {onde or 'a conferência'}, sem esperar ela acabar")
 
 
 def _palavras_do_prompt(texto) -> set:
@@ -468,7 +612,7 @@ def _motion_antes_da_ia(projeto, apenas, pendentes, log):
     if so_motion:
         from . import corrigir
         for n in so_motion:
-            corrigir._voltar_reserva(projeto, n, log)
+            corrigir._voltar_reserva(projeto, n, log, motivo="o motion não saiu (nenhuma imagem de IA foi feita)")
         log(f"  {len(so_motion)} cena(s) com nota baixa não viraram motion e voltaram para a foto que tinham")
     if feitas or so_motion:
         cenas = [c for c in projeto.ler_json("cenas.json")["cenas"] if apenas is None or c["n"] in apenas]
@@ -527,7 +671,8 @@ def _avisar_reserva(projeto, prov, erro):
     if marca in _RESERVA_AVISADA:
         return
     _RESERVA_AVISADA.add(marca)
-    print(f"  a assinatura do ChatGPT não atendeu: as imagens que faltam saem pelo {prov}. {str(erro)[:200]}")
+    origem = "a chave de API" if prov.startswith("assinatura") else "a assinatura do ChatGPT"
+    print(f"  {origem} não atendeu: as imagens que faltam saem pela {prov}. {str(erro)[:200]}")
 
 
 def _imagem_por_api(prov, prompt, img, usar, projeto):
@@ -540,6 +685,37 @@ def _imagem_por_api(prov, prompt, img, usar, projeto):
     if prov == "openrouter":
         return _imagem_openrouter(prompt, img, projeto)
     return _imagem_fal(prompt, img, usar)
+
+
+# Quantas imagens ao mesmo tempo cada provedor aguentou. imagens.processos é o teto, e o que está aqui só desce dele:
+# depois de um 429 a próxima leva vai com a metade, e sem 429 ela dobra de volta. Pedir 16 juntas numa chave que aguenta
+# 4 gasta tempo em erro e espera, e o provedor pode segurar a chave.
+ARQUIVO_CONCORRENCIA = RAIZ / "imagens_concorrencia.json"
+_LIMITES_VISTOS: dict = {}
+
+
+def concorrencia(prov: str, teto: int) -> int:
+    try:
+        aprendido = int(json.loads(ARQUIVO_CONCORRENCIA.read_text(encoding="utf-8")).get(prov) or teto)
+    except (OSError, ValueError, AttributeError):
+        aprendido = teto
+    return max(1, min(teto, aprendido))
+
+
+def aprender_concorrencia(prov: str, teto: int, usada: int, limites: int) -> None:
+    novo = max(2, usada // 2) if limites else min(teto, usada * 2)
+    try:
+        dados = json.loads(ARQUIVO_CONCORRENCIA.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        dados = {}
+    if novo >= teto:
+        dados.pop(prov, None)  # no teto não há o que lembrar: o config.yaml manda
+    else:
+        dados[prov] = novo
+    try:
+        ARQUIVO_CONCORRENCIA.write_text(json.dumps(dados), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _gerar_uma(projeto, cena, referencias, tentativas):
@@ -570,16 +746,39 @@ def _gerar_uma(projeto, cena, referencias, tentativas):
                         raise SemCota(_parada_da_assinatura(e)) from e
                     _avisar_reserva(projeto, prov, e)
                     # as referências da assinatura são bytes, que só o Google também entende (a fal.ai quer links)
-                    dados, registro = _imagem_por_api(prov, prompt, img, usar if prov == "google" else [], projeto)
+                    try:
+                        dados, registro = _imagem_por_api(prov, prompt, img, usar if prov == "google" else [], projeto)
+                    except SemCota as sem:
+                        # as duas acabaram: a mensagem diz as duas, para a pessoa saber o que resolver
+                        raise SemCota(f"As duas fontes de imagem pararam. ChatGPT: {e} Reserva ({prov}): {sem}") from sem
                     registro["reserva_da_assinatura"] = str(e)[:200]
                 except chatgpt_assinatura.SemImagemNaResposta as e:
                     raise SemImagem(str(e)) from e
             else:
-                dados, registro = _imagem_por_api(prov, prompt, img, usar, projeto)
+                try:
+                    dados, registro = _imagem_por_api(prov, prompt, img, usar, projeto)
+                except SemCota as e:
+                    # o caminho de volta (pedido do usuário em 2026-11-08: "sempre que acabar o crédito de um vai pro
+                    # outro"): a chave de API sem crédito ou no limite da semana, e o ChatGPT conectado, a imagem sai
+                    # pela assinatura, que não custa por imagem
+                    if not _assinatura_de_reserva(projeto):
+                        raise
+                    _avisar_reserva(projeto, "assinatura do ChatGPT", e)
+                    try:
+                        # a assinatura só entende referência em bytes; link da fal.ai fica de fora
+                        em_bytes = [r for r in usar if isinstance(r, tuple)]
+                        dados, registro = chatgpt_assinatura.gerar(
+                            prompt, img.get("qualidade") or "low", img.get("proporcao", "16:9"), em_bytes)
+                    except (chatgpt_assinatura.SemLogin, chatgpt_assinatura.LimiteDaAssinatura) as sem:
+                        raise SemCota(f"As duas fontes de imagem pararam. {prov}: {e} ChatGPT: {sem}") from sem
+                    except chatgpt_assinatura.SemImagemNaResposta as sem:
+                        raise SemImagem(str(sem)) from sem
+                    registro["reserva_da_api"] = str(e)[:200]
             temporario = destino.with_name(destino.stem + ".baixando")
             temporario.write_bytes(dados)
             temporario.replace(destino)
             destino.with_suffix(".json").write_text(json.dumps(registro, ensure_ascii=False, indent=2), encoding="utf-8")
+            banco_proprio.depois_de_gerar(projeto, cena, destino, registro)
             from . import custos_reais
 
             custos_reais.registrar(
@@ -608,6 +807,8 @@ def _gerar_uma(projeto, cena, referencias, tentativas):
             tempos.anotar_chamada(projeto, "imagem", "imagem de IA", comeco, False, cena=cena["n"],
                                   tentativa=tentativa + 1, motivo=str(e)[:160])
             erro = e
+            if "429" in str(e):
+                _LIMITES_VISTOS[provedor(projeto.perfil)] = _LIMITES_VISTOS.get(provedor(projeto.perfil), 0) + 1
             if _recusa_de_seguranca(e):
                 # repetir o mesmo pedido recusado não adianta: ele é reescrito uma vez, sem o detalhe que o filtro barrou
                 novo = None if suavizado else _prompt_sem_recusa(projeto, cena, prompt)
@@ -851,7 +1052,7 @@ def _imagem_openrouter(prompt, img, projeto=None):
     """Gera imagem por um modelo de imagem do OpenRouter (padrão: Grok Imagine Image 2.0). A imagem volta na própria
     resposta, em base64 ou como endereço. Usa a chave do OpenRouter que a fábrica já tem no .env."""
     import base64
-    from .openrouter_local import cabecalhos, credito_reservado, postar_com_sessao
+    from .openrouter_local import aviso_de_limite, cabecalhos, credito_reservado, limite_da_chave, postar_com_sessao
 
     modelo = img.get("modelo_openrouter") or (img.get("modelo") if "/" in str(img.get("modelo") or "")
                                               and not str(img.get("modelo")).startswith("grok-imagine-image-2-0/")
@@ -867,6 +1068,8 @@ def _imagem_openrouter(prompt, img, projeto=None):
             raise RuntimeError("OpenRouter: o saldo seguiu reservado pelos pedidos em andamento por 3 minutos")
         if r.status_code == 402:
             raise SemCota("OpenRouter: acabou o crédito. Adicione saldo em openrouter.ai/credits.")
+        if limite_da_chave(r):
+            raise SemCota(aviso_de_limite(r))
         if r.status_code in (401, 403):
             raise RuntimeError(f"OpenRouter recusou a chave ({r.status_code}). Confira o .env.")
         if r.status_code != 200:
@@ -893,7 +1096,7 @@ def _imagem_openrouter_images(prompt, img, modelo, projeto=None):
     """GPT Image (openai/gpt-image-1) e GPT-5.4 Image 2 pela interface de imagens do OpenRouter. A qualidade vem de
     imagens.qualidade no perfil (padrão low) e a proporção é a mais larga que o modelo aceita (PROPORCAO_IMAGES_API)."""
     import base64
-    from .openrouter_local import cabecalhos, credito_reservado, postar_com_sessao
+    from .openrouter_local import aviso_de_limite, cabecalhos, credito_reservado, limite_da_chave, postar_com_sessao
 
     qualidade = str(img.get("qualidade") or "low").lower()
     corpo = {"model": modelo, "prompt": prompt, "n": 1, "quality": qualidade,
@@ -907,6 +1110,8 @@ def _imagem_openrouter_images(prompt, img, modelo, projeto=None):
             raise RuntimeError("OpenRouter: o saldo seguiu reservado pelos pedidos em andamento por 3 minutos")
         if r.status_code == 402:
             raise SemCota("OpenRouter: acabou o crédito. Adicione saldo em openrouter.ai/credits.")
+        if limite_da_chave(r):
+            raise SemCota(aviso_de_limite(r))
         if r.status_code in (401, 403):
             raise RuntimeError(f"OpenRouter recusou a chave ({r.status_code}). Confira o .env.")
         if r.status_code != 200:

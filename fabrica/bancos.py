@@ -386,13 +386,50 @@ def tepapa(b, tipo, busca):
     return achados
 
 
+_LICENCAS_OPENVERSE = {"cc0": "cc0", "pdm": "pdm", "by": "cc-by", "by-sa": "cc-by-sa"}
+
+
+def openverse(b, tipo, busca):
+    """Fotos com licença livre juntadas de vários acervos (Flickr, museus, bibliotecas). Sem chave, com pouca folga: 20
+    buscas por minuto e 200 por dia, e fora do ar com frequência, por isso o prazo curto."""
+    if tipo != "foto":
+        return []
+    licencas = ["cc0", "pdm"] + (["by"] if b.cfg.get("aceitar_cc_by", True) else []) \
+        + (["by-sa"] if b.cfg.get("aceitar_cc_by_sa", False) else [])
+    r = b.http.get("https://api.openverse.org/v1/images/", timeout=20, params={
+        "q": busca, "license": ",".join(licencas), "page_size": 20, "filter_dead": "false"})
+    b._checar(r, "Openverse")
+    achados = []
+    for foto in r.json().get("results", []):
+        codigo = _LICENCAS_OPENVERSE.get(foto.get("license"), "")
+        if not foto.get("url") or not _licenca_livre(b, codigo):
+            continue
+        marcas = ", ".join(t.get("name", "") for t in (foto.get("tags") or [])[:8])
+        achados.append({
+            "fonte": "openverse", "id": str(foto.get("id")), "tipo": "foto",
+            "miniatura": foto.get("thumbnail") or foto["url"], "arquivo": foto["url"], "duracao": None,
+            "pagina": foto.get("foreign_landing_url") or "", "autor": _limpar(foto.get("creator"), 120),
+            "licenca": f"{codigo.upper()} {foto.get('license_version') or ''} (Openverse)".replace("  ", " "),
+            "descricao": _limpar(f"{foto.get('title') or ''}. {marcas}"),
+        })
+    return achados
+
+
 # Bancos de acervo (museus, arquivos e bibliotecas): devolvem pintura, gravura, objeto de vitrine e foto antiga.
 # Numa cena comum ("lince na neve") só ocupam vagas dos candidatos, então entram apenas em cena de acervo
 # (midia._e_de_acervo): assunto histórico, de arte, artefato, ou que o agente mandou buscar na Wikimedia.
-ACERVO = {"harvard", "europeana", "smithsonian", "nypl", "tepapa"}
+ACERVO = {"harvard", "europeana", "smithsonian", "nypl", "tepapa", "openverse"}
 
 # O Biodiversity Heritage Library (biodiversitylibrary.org) ficou de fora de propósito: a API devolve livros e
 # artigos científicos inteiros, não imagens soltas, então não há o que pôr numa cena.
+
+def youtube(b, tipo, busca):
+    """Trechos de vídeos do YouTube (garimpo.py). Só entra nos perfis que pedem a fonte "youtube": o trecho
+    é obra de terceiro e o YouTube não licencia o download, então ninguém usa isso sem pedir."""
+    from . import garimpo
+
+    return garimpo.buscar(b, tipo, busca, garimpo.cfg_do_projeto(b.projeto))
+
 
 # o que cada banco tem de melhor, dito ao Passo 2 para ele escrever a busca certa para cada um
 FORCAS = {
@@ -408,6 +445,9 @@ FORCAS = {
     "harvard": "obras de arte de museu: pintura, gravura, escultura, sobretudo de séculos passados",
     "nypl": "fotos antigas, gravuras, mapas e cartões-postais históricos em domínio público (baixa resolução)",
     "tepapa": "museu da Nova Zelândia: espécimes de história natural, fotografia antiga, objetos e arte",
+    "openverse": "fotos de licença livre de vários acervos juntos: Flickr, museus e bibliotecas",
+    "youtube": "trechos de vídeos reais do YouTube: a cena acontecendo de verdade, gente, loja, rua, notícia,"
+               " o que banco de imagem não tem",
 }
 
 
@@ -419,4 +459,5 @@ def descrever(fontes):
 
 # fonte -> função
 FONTES = {"inaturalist": inaturalist, "nasa": nasa, "unsplash": unsplash, "coverr": coverr, "smithsonian": smithsonian,
-          "europeana": europeana, "harvard": harvard, "nypl": nypl, "tepapa": tepapa}
+          "europeana": europeana, "harvard": harvard, "nypl": nypl, "tepapa": tepapa, "openverse": openverse,
+          "youtube": youtube}

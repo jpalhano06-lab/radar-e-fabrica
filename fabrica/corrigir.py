@@ -1069,13 +1069,19 @@ def mandar_para_ia(projeto, itens, log=print) -> list[int]:
             c.pop("motion_so", None)
         mandadas.append(c["n"])
     projeto.salvar_json("cenas.json", dados)
-    if mandadas:
-        log(f"  {len(mandadas)} cena(s) erradas vão para imagem de IA: {', '.join(map(str, mandadas[:40]))}")
+    so_motion = [n for n in mandadas if por_n[n].get("motion_so")]
+    ia = [n for n in mandadas if n not in so_motion]
+    if ia:
+        log(f"  {len(ia)} cena(s) erradas vão para imagem de IA: {', '.join(map(str, ia[:40]))}")
+    if so_motion:
+        log(f"  {len(so_motion)} cena(s) de nota baixa tentam o motion (sem imagem de IA; se não sair, a foto volta): "
+            + ", ".join(map(str, so_motion[:40])))
     return mandadas
 
 
-def _voltar_reserva(projeto, n, log) -> bool:
-    """A cena volta para a foto que tinha antes da IA."""
+def _voltar_reserva(projeto, n, log, motivo="a imagem de IA saiu pior") -> bool:
+    """A cena volta para a foto que tinha antes da IA. motivo vai para o log: a cena que só tentou o motion
+    (motion_so) nunca teve imagem de IA, e o log dizia "a imagem de IA saiu pior" (2026-11-07, parecia desperdício)."""
     dados = projeto.ler_json("cenas.json")
     c = next((x for x in dados["cenas"] if x["n"] == n), None)
     reserva = (c or {}).get("ia_reserva")
@@ -1092,7 +1098,7 @@ def _voltar_reserva(projeto, n, log) -> bool:
     c["captura"] = {**(c.get("captura") or {}), "suspeita": True}
     c.pop("ia_reserva", None)
     projeto.salvar_json("cenas.json", dados)
-    log(f"  cena {n}: a imagem de IA saiu pior, voltou a foto que estava")
+    log(f"  cena {n}: {motivo}, voltou a foto que estava")
     return True
 
 
@@ -1114,6 +1120,17 @@ def conferir_ia(projeto, numeros=None, log=print) -> dict:
     refazer = {n: a for n, a in avaliacoes.items() if errada(a)}
     if refazer:
         log(f"  {len(refazer)} imagem(ns) de IA mostram outra coisa: fazendo de novo, com o motivo no pedido")
+        avaliacoes.update(_refazer_ia(projeto, refazer, log))
+    return avaliacoes
+
+
+def _refazer_ia(projeto, refazer, log=print, ruim=errada) -> dict:
+    """Faz de novo as imagens de IA de {n: avaliação}, com o que o Jev viu no pedido, e confere outra vez. Se a nova
+    ainda for ruim e a foto que a cena tinha antes da IA for melhor, a foto volta. Devolve {n: avaliação nova}."""
+    from . import imagens
+
+    de_novo = {}
+    if refazer:
         por_n = {c["n"]: c for c in projeto.ler_json("cenas.json")["cenas"]}
         correcoes, bases, guardas = {}, {}, {}
         for n, a in refazer.items():
@@ -1164,14 +1181,74 @@ def conferir_ia(projeto, numeros=None, log=print) -> dict:
             guarda.unlink(missing_ok=True)
         de_novo = _avaliar(projeto, set(refazer), log, NOTA_MINIMA)
         _guardar(projeto, de_novo, rodada=0)
-        avaliacoes.update(de_novo)
-        por_n = {c["n"]: c for c in projeto.ler_json("cenas.json")["cenas"]}
-        for n, a in de_novo.items():
-            reserva = (por_n[n].get("ia_reserva") or {})
-            if errada(a) and reserva.get("nota") is not None and reserva["nota"] > a["nota"] \
-                    and (reserva.get("sujeito") or 0) > (a.get("sujeito") or 0):
-                _voltar_reserva(projeto, n, log)
-    return avaliacoes
+        _voltar_se_pior(projeto, de_novo, log, ruim)
+    return de_novo
+
+
+def _voltar_se_pior(projeto, avaliacoes, log=print, ruim=errada, empate_no_sujeito=False):
+    """A imagem de IA nova ainda ruim, e a foto de antes melhor (na nota e no sujeito): a foto volta. Nunca piorar.
+    Com empate_no_sujeito, o mesmo sujeito basta: na garantia a foto era do assunto certo e só a nota era baixa."""
+    por_n = {c["n"]: c for c in projeto.ler_json("cenas.json")["cenas"]}
+    for n, a in avaliacoes.items():
+        reserva = (por_n.get(n, {}).get("ia_reserva") or {})
+        if ruim(a) and reserva.get("nota") is not None and reserva["nota"] > a["nota"] \
+                and ((reserva.get("sujeito") or 0) > (a.get("sujeito") or 0)
+                     or empate_no_sujeito and (reserva.get("sujeito") or 0) >= (a.get("sujeito") or 0)):
+            _voltar_reserva(projeto, n, log)
+
+
+def ruim_no_fim(avaliacao) -> bool:
+    """A mesma régua da nota de qualidade (qualidade.calcular): abaixo da nota mínima ou mostrando outra coisa."""
+    return avaliacao is not None and (avaliacao["nota"] < NOTA_MINIMA or errada(avaliacao))
+
+
+def garantir(projeto, log=print) -> dict:
+    """Última volta antes do vídeo sair: a foto de banco que ainda não combina com a fala vira imagem de IA.
+
+    Pedido do usuário em 2026-11-07: "tem que entregar o vídeo sempre com imagem condizente; se não foi encontrada
+    imagem real, tem que criar uma com IA". Os pedidos 65 a 74 saíram com 38% a 49% das cenas certas: a conferência só
+    trocava sozinha a cena claramente errada, e a de assunto certo e nota baixa ficava. Aqui ela vai para a IA, acima do
+    teto (marca garantia), uma vez só. A imagem de IA ruim NÃO é feita de novo (pedido do usuário no mesmo dia), e se a
+    nova sair pior que a foto, a foto volta. Fica de fora a cena da pessoa, a de personagem e a de motion e animação.
+    Cada imagem custa uns US$ 0,0046 (gpt-5.4-image-2 pelo OpenRouter, medido no custos_reais.json)."""
+    from . import imagens, qualidade
+
+    cfg = projeto.config.get("corrigir") or {}
+    if projeto.offline or not midia.ia_ativa(projeto) or not cfg.get("garantir", True):
+        return {}
+    fotos = []
+    for c in projeto.ler_json("cenas.json")["cenas"]:
+        if c.get("personagem") or c.get("prompt_manual") or c.get("imagem_da_pessoa") or not c.get("midia"):
+            continue
+        if qualidade._origem(c, projeto) not in ("escolhida", "tapa-buraco"):
+            continue
+        a = qualidade._avaliacao(c)
+        if ruim_no_fim(a):
+            fotos.append({"cena": c["n"], "prompt": (a.get("prompt_novo") or "").strip() or c.get("prompt", ""),
+                          "motivo": f"no fim ainda não combinava com a fala: {(a.get('legenda') or '')[:160]}"})
+    if not fotos:
+        return {"para_ia": [], "voltaram": []}
+    log(f"  garantia: {len(fotos)} foto(s) de banco ainda não combinam com a fala, vão para a imagem de IA")
+    mandadas = mandar_para_ia(projeto, fotos, log)
+    dados = projeto.ler_json("cenas.json")
+    for c in dados["cenas"]:
+        if c["n"] in mandadas:
+            c["garantia"] = True  # imagens._prioridade_da_ia: o teto não devolve esta cena para o banco
+    projeto.salvar_json("cenas.json", dados)
+    try:
+        imagens.gerar(projeto, apenas=set(mandadas), log=log, conferir=False)
+    except (Exception, SystemExit) as erro:
+        log(f"  as imagens de IA da garantia não saíram agora ({str(erro)[:160]})")
+    voltaram = set(_devolver_sem_imagem(projeto, set(mandadas), log))
+    geradas = {c["n"] for c in projeto.ler_json("cenas.json")["cenas"]
+               if c["n"] in set(mandadas) - voltaram and projeto.imagem(c["n"]).exists() and not c.get("midia")}
+    if geradas:
+        novas = _avaliar(projeto, geradas, log, NOTA_MINIMA)
+        _guardar(projeto, novas, rodada=0)
+        antes = {c["n"] for c in projeto.ler_json("cenas.json")["cenas"] if c.get("midia")}
+        _voltar_se_pior(projeto, novas, log, ruim_no_fim, empate_no_sujeito=True)
+        voltaram |= {c["n"] for c in projeto.ler_json("cenas.json")["cenas"] if c.get("midia")} - antes
+    return {"para_ia": sorted(set(mandadas) - voltaram), "voltaram": sorted(voltaram)}
 
 
 def resolver_com_ia(projeto, itens, log=print) -> list[int]:

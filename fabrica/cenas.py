@@ -25,10 +25,13 @@ ESTILO_ALVO_SEGUNDOS = 4.0
 ESTILO_MINIMO_SEGUNDOS = 3.0
 ESTILO_MAXIMO_SEGUNDOS = 5.0
 ESTILO_MINIMO_FOTOS = 0.70  # do material real, pelo menos isso tem que ser foto
-# nos primeiros minutos, esta fatia do material real é vídeo, para prender a atenção: (até o segundo, fatia)
-# os primeiros 40 s são o gancho: todo material real é vídeo (pedido do usuário em 2026-10-25: "os primeiros 40s são os
-# mais importantes"); depois, 70% vídeo e 30% foto até os 5 minutos. Época, arquivo e enumeração seguem como foto
-ESTILO_VIDEO_NO_INICIO = ((40.0, 1.0), (300.0, 0.70))
+# e pelo menos isso é vídeo, espalhado pelo vídeo inteiro (pedido do usuário em 2026-11-07: a retenção). O agente quase
+# nunca pedia vídeo e, sem a regra do começo, o 25-cavalos saiu com 505 fotos e nenhum vídeo de banco. A cena que não
+# acha vídeo do assunto cai para foto na busca (midia.Buscador.candidatos), então o mínimo nunca deixa cena vazia
+ESTILO_MINIMO_VIDEO = 0.25
+# fatias de vídeo por trecho do começo: (até o segundo, fatia). Vazio desde 2026-11-06, a pedido do usuário: o começo segue
+# a mesma regra do resto do vídeo. Era 100% de vídeo nos 40 s iniciais e 70% até os 5 minutos (pedido de 2026-10-25)
+ESTILO_VIDEO_NO_INICIO = ()
 # Sem teto de IA (desde 2026-10-03, pedido do usuário): cena que não existe em foto ou que veio errada recebe imagem de
 # IA, quantas forem. O teto de 15% transformava em foto de banco as cenas que o agente marcou como IA, e foi assim que
 # o virou-filme-em-1996 saiu com 86 cenas de outra coisa. Com a IA desligada (ia.ativa: false), nenhuma cena é de IA
@@ -313,6 +316,23 @@ def _dividir_enumeracoes(cenas, alinhamento, minimo=ESTILO_MINIMO_ENUMERACAO, lo
     return resultado
 
 
+def _aplicar_fracao_da_ia(cenas, fracao, log=print):
+    """Leva a parte de IA do vídeo até a escolhida (ia.fracao), espalhada pelo vídeo. As cenas que só valem de verdade
+    (nome exato, época, arquivo) são as últimas a virar IA. O agente já escreveu o prompt de toda cena, então nada é
+    pedido de novo; a busca fica de reserva. O excesso de IA quem corta é o teto (imagens._teto_da_ia)."""
+    falta = round(fracao * len(cenas)) - sum(1 for c in cenas if c.get("tipo") == "ia")
+    reais = [c for c in cenas if c.get("tipo") != "ia" and (c.get("prompt") or "").strip()]
+    if falta <= 0 or not reais:
+        return
+    soltas = [c for c in reais if not (c.get("exato") or c.get("epoca") or c.get("onde_existe") == "arquivo")]
+    presas = [c for c in reais if c not in soltas]
+    quantas = min(falta, len(soltas))
+    escolhidas = [soltas[i * len(soltas) // quantas] for i in range(quantas)] + presas[:falta - quantas]
+    for c in escolhidas:
+        c["tipo"], c["busca_reserva"], c["busca"] = "ia", c.get("busca") or c.get("busca_reserva") or "", ""
+    log(f"  parte de IA escolhida ({fracao:.0%}): {len(escolhidas)} cena(s) de banco viraram imagem de IA")
+
+
 def _balancear_proporcao_90_10(cenas, log=print, sem_ia=False):
     """Com a IA desligada (ia.ativa: false no config.yaml), toda cena de IA vira foto ou vídeo de acervo. Ligada, nada
     muda: não existe teto de IA, e a cena que não existe em foto fica com a IA."""
@@ -343,9 +363,29 @@ def _e_de_epoca(cena) -> bool:
     return e_de_epoca(cena)
 
 
+def _completar_video(reais) -> int:
+    """Leva o vídeo até ESTILO_MINIMO_VIDEO do material real, trocando fotos espalhadas pelo vídeo todo.
+
+    Primeiro as cenas de coisa comum de hoje (onde_existe banco, sem nome exato a mostrar), que o Pexels e o Pixabay
+    têm em vídeo; só depois as outras. Cena de enumeração fica foto: dura um ou dois segundos."""
+    falta = int(len(reais) * ESTILO_MINIMO_VIDEO + 0.5) - sum(1 for c in reais if c["tipo"] == "video_real")
+    if falta <= 0:
+        return 0
+    fotos = [c for c in reais if c["tipo"] == "foto_real" and not c.get("enumeracao") and not c.get("item_citado")]
+    boas = [c for c in fotos if c.get("onde_existe") in (None, "", "banco") and not (c.get("exato") or "").strip()]
+    trocadas = 0
+    for grupo in (boas, [c for c in fotos if c not in boas]):
+        quantas = min(falta - trocadas, len(grupo))
+        for k in range(quantas):
+            grupo[int(k * len(grupo) / quantas)]["tipo"] = "video_real"
+        trocadas += quantas
+        if trocadas >= falta:
+            break
+    return trocadas
+
+
 def _balancear_foto_e_video(cenas, log=print):
-    """Do material real, pelo menos 70% é foto, mas o começo é de vídeo: tudo vídeo nos primeiros 40 s e 70% vídeo e
-    30% foto até os 5 minutos (ESTILO_VIDEO_NO_INICIO).
+    """Do material real, pelo menos 70% é foto. Um trecho em ESTILO_VIDEO_NO_INICIO tem a fatia de vídeo dele.
 
     O começo não entra no teto de 30% de vídeo: o que ele usar é descontado do teto, e o resto do vídeo fica com
     o que sobrar (nada, se o começo já passou). Só troca o tipo (foto_real por video_real e o contrário),
@@ -391,6 +431,7 @@ def _balancear_foto_e_video(cenas, log=print):
     resto = faixas[-1]
     if sum(1 for c in resto if c["tipo"] == "video_real") > restante:
         mudou += ajustar(resto, restante)
+    mudou += _completar_video(reais)
     if mudou:
         fotos = sum(1 for c in reais if c["tipo"] == "foto_real")
         log(f"  ajustando foto e vídeo: {mudou} cena(s) trocadas, {fotos / len(reais):.0%} do material real é foto")
@@ -430,7 +471,7 @@ def _extrair_texto_palavras(palavras, t_ini, t_fim, fallback=""):
     if not palavras:
         return fallback
     pts = [p['texto'] for p in palavras if p.get('ini') is not None and (t_ini - 0.15) <= p['ini'] < (t_fim - 0.05)]
-    res = ' '.join(pts).strip()
+    res = tx.juntar_palavras(pts).strip()
     return res if len(res) > 3 else fallback
 
 
@@ -738,10 +779,12 @@ def planejar(projeto, log=print) -> list[dict]:
         log("  vídeo só com o personagem, sem cenas de imagem")
         return cenas
     unidades = alinhamento["unidades"]
-    # o ritmo de corte é do estilo de vídeo, igual em qualquer perfil — não vem do perfil
-    alvo = ESTILO_ALVO_SEGUNDOS
-    minimo = ESTILO_MINIMO_SEGUNDOS
-    maximo = ESTILO_MAXIMO_SEGUNDOS
+    # o ritmo de corte é do estilo de vídeo, igual em qualquer perfil — não vem do perfil. Um vídeo pode pedir outro
+    # (cenas.segundos_minimo e segundos_maximo, pela Nova produção do Radar)
+    ritmo = projeto.config.get("cenas") or {}
+    minimo = float(ritmo.get("segundos_minimo") or ESTILO_MINIMO_SEGUNDOS)
+    maximo = float(ritmo.get("segundos_maximo") or ESTILO_MAXIMO_SEGUNDOS)
+    alvo = (minimo + maximo) / 2 if ritmo.get("segundos_maximo") else ESTILO_ALVO_SEGUNDOS
 
     if projeto.offline:
         grupos = _agrupar_por_tempo(unidades, alvo, projeto.perfil)
@@ -781,7 +824,7 @@ def planejar(projeto, log=print) -> list[dict]:
             "_ini_calculo": ini,
             "fim": None,
             "frases": [g["primeira_frase"], g["ultima_frase"]],
-            "texto": " ".join(f["texto"] for f in frases),
+            "texto": tx.juntar_palavras([f["texto"] for f in frases]),
             "tipo": tipo,
             "busca": busca,
             "personagem": personagem,
@@ -836,6 +879,11 @@ def planejar(projeto, log=print) -> list[dict]:
         log(f"  {corrigidas} cena(s) voltaram a ter o pedido do agente para a frase que falam")
     
 
+
+    from .midia import fracao_da_ia
+
+    if fracao_da_ia(projeto):
+        _aplicar_fracao_da_ia(cenas, fracao_da_ia(projeto), log)
 
     if not projeto.offline and (projeto.config.get("cenas") or {}).get("provedor", "claude") in ("groq", "gemini"):
         # com o agente de roteiro, quem decide o que aparece é ele: aqui só as fatias de IA de uma enumeração
@@ -1018,6 +1066,8 @@ def _palavras_da_cena(alinhamento, frases):
 
 def _simplificar(palavra):
     sem_pontuacao = re.sub(r"[^\w]", "", palavra)
+    if tx.CJK.search(sem_pontuacao):
+        return sem_pontuacao.casefold()  # japonês viraria nada no ascii
     return unicodedata.normalize("NFKD", sem_pontuacao).encode("ascii", "ignore").decode().casefold()
 
 
@@ -1028,7 +1078,9 @@ def _momento_falado(texto, palavras_cena, ini_cena, reserva):
     ponto do texto e fica com o que é falado mais cedo. Antes só procurava o começo do texto: "A RIQUEZA EM SÉCULOS DE
     TRADIÇÃO" não achava "a riqueza" na fala e entrava no começo da cena, embora "séculos de tradição" fosse dito no
     fim dela (9 de 23 textos do ouro-da-serra-gaucha entravam assim)."""
-    alvo = [_simplificar(p) for p in texto.split() if _simplificar(p)][:8]
+    if tx.predomina_cjk(texto):
+        return _momento_falado_cjk(texto, palavras_cena, ini_cena, reserva)
+    alvo = [_simplificar(m.group()) for m in tx.achar_palavras(texto) if _simplificar(m.group())][:8]
     faladas = [_simplificar(p["texto"]) for p in palavras_cena]
     achados = []
     for tamanho in range(min(3, len(alvo)), 0, -1):
@@ -1042,6 +1094,22 @@ def _momento_falado(texto, palavras_cena, ini_cena, reserva):
                     break
     if achados:
         return round(max(0.0, min(achados) - ini_cena), 2)
+    return reserva
+
+
+def _momento_falado_cjk(texto, palavras_cena, ini_cena, reserva):
+    """O mesmo em japonês, por letras: 技術 na tela está dentro de 技術を na fala, e a palavra inteira não bateria."""
+    alvo = _simplificar(texto)
+    falado, donos = "", []
+    for p in palavras_cena:
+        pedaco = _simplificar(p["texto"])
+        falado += pedaco
+        donos += [p] * len(pedaco)
+    for tamanho in sorted({t for t in (len(alvo), 8, 6, 4, 3) if 2 <= t <= len(alvo)}, reverse=True):
+        lugares = [falado.find(alvo[i:i + tamanho]) for i in range(len(alvo) - tamanho + 1)]
+        achados = [donos[q]["ini"] for q in lugares if q >= 0 and donos[q]["ini"] is not None]
+        if achados:
+            return round(max(0.0, min(achados) - ini_cena), 2)
     return reserva
 
 
@@ -1315,7 +1383,7 @@ def _inicios_pela_fala(cenas, palavras) -> dict:
     sequencia = [normal(p.get("texto", "")) for p in palavras]
     inicios, cursor = {}, 0
     for c in cenas:
-        alvo = [w for w in (normal(x) for x in (c.get("texto") or "").split()) if w][:3]
+        alvo = [w for w in (normal(m.group()) for m in tx.achar_palavras(c.get("texto") or "")) if w][:3]
         if not alvo:
             continue
         for j in range(cursor, min(len(sequencia) - len(alvo) + 1, cursor + 400)):
@@ -1588,7 +1656,7 @@ def _pre_cortar(unidades, alvo, minimo, maximo):
         duracao = u["fim"] - unidades[inicio]["ini"]
         ultima = i == len(unidades) - 1
         estoura = not ultima and unidades[i + 1]["fim"] - unidades[inicio]["ini"] > maximo
-        fim_de_frase = u["texto"].rstrip().endswith((".", "?", "!", "…"))
+        fim_de_frase = u["texto"].rstrip().endswith(tx.FINAIS)
         if i in paralelas:
             # "Cobras estão nessa lista. Aranhas estão nessa lista.": cada frase paralela é uma cena, com a imagem do que ela cita
             grupos.append({"primeira_frase": inicio, "ultima_frase": i, "paralela": True})
@@ -1602,7 +1670,7 @@ def _pre_cortar(unidades, alvo, minimo, maximo):
 def _abre_assunto(unidades, inicio, i):
     """A frase i começa uma frase nova que anuncia o assunto da seguinte e não o do corte que está aberto
     (inicio a i-1): cita uma palavra de 5 letras ou mais que a frase seguinte repete e que o corte aberto não tem."""
-    if i + 1 >= len(unidades) or not unidades[i - 1]["texto"].rstrip().endswith((".", "?", "!", "…", ":")):
+    if i + 1 >= len(unidades) or not unidades[i - 1]["texto"].rstrip().endswith(tx.FINAIS + (":",)):
         return False
 
     def nomes(texto):
@@ -2014,7 +2082,7 @@ def _agrupar_por_tempo(unidades, alvo, perfil):
                 "prompt": " ".join(x["texto"] for x in frases),
                 "texto_tela": None,
                 "efeito": ({"descricao": sons[(len(grupos) // 3) % len(sons)], "duracao": 3,
-                            "palavra": frases[0]["texto"].split()[0]} if len(grupos) % 3 == 2 else None),
+                            "palavra": tx.achar_palavras(frases[0]["texto"])[0].group()} if len(grupos) % 3 == 2 else None),
             })
             inicio = i + 1
     return grupos

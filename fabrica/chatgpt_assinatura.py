@@ -34,6 +34,16 @@ PASTA_CODEX = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))   #
 PASTA_LOGIN = Path(os.environ.get("FABRICA_CODEX_HOME") or (Path.home() / ".codex-fabrica"))
 LOGIN = PASTA_LOGIN / "auth.json"
 LIMITES = RAIZ / "chatgpt_limites.json"
+# A recusa do login guardada junto com a versão do auth.json que foi recusada. Em 2026-11-08 a OpenAI revogou o token
+# (token_revoked) e a renovação também foi recusada, mas o arquivo continuava lá: a tela dizia "conectada" e cada
+# imagem tentava de novo. Um login novo grava outro auth.json e a recusa velha deixa de valer sozinha
+RECUSA = PASTA_LOGIN / "recusado.json"
+# As outras contas do ChatGPT, guardadas pelo Radar (radar/chatgpt_conta.py, "Conectar outra conta"), no mesmo formato:
+# {"login": auth.json, "limites": chatgpt_limites.json, "guardada": quando}. A fábrica troca de conta sozinha quando a
+# ligada para (pedido do usuário em 2026-11-08: "se falhar muda pra outra conta de ChatGPT e aí se não tiver vai pro
+# OpenRouter") e marca na gaveta por que a anterior saiu: "recusada" (login revogado) ou "limite_ate" (quando volta)
+GAVETA = PASTA_LOGIN / "contas-radar"
+_trava_troca = threading.Lock()
 
 RESPOSTAS = "https://chatgpt.com/backend-api/codex/responses"
 RENOVAR = "https://auth.openai.com/oauth/token"
@@ -128,15 +138,48 @@ def _renovar(dados: dict) -> dict:
     return dados
 
 
+def _versao_do_login() -> str:
+    try:
+        s = LOGIN.stat()
+        return f"{s.st_mtime_ns}-{s.st_size}"
+    except OSError:
+        return ""
+
+
+def marcar_recusa(motivo: str) -> None:
+    """Guarda que a OpenAI recusou este login, para a tela e para disponivel() pararem de contar com ele."""
+    try:
+        RECUSA.write_text(json.dumps({"login": _versao_do_login(), "motivo": str(motivo)[:300], "em": time.time()},
+                                     ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _recusa_valida() -> str:
+    """O motivo da recusa, se ela é deste mesmo auth.json. Vazio quando não há recusa ou o login foi refeito."""
+    try:
+        r = json.loads(RECUSA.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return r.get("motivo") or "" if r.get("login") == _versao_do_login() else ""
+
+
 def _credenciais() -> tuple[str, str, dict]:
     """O access_token válido, o id da conta e o que o id_token conta (e-mail e plano)."""
+    recusa = _recusa_valida()
+    if recusa:
+        raise SemLogin(recusa)
     with _trava:
         dados = _ler_login()
         tokens = dados.get("tokens") or {}
         if not tokens.get("access_token"):
             raise SemLogin("O login do ChatGPT está sem token. Rode `codex login` neste computador.")
         if _venceu(tokens["access_token"]):
-            dados = _renovar(dados)
+            try:
+                dados = _renovar(dados)
+            except SemLogin as erro:
+                marcar_recusa(erro)
+                raise
             tokens = dados.get("tokens") or {}
         return tokens["access_token"], tokens.get("account_id") or "", _dentro_do_jwt(tokens.get("id_token") or "")
 
@@ -281,8 +324,92 @@ def _quando_volta() -> str:
 _modelo_que_atende = None       # o primeiro modelo que a conta aceitou, para não tentar os recusados a cada imagem
 
 
+def _email(login: dict) -> str:
+    return (_dentro_do_jwt(((login or {}).get("tokens") or {}).get("id_token") or "").get("email") or "").lower()
+
+
+def _na_gaveta(email: str) -> Path:
+    return GAVETA / (re.sub(r"[^\w.@-]", "_", email.lower()) + ".json")
+
+
+def _ler_json(arquivo: Path) -> dict:
+    try:
+        return json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _gravar_json(arquivo: Path, dados: dict) -> None:
+    arquivo.parent.mkdir(parents=True, exist_ok=True)
+    temporario = arquivo.with_suffix(".gravando")
+    temporario.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporario.replace(arquivo)
+
+
+def _serve(guardada: dict, agora: float) -> bool:
+    return bool(guardada.get("login")) and not guardada.get("recusada") and float(guardada.get("limite_ate") or 0) <= agora
+
+
+def trocar_de_conta(erro, versao_que_falhou: str = "") -> bool:
+    """Põe a conta ligada na gaveta, com o motivo da saída, e liga a próxima que serve. False quando nenhuma serve.
+
+    versao_que_falhou é o auth.json que a imagem usou: se outra imagem (elas correm em paralelo) já trocou a conta, não
+    troca de novo, só manda tentar na nova."""
+    global _modelo_que_atende
+    with _trava_troca:
+        if versao_que_falhou and _versao_do_login() != versao_que_falhou:
+            return True
+        agora = time.time()
+        atual = _ler_json(LOGIN)
+        email = _email(atual)
+        candidatas = []
+        for arquivo in sorted(GAVETA.glob("*.json")) if GAVETA.exists() else []:
+            guardada = _ler_json(arquivo)
+            outro = _email(guardada.get("login") or {})
+            if outro and outro != email and _serve(guardada, agora):
+                candidatas.append((float(guardada.get("guardada") or 0), arquivo, guardada))
+        if not candidatas:
+            return False
+        if email:
+            saida = {"login": atual, "limites": _limites_guardados(), "guardada": agora}
+            if isinstance(erro, LimiteDaAssinatura):
+                janelas = (_limites_guardados().get("janelas") or {}).values()
+                voltas = [j.get("volta_em") for j in janelas if (j.get("usado_pct") or 0) >= 99 and j.get("volta_em")]
+                saida["limite_ate"] = max(voltas) if voltas else agora + 3600
+            else:
+                saida["recusada"] = str(erro)[:300]
+            _gravar_json(_na_gaveta(email), saida)
+        _, arquivo, escolhida = min(candidatas, key=lambda c: c[0])   # a que está guardada há mais tempo
+        _gravar_json(LOGIN, escolhida["login"])
+        try:
+            if escolhida.get("limites"):
+                _gravar_json(LIMITES, escolhida["limites"])
+            else:
+                LIMITES.unlink(missing_ok=True)
+        except OSError:
+            pass
+        arquivo.unlink(missing_ok=True)
+        _modelo_que_atende = None
+        print(f"  ChatGPT: a conta {email or '(sem e-mail)'} parou ({str(erro)[:120]}); "
+              f"as imagens seguem pela {_email(escolhida['login'])}")
+        return True
+
+
 def gerar(prompt: str, qualidade: str = "low", proporcao: str = "16:9", referencias=()) -> tuple[bytes, dict]:
-    """A imagem pronta e o registro dela. Gasta o limite da assinatura, nunca crédito de API."""
+    """A imagem pronta e o registro dela, pela conta ligada e, se ela parar, pelas outras contas guardadas. Só quando
+    nenhuma conta serve o erro sobe, e aí quem chama vai para a chave de API (imagens._gerar_uma)."""
+    for _ in range(1 + len(list(GAVETA.glob("*.json")) if GAVETA.exists() else [])):
+        versao = _versao_do_login()
+        try:
+            return _gerar_na_conta(prompt, qualidade, proporcao, referencias)
+        except (SemLogin, LimiteDaAssinatura) as erro:
+            if not trocar_de_conta(erro, versao):
+                raise
+    return _gerar_na_conta(prompt, qualidade, proporcao, referencias)
+
+
+def _gerar_na_conta(prompt: str, qualidade: str = "low", proporcao: str = "16:9", referencias=()) -> tuple[bytes, dict]:
+    """A imagem pela conta ligada agora. Gasta o limite da assinatura, nunca crédito de API."""
     global _modelo_que_atende
     token, conta, _ = _credenciais()
     qualidade = qualidade if qualidade in QUALIDADES else "low"
@@ -306,14 +433,26 @@ def gerar(prompt: str, qualidade: str = "low", proporcao: str = "16:9", referenc
                     # basta: recusado, renova uma vez e pede de novo
                     r.read()
                     renovado = True
+                    motivo = r.text
                     with _trava:
-                        dados = _renovar(_ler_login())
+                        try:
+                            dados = _renovar(_ler_login())
+                        except SemLogin:
+                            revogado = "token_revoked" in motivo or "invalidated" in motivo
+                            erro = SemLogin("A OpenAI revogou o login do ChatGPT desta fábrica (token_revoked). Conecte a "
+                                            "conta de novo em Radar › Integrações › Conexões da conta." if revogado else
+                                            "O login do ChatGPT venceu. Conecte a conta de novo em Radar › Integrações.")
+                            marcar_recusa(erro)
+                            raise erro from None
                     token = dados["tokens"]["access_token"]
                     conta = dados["tokens"].get("account_id") or conta
                     continue
                 if r.status_code in (401, 403):
                     r.read()
-                    raise SemLogin("O ChatGPT recusou o login da assinatura. Rode `codex login` neste computador.")
+                    erro = SemLogin("O ChatGPT recusou o login da assinatura. Conecte a conta de novo em Radar › "
+                                    f"Integrações › Conexões da conta. ({r.text[:120]})")
+                    marcar_recusa(erro)
+                    raise erro
                 if r.status_code != 200:
                     r.read()
                     if r.status_code == 400 and "model_not_found" in r.text:
@@ -331,9 +470,15 @@ def gerar(prompt: str, qualidade: str = "low", proporcao: str = "16:9", referenc
 
 
 def disponivel() -> bool:
-    """Se dá para contar com a assinatura agora (o login existe e não venceu de vez)."""
-    try:
-        _credenciais()
-        return True
-    except (SemLogin, RuntimeError):
-        return False
+    """Se dá para contar com a assinatura agora: a conta ligada, ou outra da gaveta que entra no lugar dela."""
+    for _ in range(1 + len(list(GAVETA.glob("*.json")) if GAVETA.exists() else [])):
+        versao = _versao_do_login()
+        try:
+            _credenciais()
+            return True
+        except SemLogin as erro:
+            if not trocar_de_conta(erro, versao):
+                return False
+        except RuntimeError:
+            return False
+    return False

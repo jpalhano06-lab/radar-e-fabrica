@@ -87,7 +87,11 @@ def gravar_atomico(destino, texto: str, tentativas: int = 40, espera: float = 0.
     destino = Path(destino)
     with _trava_do_arquivo(destino):
         temporario = destino.with_name(f"{destino.name}.{os.getpid()}.{_threading.get_ident()}.tmp")
-        temporario.write_text(texto, encoding="utf-8")
+        # fsync antes de trocar: sem ele uma queda de energia troca o arquivo por um de zeros (2026-11-04, 23:24)
+        with open(temporario, "w", encoding="utf-8") as saida:
+            saida.write(texto)
+            saida.flush()
+            os.fsync(saida.fileno())
         for tentativa in range(tentativas):
             try:
                 temporario.replace(destino)

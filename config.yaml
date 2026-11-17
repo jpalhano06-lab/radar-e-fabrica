@@ -33,8 +33,7 @@ assinaturas:
 # das vozes: GET /api/vozes/local no editor. O tempo das palavras sai do Whisper do Groq (grátis)
 voz_local:
   voz: "omnivoice:community_pt_br_lucas"  # a voz quando o perfil não diz voz.voz_local (Lucas, pt-BR, gravada)
-  no_lugar_das_pagas: true             # a GenAI Pro escolhida de propósito (paga_escolhida) fica; sem o OmniVoice
-                                       # instalado (o PC do Palhano) nada é trocado. Projeto.sem_narracao_paga
+  no_lugar_das_pagas: false            # 2026-10-29: OmniVoice não instalado; GenAI Pro de volta para todos
   blocos_ao_mesmo_tempo: 1             # a placa de vídeo grava um bloco por vez
   passos_omnivoice: 16                 # 16 = 20 min de vídeo em uns 4 min; 32 leva o dobro, sem diferença medida
   desligar_depois: true                # o motor sai da placa no fim da narração (o render e as animações usam ela)
@@ -57,6 +56,8 @@ genaipro:
 cenas:
   provedor: groq              # ignorado: cenas, textos e buscas usam openrouter.modelo_principal
   reserva: gemini             # entra sozinho quando o Groq falha ou a cota de 24h enche. groq, gemini ou vazio
+  segundos_minimo: 4          # 4 a 6 s por cena desde 2026-11-05, perto do Robô do Dotti (mediana 4,7 s; a nossa era 3,3 s).
+  segundos_maximo: 6          # Menos cenas também quer dizer menos busca, menos imagens e menos tempo
 
 gemini:
   modelo: gemini-3.8-flash    # US$ 0,75 por milhão de tokens lidos e US$ 3,75 por milhão escritos (pensamento conta como escrito)
@@ -67,6 +68,10 @@ gemini:
   cenas_por_lote: 20
   tentativas: 6
 
+vez:                       # quantos vídeos fazem a etapa ao mesmo tempo (fabrica/vez.py, medido em 2026-11-07). 0: sem limite
+  render_juntar: 1         # FFmpeg: dois juntos levavam quase 3 vezes cada
+  conferencia_completadas: 1
+
 corrigir:
   provedor: jev            # jev: o modelo de visão descreve a imagem e o Jev julga (muito mais barato).
                            # openrouter/groq/gemini: um modelo de visão só olha e julga de uma vez
@@ -76,7 +81,10 @@ corrigir:
                            # cadeia de visão (Groq, Gemini 2.5), pedido do usuário em 2026-10-10
   cenas_por_chamada: 5    # cenas conferidas numa chamada só. 1 gasta mais, porque repete as instruções
   automatico: true         # roda sozinho no "tudo", depois do acervo e antes das imagens de IA
-  rodadas: 3               # vezes que tenta outro material real numa cena que não combina
+  garantir: true           # no fim, a foto de banco que ainda não combina com a fala vira imagem de IA, uma vez
+                           # (corrigir.garantir). A imagem de IA ruim não é refeita. ~US$ 0,0046 por imagem
+  rodadas: 1               # vezes que tenta outro material real numa cena que não combina. Eram 3 (1 desde 2026-11-05,
+                           # pedido do usuário: o que continua reprovado vai direto para a IA, como no Robô do Dotti)
   nota_para_trocar: 20     # abaixo disso o sistema troca sozinho. Entre este e o nota_minima ele só aponta
   nota_minima: 40          # no jev a nota é a probabilidade do Jev, que fica mais baixa: 55 pega o que está errado
                            # mesmo. Nos outros provedores, que dão nota de 0 a 100, use 80
@@ -132,6 +140,12 @@ openrouter:
                                 # minuto. Um pico da conferência mandou 27 descrições para o Qwen pago em 1 min. Era 60:
                                 # pedido do usuário em 2026-10-29, com o Groq voltando aos poucos cada chamada esperava
                                 # 1 min e não saiu nenhuma imagem de IA em 10 min
+  prazo_gratis: 150          # segundos que um modelo gratuito tem para responder antes da próxima rota da cadeia
+  espera_pela_rapida: 8          # 8 s desde 2026-11-05 (pedido do usuário: acelerar a entrega). Era 30 (o padrão do
+                                # código): no asdas-80-billion-empire-is-collapsing-an a cadeia dormiu 48min24 somados em
+                                # 132 chamadas esperando o Gemini 2.5 Flash-Lite voltar do limite do minuto, uns 22 s por
+                                # chamada. Com 8 s a chamada desiste mais cedo e cai no gemini:gemini-3.1-flash-lite, que
+                                # tem cota própria e é igualmente rápido. Maior = menos gasto e mais espera parada
   confirmar_pago: false          # false: o pago entra sozinho, mas sempre depois de TODOS os gratuitos da cadeia. Pedido
                                 # do usuário em 2026-10-10 ("deve ser aprovado o consumo automaticamente"): com a cota
                                 # do Groq cheia, o brasil-selvagem (20 min) ficou quase 2 h na escolha esperando o
@@ -169,11 +183,18 @@ groq:
   contexto_antes: 3          # cenas anteriores mostradas só para dar contexto
   contexto_depois: 2         # cenas seguintes mostradas só para dar contexto
 
+banco_imagens:               # toda imagem de IA fica guardada, e a cena parecida de outro canal usa ela sem gerar (banco_proprio.py)
+  ativo: true
+  semelhanca_minima: 0.8     # abaixo disso já vinha outra coisa. O Jev confere depois, como qualquer imagem de IA
+  usos_max: 3                # no total, contando quem gerou. Nunca duas vezes no mesmo canal
+
 ia:
   ativa: true                # cena que não existe em foto ou que veio errada recebe imagem de IA (conferida pelo Jev).
                              # false: vídeo só com banco de imagens, nenhuma IA
-  teto: 0.35                 # 35% (2026-11-03: o 25% do Palhano, de 2026-10-27, poupava uns minutos e trocava ~34
-                             # imagens de IA por foto genérica num vídeo de 340 cenas; cena errada é o pior erro).
+  teto: 0.75                 # 75% desde 2026-11-05 (pedido do usuário: entregar rápido como o Robô do Dotti, que usa uns
+                             # 75%). Com 25%, a cena reprovada não podia ir para a IA e voltava a buscar foto: no
+                             # asdas-80-billion, das 96 min, as imagens levaram 4 min e essas buscas de novo, uns 35.
+                             # Teto é limite, não alvo: cena com foto aprovada segue com a foto. Antes 25%, e antes 35%:
                              # no máximo 35% das cenas do vídeo com imagem de IA (pedido do usuário em 2026-10-15: o
                              # everything-you-need-to-answer saiu com 54%). A IA fica com quem mais precisa (momento que
                              # ninguém fotografou, foto reprovada, época); as cenas acima do teto ganham foto de banco do
@@ -193,7 +214,11 @@ roteirista:
   # sairia por uns US$ 0,34 a 0,85 por vídeo de 30 min (US$ 0,012 o lote), e o usuário preferiu não pagar isso. A ordem
   # desta lista não decide quem atende: todo gratuito vem antes de qualquer pago (openrouter_local.perguntar)
   modelos:
-    - nvidia/nemotron-3-ultra-550b-a55b:free
+    # O Nemotron Ultra gratuito saiu em 2026-11-05 (pedido do usuário: acelerar a entrega). Medido no
+    # asdas-80-billion-empire-is-collapsing-an: 30 chamadas, 174 s de média e 261 s a maior, as 15 chamadas mais
+    # lentas da produção inteira. Ele segurava o começo em série (Mapa do roteiro 2 min com 100% de IA, JSON de
+    # cenas 6min38 com 99%). O DeepSeek pago faz o mesmo lote em 132 s por uns US$ 0,012, de US$ 0,22 a 0,85 por
+    # vídeo. Para voltar ao gratuito, ponha "- nvidia/nemotron-3-ultra-550b-a55b:free" de volta nesta lista.
     - deepseek/deepseek-v4-flash
   modelo: deepseek/deepseek-v4-flash  # (antigo, vale sem a lista acima) Medido no roteiro de
                              # Tsavo (8,5 min): uns US$ 0,22 por vídeo, cerca de US$ 0,01 por lote de cenas
@@ -263,7 +288,7 @@ midia:
   nota_minima_captura: 30    # abaixo disso o candidato é descartado e o próximo da lista é testado
   candidatos_conferidos: 3   # quantos candidatos testar por cena. Se nenhum passar, fica o de maior nota, sob suspeita
   contato: "jonathansantost99@gmail.com"   # o Wikimedia só libera buscas com um contato no pedido
-  processos: 8               # cenas buscando material real ao mesmo tempo. Eram 4, pedido do usuário em 2026-10-10
+  processos: 12              # cenas buscando material real ao mesmo tempo. Eram 8; o Robô do Dotti busca 12. Eram 4, pedido do usuário em 2026-10-10
                            # para acelerar: no teste-frango (5,5 min) a busca levou uns 20 dos 43 min da criação. Banco
                            # no limite fica de lado e a busca segue com os outros (Buscador, LimiteAtingido)
   escolhas_ao_mesmo_tempo: 8 # 8 desde 2026-10-27 (entregas rápidas: a busca do 12-animais levou 26 min com 4). Lotes de 6 cenas escolhidos e conferidos ao mesmo tempo pelo modelo principal e pelo Jev
@@ -272,6 +297,7 @@ midia:
   espera_maxima: 3600        # segundos que a fábrica espera quando uma fonte atinge o limite de buscas
 
 imagens:
+  adiantar: true             # as cenas nascidas para a IA começam enquanto a busca de acervo roda (imagens.adiantar)
   lote: false                # false desde 2026-10-30 (pedido do usuário): o lote do Google custa metade, mas fica
                              # pronto "em minutos ou horas" e a fábrica espera parado por ele (espera_lote_horas).
                              # Só vale para canal com imagens.provedor google: os canais de hoje herdam

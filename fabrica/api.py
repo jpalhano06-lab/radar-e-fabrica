@@ -27,6 +27,7 @@ from urllib.parse import quote
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import drive, faxina, garimpo, video_ia
 from . import acordado, animacoes, aprendizados, cenas, chatgpt_assinatura, corrigir, diretor, entrega_pc, fish, pago, voz_local, publicacao, qualidade, shorts, thumbnail, rostos, revisao_video, trilha, custos, custos_reais, genaipro, imagens, limpeza, lixeira, midia, narracao, nichos, render, roteirista, verificar
 from . import ajustes_animacao, tempos
 from . import texto as tx
@@ -299,6 +300,37 @@ def _sem_medida():
     yield
 
 
+# A espera entre tentativas de cada projeto, para o botão Retomar (rota /retomar) acordar a criação na hora. Pedido do
+# usuário em 2026-11-08: o pedido 83 ficou um dia esperando 5 min entre tentativas, e depois da recarga da GenAIPro
+# não havia como fazê-lo seguir sem esperar a próxima volta
+ACORDAR: Dict[str, threading.Event] = {}
+
+
+def acordar(nome: str) -> bool:
+    """Faz a criação que está esperando a próxima tentativa tentar já. False quando ela não está esperando."""
+    with TAREFAS_LOCK:
+        evento = ACORDAR.get(nome)
+    if evento is None:
+        return False
+    evento.set()
+    return True
+
+
+def _esperar(nome, segundos) -> None:
+    if not nome:
+        time.sleep(segundos)
+        return
+    evento = threading.Event()
+    with TAREFAS_LOCK:
+        ACORDAR[nome] = evento
+    try:
+        evento.wait(segundos)
+    finally:
+        with TAREFAS_LOCK:
+            if ACORDAR.get(nome) is evento:
+                ACORDAR.pop(nome, None)
+
+
 def _etapa_tentando(task_id: str, nome, rotulo: str, funcao):
     tentativa = 0
     while True:
@@ -315,7 +347,7 @@ def _etapa_tentando(task_id: str, nome, rotulo: str, funcao):
             _log_tarefa(task_id, f"  {rotulo}: {msg}")
             _log_tarefa(task_id, f"  tentando de novo em {espera}s, de onde parou (tentativa {tentativa + 1})")
             _atualizar(task_id, mensagem=f"{rotulo}: um serviço falhou, tentando de novo em {espera}s...")
-            time.sleep(espera)
+            _esperar(nome, espera)
             _atualizar(task_id, mensagem=f"{rotulo}: retomando...")
 
 
@@ -544,6 +576,7 @@ def _esteira(nome: str, task_id: str) -> None:
     _atualizar(task_id, etapa="midia", passo_atual=3, progresso_pct=65,
                mensagem="Buscando fotos e vídeos de acervo (Pexels, Pixabay e Wikimedia)...")
     _soltar_midia_sumida(p)
+    imagens_adiantadas = imagens.adiantar(p, log_w)
     _etapa(task_id, "Busca de acervo", lambda: midia.buscar(p, log=log_w))
     marcar("midia")
 
@@ -571,9 +604,11 @@ def _esteira(nome: str, task_id: str) -> None:
                    mensagem=f"Conferindo as {len(na_duvida)} cena(s) que ficaram na dúvida na captura...")
         log_w(f"  {len(na_duvida)} cena(s) na dúvida vão para a conferência; as aprovadas na captura ficam como estão")
         try:
-            resultado_conf = _etapa(task_id, "Conferência", lambda: corrigir.corrigir(
-                p, numeros=na_duvida, rodadas=cfg_corr.get("rodadas", corrigir.RODADAS),
-                nota_minima=minima, nota_para_trocar=minima, log=log_w))
+            # as cenas que a conferência manda para a IA já começam a ser geradas enquanto ela segue (imagens.ao_fundo)
+            with imagens.ao_fundo(p, log_w, onde="a conferência"):
+                resultado_conf = _etapa(task_id, "Conferência", lambda: corrigir.corrigir(
+                    p, numeros=na_duvida, rodadas=cfg_corr.get("rodadas", corrigir.RODADAS),
+                    nota_minima=minima, nota_para_trocar=minima, log=log_w))
             _atualizar(task_id, conferencia={
                 "avaliadas": resultado_conf["avaliadas"], "trocadas": resultado_conf["trocadas"],
                 "para_revisar": resultado_conf.get("para_revisar", []),
@@ -589,6 +624,9 @@ def _esteira(nome: str, task_id: str) -> None:
     # montados em segundo plano enquanto isso (render.adiantar_clipes): o render final só faz os que mudarem
     render.adiantar_clipes(p, log_w)
     _atualizar(task_id, etapa="imagens", passo_atual=5, progresso_pct=88, mensagem="Gerando imagens de IA...")
+    if imagens_adiantadas:
+        with tempos.medir(p, "Esperando as imagens adiantadas", log=log_w):
+            imagens_adiantadas.join()
     _etapa(task_id, "Imagens de IA", lambda: imagens.gerar(p, log=log_w))
     marcar("imagens")
 
@@ -621,12 +659,26 @@ def _esteira(nome: str, task_id: str) -> None:
     try:
         _atualizar(task_id, progresso_pct=96,
                    mensagem="Conferindo com o Jev as cenas completadas no fim (a errada é refeita)...")
-        with tempos.medir(p, "Conferência das completadas", log=log_w):
-            corrigir.conferir_completadas(p, log=log_w)
+        # um vídeo por vez nesta conferência (vez.py): duas juntas levavam quase 3 vezes cada
+        from . import vez
+        with vez.na_vez("conferencia_completadas", p, log_w, "conferência das completadas"):
+            with tempos.medir(p, "Conferência das completadas", log=log_w), \
+                    imagens.ao_fundo(p, log_w, onde="a conferência das completadas"):
+                corrigir.conferir_completadas(p, log=log_w)
     except ParadaPrecisaDeVoce:
         raise
     except (Exception, SystemExit) as erro_comp:
         log_w(f"  a conferência das cenas completadas falhou, seguindo sem ela: {erro_comp}")
+    # garantia (pedido do usuário em 2026-11-07): a cena que ainda não combina com a fala vira imagem de IA, e a imagem
+    # de IA ruim é feita de novo. Nunca para o vídeo
+    try:
+        _atualizar(task_id, progresso_pct=96, mensagem="Trocando por imagem de IA as cenas que ainda não combinam com a fala...")
+        with tempos.medir(p, "Garantia das cenas", log=log_w):
+            corrigir.garantir(p, log=log_w)
+    except ParadaPrecisaDeVoce:
+        raise
+    except (Exception, SystemExit) as erro_gar:
+        log_w(f"  a garantia das cenas falhou, seguindo sem ela: {erro_gar}")
     if cenas_sem_arquivo(p) and midia.ia_ativa(p):
         # a repetida que não achou foto nova nos bancos vai para a imagem de IA (ia.ativa). Antes a criação parava
         # pedindo uma foto (cena 79 do nunca-deve-ter-dentro-de-casa-parte-2, o petauro-do-açúcar, com a IA ligada)
@@ -638,6 +690,10 @@ def _esteira(nome: str, task_id: str) -> None:
         # nada do assunto nos bancos nem em outra cena do mesmo assunto: pôr outra coisa seria gafe, então pede ajuda
         por_n = {c["n"]: c for c in p.ler_json("cenas.json")["cenas"]}
         lista = "; ".join(f"cena {n} ({por_n[n].get('sujeito') or por_n[n].get('busca')})" for n in cenas_sem_arquivo(p)[:15])
+        if midia.ia_ativa(p):  # com a IA ligada, faltar imagem é a IA que não entregou: o motivo está no log da criação
+            raise ParadaPrecisaDeVoce(
+                f"Nem os bancos nem a imagem de IA entregaram estas cenas: {lista}. Veja o motivo no log e clique em "
+                "Retomar, ou suba uma foto delas no editor.")
         raise ParadaPrecisaDeVoce(
             f"Os bancos de imagens não têm nenhuma foto destes assuntos: {lista}. Suba uma foto dessas cenas no editor "
             "(ou ligue a IA no config.yaml) e clique em Retomar.")
@@ -699,10 +755,12 @@ def _esteira(nome: str, task_id: str) -> None:
         if cenas_sem_arquivo(p):
             return
         try:
-            render.renderizar(p, log=log_w, so_clipes=True)
+            render.adiantar_clipes(p, log_w)
         except (Exception, SystemExit) as erro_render:
             log_w(f"  o render adiantado parou, o render de verdade monta o que faltar: {str(erro_render)[:200]}")
 
+    if video_ia.config(p).get("fracao"):
+        _etapa(task_id, "Vídeo de IA", lambda: video_ia.gerar(p, log=log_w))
     _atualizar(task_id, etapa="animacoes", progresso_pct=97,
                mensagem="Animações, trilha e os clipes do render, ao mesmo tempo...")
     with ThreadPoolExecutor(max_workers=3) as juntos:
@@ -1247,6 +1305,8 @@ def retomar_criacao(nome: str, payload: Optional[RetomarPayload] = None):
     with TAREFAS_LOCK:
         ativa = nome in CRIACOES_ATIVAS
     if ativa:
+        if acordar(nome):
+            return {"status": "retomando", "mensagem": "A criação estava esperando a próxima tentativa e tenta de novo agora."}
         return {"status": "processando", "mensagem": "A criação deste vídeo já está andando."}
     p = Projeto(nome)
     resumo = {"sem_acervo": 0, "sem_imagem_ia": 0, "custo_estimado_usd": 0.0}
@@ -2307,7 +2367,10 @@ def iniciar_publicacao(nome: str, forcar: bool = False) -> bool:
                                   ("thumbnails", lambda pr: thumbnail.gerar(pr, log=print)),
                                   ("shorts", lambda pr: shorts.gerar(pr, log=print) if shorts.config(pr)["ativo"] else None),
                                   # a pasta do vídeo pronto no computador, com a descrição (entrega_pc.py)
-                                  ("entrega no computador", lambda pr: entrega_pc.entregar(pr, log=print))):
+                                  ("entrega no computador", lambda pr: entrega_pc.entregar(pr, log=print)),
+                                  ("google drive", lambda pr: drive.enviar(pr, log=print)),
+                                  # o disco aperta depressa: as sobras dos vídeos antigos saem aqui (faxina.py)
+                                  ("faxina de disco", lambda pr: faxina.faxinar(log=print))):
                 try:
                     funcao(Projeto(nome))
                 except (Exception, SystemExit) as erro:
@@ -2318,6 +2381,32 @@ def iniciar_publicacao(nome: str, forcar: bool = False) -> bool:
 
     threading.Thread(target=trabalhar, daemon=True, name=f"publicacao-{nome}").start()
     return True
+
+
+@app.get("/api/garimpo/contas")
+def garimpo_contas():
+    return garimpo.listar_contas()
+
+
+@app.post("/api/garimpo/contas")
+def garimpo_conta_nova(corpo: Dict[str, Any]):
+    try:
+        return {"nome": garimpo.salvar_conta(corpo.get("nome"), corpo.get("cookies"))}
+    except ValueError as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.post("/api/garimpo/contas/{nome}/testar")
+def garimpo_conta_testar(nome: str):
+    try:
+        return garimpo.testar_conta(nome)
+    except ValueError as erro:
+        raise HTTPException(status_code=404, detail=str(erro))
+
+
+@app.delete("/api/garimpo/contas/{nome}")
+def garimpo_conta_apagar(nome: str):
+    return {"ok": garimpo.apagar_conta(nome)}
 
 
 @app.get("/consumo/openrouter.csv")
@@ -3381,7 +3470,8 @@ def youtube_conectar(request: Request):
 
 
 @app.get("/api/youtube/oauth/callback")
-def youtube_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None):
+def youtube_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None,
+                     state: Optional[str] = None):
     """O Google volta pra cá depois do login."""
     def pagina(titulo: str, corpo: str) -> HTMLResponse:
         return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -3397,10 +3487,32 @@ h1 {{ font-size: 18px; }} p {{ color: #94a3b8; font-size: 13px; }}
     if not code:
         return pagina("Não deu para conectar", "Faltou o código de autorização. Feche esta aba e tente de novo.")
     try:
+        if state == drive.ESTADO:  # o Drive volta pela mesma URL do YouTube: não há outra para cadastrar no Google
+            drive.concluir_autorizacao(code, _redirect_uri(request))
+            return pagina("Conectado!", "O Google Drive já está ligado à fábrica. Pode fechar esta aba.")
         ytpub.concluir_autorizacao(code, _redirect_uri(request))
     except SystemExit as e:
         return pagina("Não deu para conectar", f"{e} Pode fechar esta aba e tentar de novo.")
     return pagina("Conectado!", "Sua conta do YouTube já está ligada à fábrica. Pode fechar esta aba e voltar ao painel.")
+
+
+@app.get("/api/drive/status")
+def drive_status():
+    return {"conectado": drive.conectada()}
+
+
+@app.get("/api/drive/conectar")
+def drive_conectar(request: Request):
+    try:
+        return {"url": drive.url_autorizacao(_redirect_uri(request))}
+    except SystemExit as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.post("/api/drive/desconectar")
+def drive_desconectar():
+    drive.desconectar()
+    return {"sucesso": True}
 
 
 @app.get("/api/youtube/status")

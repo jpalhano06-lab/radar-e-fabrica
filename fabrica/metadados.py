@@ -27,7 +27,7 @@ from .entrega_pc import nome_do_titulo
 from .util import rodar
 
 ARQUIVO = "metadados.json"
-LINGUA_DO_AUDIO = {"pt": "por", "en": "eng", "es": "spa"}  # ISO 639-2, o que o MP4 guarda
+LINGUA_DO_AUDIO = {"pt": "por", "en": "eng", "es": "spa", "ja": "jpn", "ko": "kor"}  # ISO 639-2, o que o MP4 guarda
 
 
 def titulo(projeto) -> str:
