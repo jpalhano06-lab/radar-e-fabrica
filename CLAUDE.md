@@ -477,6 +477,39 @@ se a frase dela tiver estrutura e nota alta (`imagens._motion_antes_da_ia` com `
   ficava fosco). O destino da ligação sem foto própria fica sem cartão, só a frase. Texto dentro de cartão entra
   com o `curto` (26 px): os 70 px do `sobe` passavam da borda. O comparar aceita o nome do lado em `texto` (o modelo
   às vezes manda assim, e os títulos sumiam; o motor.js também só lê `titulo`).
+- **Desenhos pelo material da cena: quadro, mapa e curiosidade** (`DESENHOS_DO_MATERIAL`, `material_do_trecho`,
+  `R.quadro`, `R.mapa` e `R.curiosidade` no `motor_impacto.js`; pedido do usuário em 2026-11-17, do vídeo dos "4
+  agentes": "ao invés de aparecer animações com fundo branco, apareceria uma cena/material de pinturas antigas, mapa...
+  não é substituir, é somar"). O material vem do que a visão descreveu da foto que vira o fundo (a primeira cena do
+  trecho com foto, como em `fotos_impacto`): "O que é" com pintura, gravura, litografia... é **pintura**; "O que é" com
+  mapa (e tipo "mapa ou grafico", nunca só gráfico) é **mapa**; mídia de vídeo é **video**.
+  - **O visual antigo só em trecho que fala do passado** (`trecho_antigo`, pedido do usuário no mesmo dia: "mapas e
+    ideias de animações antigas, somente para partes antigas faladas no roteiro; datas mais atuais, dados universais
+    atuais"). Antigo é a `epoca` que o agente marcou na cena (`midia.e_de_epoca`) ou um ano antes de 1950 com
+    preposição ("em 1539", "desde 1875"; "1500 metros" não conta), século até o XIX ou Idade Média dito na fala.
+    **Pela fala, nunca pela foto**: um mapa antigo num trecho sobre hoje sai com o visual de hoje.
+  - **quadro**: a pintura numa moldura dourada, na parede de um museu sob a luz, com a placa ao lado (o ano no
+    `kicker`, o texto em serifa, o número em dourado). Só em trecho antigo; pintura num trecho de hoje segue nos
+    desenhos de sempre.
+  - **mapa**: o mapa inteiro na tela, andando devagar, e os lugares ditos numa **legenda ao lado**, cada um no segundo
+    da palavra dele. **Nunca um nome num ponto do mapa**: os pontos não sabem onde fica cada lugar (no teste com o mapa
+    do Reino Unido, "Escócia" caiu sobre a Irlanda e "Irlanda" sobre a Dinamarca). Trecho antigo (`_antigo`): sépia,
+    rota decorativa em tinta vermelha sem nome, rosa dos ventos e pergaminho. Trecho de hoje: o mapa nítido, sem rota,
+    a legenda e a frase em caixas escuras com a cor de destaque. Vale para frase, número, linha do tempo, causa e
+    efeito e lista de 2 a 4 itens.
+  - **curiosidade**: a foto ou o **vídeo real** da cena na tela inteira (`fundo_video`, cortado por `_video_de_fundo`;
+    o HyperFrames toca o `<video>` quadro a quadro), o texto grande em caixa alta em cima e a palavra em destaque em
+    amarelo (`escreve(..., realce: "cor")`); o número, gigante. No impacto ele entra no rodízio da frase e do herói
+    (`desenhos_possiveis`); com o vídeo real da cena, ele vem primeiro.
+  - **Em qualquer estilo** (`gravar`): num canal de outro estilo (o `apple` dos perfis motion-ai e motion-vox, de fundo
+    claro), a cena de pintura, mapa ou vídeo real é desenhada pelo motor do impacto; as outras seguem no estilo do
+    canal. Tipo sem receita no impacto (barras, gráfico de linha) nunca vira quadro.
+  - Os três mostram só o material: a busca da foto de cada item é pulada (`fotos_impacto(itens=False)`), senão as
+    fotos iriam para os créditos sem aparecer. O material é conferido de novo na gravação (a foto pode ter mudado).
+  - **Sem material na hora de decidir, não entra**: no perfil de vídeo todo em animação (`video_todo`) as cenas ainda
+    não têm foto, então seguem com os desenhos de sempre.
+  - Conferido no `hyperframes check` em 7 casos (quadro com frase e número, mapa com frase e linha do tempo,
+    curiosidade com foto, número e vídeo) e gravado pelo caminho real numa cópia do teste-animacao-1min no estilo apple.
 - **Cenas animadas depois de renumerar** (2026-10-13, no teste do impacto no brasil-selvagem): narrar de novo
   renumera as cenas e o `anim_trecho` fica com os números velhos (a cena 61 com o trecho 66 a 69). Pelos números, 41
   dos 45 trechos ficavam sem regravar e sem som no render, e regravar dava o plano às cenas erradas. Agora o grupo
@@ -662,6 +695,44 @@ foi descartada de propósito: o HyperFrames já é Puppeteer + Chrome escondido 
 - **Falta**: Three.js (o 3D de hoje é `perspective` do CSS, sem biblioteca nova); ligar na criação automática (hoje só
   por comando); o editor ainda não tem o campo de refinamento em linguagem natural; 60 fps no vídeo final exige decidir
   o `render.fps` do projeto inteiro.
+
+## Ajustes de animação (a página Animações do Radar)
+
+`fabrica/ajustes_animacao.py`, pedido do usuário em 2026-11-07: "uma opção de configuração onde o usuário pode alterar
+cores, tipo de letras, quais animações devem ou não devem ir para o vídeo dele". A página fica no Radar (Ferramentas >
+Animações, `animacoes()` em `radar/web/app.js`) e a fábrica é quem confere e aplica.
+
+- **O conjunto:** `ativo`, `tema`, `cores` (só `fundo`, `txt`, `acc`, `acc2`), `fontes` (`texto`, `titulo`), `fundo`
+  (`foto` ou `cor`) e `tipos_fora`. `limpar` confere e devolve sempre o conjunto inteiro: um estilo novo por cima de um
+  canal com cores próprias não herda as cores do outro.
+- **Onde vale:** por canal, em `animation_ai` no `perfis/canal-*.yaml` (`POST /api/canais/animacoes`; perfil de base é
+  recusado, porque serve a vários canais); só num vídeo, em `animation_ai_override` no `projeto.json`
+  (`POST /api/projetos/NOME/animacoes`, recusado com a criação rodando), que `Projeto` põe por cima do perfil. O
+  `config_override` não serviria: em `animation_ai.config` o perfil vence o config.
+- **Sem ajuste, nada muda:** `aplicar` devolve o tema igual, e a assinatura dos clipes já gravados continua a mesma (há
+  teste). Mudou uma cor ou uma letra, o clipe grava de novo no próximo `--regravar` ou criação.
+- **Trocar o fundo ou o texto leva junto os tons que saem deles** (`aplicar`: `txt2`, `mut`, `painel`, `painel2`,
+  `linha`, e a `tinta` pelo destaque). Sem isso, os cartões de um tema escuro ficavam escuros num fundo claro.
+- **Animações desligadas:** `tipos_do_tema` tira da lista que o modelo vê (`nas_uteis` e o caminho no lugar do motion);
+  `planejar` e a camada (`animacoes.py`, por `modelos_fora`) também respeitam. **Lista vazia não pode virar o catálogo
+  inteiro**: era `tipos or DE_COMPLEMENTO`, e agora `decidir` devolve vazio. A página só lista o que o estilo tem.
+- **Fundo só na cor:** escolha explícita, contra o padrão de 2026-11-01 (a cena animada sempre mostra o assunto). Sem
+  foto atrás e sem `exigir_imagem`; os cartões seguem com foto. O padrão continua `foto`.
+- **Letras:** só fontes OFL, com a licença em `recursos/fontes`. `FONTES` diz os pesos de cada arquivo. As famílias
+  "Texto" e "Titulo" dos motores apontam para o arquivo escolhido (`css_das_fontes`), e `copiar_fontes` leva a escolhida
+  para a pasta do clipe. Hoje: Inter, Playfair Display e Poppins. Fonte nova: o arquivo, o `OFL-NOME.txt` e a linha em
+  `FONTES` (um teste cobra a licença).
+- **Prévia** (`previa`, `GET /api/animacoes/previa`): a mesma página da gravação (`montar_html`), tocando no navegador,
+  sem gravar nem gastar, com os `EXEMPLOS` e uma paisagem desenhada no lugar da foto. Parada num quadro, para a galeria,
+  por `window.quadro`, nunca `tl.seek`: no `motor.js` o desenho vem do `onUpdate`, que o seek não dispara.
+- **Conferência** (`conferir`, `POST /api/animacoes/conferir`, grátis, uns 40 s): o mesmo `hyperframes check` da
+  gravação, em 4 animações. Serve porque, na produção, a cena reprovada volta para a foto sem ninguém ver. Medido: noite
+  com fundo #F2F2F2 reprovava por contraste; apple com Poppins e misterio só na cor passam. Roda em
+  `projetos/_conferencia_animacoes`, sem `projeto.json`, então nenhuma lista de projetos a mostra.
+- **Fica de fora de propósito:** a quantidade de animações e os 40 s sem animação no começo, regras da fábrica pedidas
+  pelo usuário. As cenas dirigidas (`direcao.py`) e o Motion IA pausado não leem estes ajustes.
+- **Estilo novo em `TEMAS` ou animação nova em `CATALOGO`:** precisa de nome em `TEMAS_INFO` e `TIPOS_INFO` e de um
+  exemplo em `EXEMPLOS`, senão a página fica sem ele (um teste reprova).
 
 ## Texto na tela: saiu da fábrica
 

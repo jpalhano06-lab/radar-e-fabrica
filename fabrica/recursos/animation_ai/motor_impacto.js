@@ -137,12 +137,15 @@
     String(texto || "").split(/(\*[^*]+\*)/).filter(Boolean).forEach(parte => {
       const forte = /^\*.+\*$/.test(parte);
       parte.replace(/\*/g, "").split(/\s+/).filter(Boolean).forEach(w => {
-        const s_ = forte
+        // realce "cor": a palavra em destaque só muda de cor (curiosidade), sem a tarja
+        const s_ = forte && o.realce === "cor"
+          ? el(`<span class="p cor-acc" ${PERMITE}>${esc(w)}</span>`, pai)
+          : forte
           ? el(`<span class="p caixa ${o.cor || "escura"}" ${PERMITE}><i></i>${esc(w)}</span>`, pai)
           : el(`<span class="p" ${PERMITE}>${esc(w)}</span>`, pai);
         const tt = Math.min(t + i * passo, FIM);
         entra(s_, tt, o.jeito || "sobe", o.d);
-        if (forte) tl.fromTo(s_.querySelector("i"), { scaleX: 0 }, { scaleX: 1, duration: 0.32, ease: "power3.out" }, Math.min(tt + 0.1, FIM));
+        if (forte && o.realce !== "cor") tl.fromTo(s_.querySelector("i"), { scaleX: 0 }, { scaleX: 1, duration: 0.32, ease: "power3.out" }, Math.min(tt + 0.1, FIM));
         i++;
       });
     });
@@ -525,6 +528,143 @@
     escreve(g, titulo, tt, { jeito: "soco", passo: 0.1, d: 0.5 });
     const sub = s.sub || s.proximo;
     if (sub) escreve(texto(bloco, "serif", "font-size:72px;margin:28px auto 0;color:#fff", 1600, 170, 32), limpo(sub), T(s.t_sub, tt + 1.0), { passo: 0.06 });
+  };
+
+  // ---- desenhos pelo material da cena (pedido do usuário em 2026-11-17, do vídeo dos "4 agentes": o canal de
+  // história com pintura antiga e mapa, o de curiosidades com vídeo real e letra grande). Somam aos de cima: o material
+  // é o protagonista, inteiro na tela, em vez de ficar escurecido atrás de um cartão. Sem foto, cada um volta à
+  // receita de sempre do tipo
+  const DE_NUMERO = ["numero", "porcentagem", "medidor", "proporcao"];
+  // o texto principal de qualquer tipo, como a frase e o herói leem
+  function conteudo() {
+    const c = { kicker: s.kicker, principal: s.texto, sub: null, num: null, t: T(s.t, 0.3) };
+    if (DE_NUMERO.includes(TIPO)) {
+      if (TIPO === "porcentagem") c.num = { numero: Number(s.valor), casas: T(s.casas, 0), prefixo: "", sufixo: "%" };
+      else if (TIPO === "proporcao") c.num = { fixo: `${s.parte} em ${s.total}` };
+      else if (s.contar && typeof s.numero === "number") c.num = { numero: s.numero, casas: T(s.casas, 0), prefixo: s.prefixo || "", sufixo: s.sufixo || "" };
+      else c.num = { fixo: limpo(s.valor) };
+      c.principal = s.legenda || s.rotulo;
+      c.sub = s.nota;
+      c.t_principal = T(s.t_legenda, c.t + 0.5);
+      return c;
+    }
+    if (TIPO === "palavra_chave") c.principal = `*${limpo(s.termo)}*`;
+    else if (TIPO === "citacao") { c.principal = `“${limpo(s.texto)}”`; c.sub = s.autor; }
+    else if (TIPO === "definicao") { c.kicker = s.termo; c.principal = s.definicao; }
+    else if (TIPO === "manchete") { c.kicker = s.veiculo; c.principal = s.titulo; c.sub = s.sub; }
+    else if (TIPO === "documento") c.principal = s.titulo;
+    else if (TIPO === "fato") c.sub = s.fonte;
+    c.principal = c.principal || s.titulo || s.legenda || s.termo || "";
+    c.t_principal = c.t;
+    return c;
+  }
+  function numeroEm(pai, num, t, classe, tam, w, h, min) {
+    const n = texto(pai, classe, "font-size:" + tam + "px", w, h, min);
+    if (num.prefixo) el(`<span ${PERMITE}>${esc(num.prefixo)}</span>`, n);
+    if (num.fixo != null) el(`<span ${PERMITE}>${esc(num.fixo)}</span>`, n);
+    else { const v = el(`<span ${PERMITE}>0</span>`, n); conta(v, num.numero, t + 0.05, 0.9, num.casas); }
+    if (num.sufixo) el(`<span ${PERMITE} style="font-size:.45em">${esc(num.sufixo)}</span>`, n);
+    return n;
+  }
+
+  // quadro: a pintura (gravura, foto de acervo) numa moldura dourada, na parede de um museu sob a luz, com a placa ao lado
+  R.quadro = function () {
+    if (!s.fundo) { (R[QUAL[TIPO]] || R.frase)(); return; }
+    const c = conteudo();
+    palco.insertBefore(el(`<div class="parede" ${PERMITE}></div>`), palco.firstChild);
+    const luz = el(`<div class="luz-museu" ${PERMITE}></div>`);
+    tl.fromTo(luz, { opacity: 0 }, { opacity: 1, duration: 0.8, ease: "power2.out" }, 0);
+    const mold = el(`<div class="moldura" ${PERMITE} style="left:120px;top:80px;width:1060px;height:660px"><div class="tela" ${PERMITE}><img alt="" src="${esc(s.fundo)}"></div></div>`);
+    tl.fromTo(mold.querySelector("img"), { scale: 1.03 }, { scale: 1.16, duration: DUR, ease: "none" }, 0);
+    entra(mold, 0.05, "sobe", 0.7);
+    const placa = el(`<div class="placa" ${PERMITE} style="left:1250px;top:150px;width:560px"></div>`);
+    const tp = Math.max(0.3, Math.min(c.t - 0.2, 0.9));
+    entra(placa, tp, "direita", 0.55);
+    if (c.kicker) escreve(texto(placa, "placa-kicker", "", 480, 60, 22), limpo(c.kicker), T(s.t_kicker, tp + 0.15), { passo: 0.05, jeito: "curto" });
+    if (c.num) numeroEm(placa, c.num, c.t, "placa-num uma-linha", 150, 480, 170, 56);
+    const fio = el(`<i class="placa-fio" ${PERMITE}></i>`, placa);
+    tl.fromTo(fio, { scaleX: 0 }, { scaleX: 1, duration: 0.6, ease: "power3.out" }, tp + 0.2);
+    if (c.principal) escreve(texto(placa, "serif placa-txt", "font-size:" + (c.num ? 50 : 62) + "px", 480, c.num ? 250 : 420, 26),
+                             limpo(c.principal), c.t_principal, { passo: 0.07, jeito: "curto" });
+    if (c.sub) escreve(texto(placa, "placa-sub", "", 480, 90, 22), limpo(c.sub), Math.min(c.t_principal + 0.8, FIM), { passo: 0.05, jeito: "curto" });
+  };
+
+  // mapa: o mapa inteiro na tela, andando devagar, e os lugares ditos numa legenda ao lado, cada um no segundo em que a
+  // fala chega nele. Nunca um nome num ponto do mapa: os pontos não sabem onde fica cada cidade, e no teste do mapa do
+  // Reino Unido "Escócia" caiu sobre a Irlanda. s._antigo (o trecho fala do passado, animation_ai.trecho_antigo):
+  // sépia, uma rota decorativa em tinta vermelha (sem nome em ponto nenhum), rosa dos ventos e pergaminho. Sem ele, o
+  // mapa de hoje: nítido, sem rota, a legenda e a frase em caixas escuras com a cor de destaque
+  R.mapa = function () {
+    if (!s.fundo) { (R[QUAL[TIPO]] || R.frase)(); return; }
+    const c = conteudo();
+    const ANTIGO = !!s._antigo;
+    const b = el(`<div class="bg" ${PERMITE}><img alt="" class="${ANTIGO ? "sepia" : ""}" src="${esc(s.fundo)}"><i class="escuro ${ANTIGO ? "mapa" : "mapa-atual"}" ${PERMITE}></i></div>`);
+    palco.insertBefore(b, palco.firstChild);
+    tl.fromTo(b.querySelector("img"), { scale: 1.08, xPercent: -2 }, { scale: 1.22, xPercent: 2, duration: DUR, ease: "none" }, 0);
+    const itens = (s.itens || []).filter(it => it && (it.texto || it.data)).slice(0, 4);
+    const ts = itens.map((it, i) => T(it.t, 0.4 + i * 0.9));
+    for (let i = 1; i < ts.length; i++) ts[i] = Math.max(ts[i], ts[i - 1] + 0.4);
+    if (ANTIGO) {
+      // a rota decorativa, na metade esquerda (a direita é da legenda): um trecho a cada lugar dito, ou um só
+      const P = [[260, 560], [620, 330], [980, 520], [1180, 300], [1220, 600]].slice(0, Math.max(2, itens.length + 1));
+      const tr = P.map((_, i) => i === 0 ? 0.3 : (ts[i - 1] != null ? ts[i - 1] : Math.max(c.t + 0.6, DUR * 0.5)));
+      const svg = linhas();
+      for (let i = 1; i < P.length; i++) {
+        const [x0, y0] = P[i - 1], [x1, y1] = P[i];
+        linha(svg, `M ${x0} ${y0} Q ${(x0 + x1) / 2} ${Math.min(y0, y1) - 110} ${x1} ${y1}`, Math.max(0, tr[i] - 0.6), 0.6, "#B3261E", 7);
+      }
+      P.forEach(([x, y], i) => entra(el(`<div class="pino-mapa" ${PERMITE} style="left:${x - 30}px;top:${y - 30}px"></div>`), tr[i], "carimbo", 0.4));
+      const rosa = el(`<div class="rosa" ${PERMITE}><svg viewBox="-100 -100 200 200" width="190" height="190"><circle r="86" fill="none" stroke="#2A1A0C" stroke-width="3"/><circle r="70" fill="none" stroke="#2A1A0C" stroke-width="1.5"/><path d="M0 -92 L12 0 L0 92 L-12 0 Z" fill="#2A1A0C"/><path d="M-92 0 L0 12 L92 0 L0 -12 Z" fill="#7A5A30"/><path d="M0 -92 L12 0 L-12 0 Z" fill="#B3261E"/></svg></div>`);
+      tl.fromTo(rosa, { rotation: -120, autoAlpha: 0, scale: 0.6 }, { rotation: 0, autoAlpha: 1, scale: 1, duration: 1.0, ease: "power3.out" }, 0.15);
+    }
+    // a legenda dos lugares, à direita
+    itens.forEach((it, i) => {
+      const rot = el(`<div class="rotulo-mapa ${ANTIGO ? "" : "atual"}" ${PERMITE} style="left:1330px;top:${(ANTIGO ? 270 : 150) + i * 128}px;width:480px"></div>`);
+      escreve(texto(rot, ANTIGO ? "serif" : "medio", ANTIGO ? "font-size:46px;color:#2A1A0C" : "font-size:42px;color:#FFFFFF", 440, 90, 22),
+              [it.data, it.texto].filter(Boolean).map(limpo).join(" · "), ts[i] + 0.1, { passo: 0.05, jeito: "curto" });
+      entra(rot, ts[i], "direita", 0.4);
+    });
+    // a frase (ou o título da lista, ou o número): no alto com a legenda, embaixo sem ela
+    const frase = c.num ? null : (itens.length ? s.titulo : c.principal);
+    if (frase || c.num) {
+      const caixa = el(`<div class="${ANTIGO ? "pergaminho" : "caixa-mapa"}" ${PERMITE} style="left:110px;top:${itens.length ? 40 : (c.num ? 540 : 600)}px"></div>`);
+      if (c.num) numeroEm(caixa, c.num, c.t, ANTIGO ? "serif uma-linha cor-tinta" : "gigante uma-linha cor-acc", ANTIGO ? 120 : 150, 1100, 150, 50);
+      const txt = c.num ? c.principal : frase;
+      const largura = itens.length ? 1080 : 1100;
+      if (txt) escreve(texto(caixa, ANTIGO ? "serif" : "medio", ANTIGO ? "font-size:54px;color:#2A1A0C" : "font-size:56px;color:#FFFFFF", largura, c.num ? 70 : 140, 26),
+                       ANTIGO ? limpo(txt) : txt, itens.length ? T(s.t_titulo, 0.2) : c.t_principal, { passo: 0.06, jeito: "curto" });
+      entra(caixa, Math.max(0, (itens.length ? T(s.t_titulo, 0.2) : c.t) - 0.25), "sobe", 0.5);
+    }
+  };
+
+  // curiosidade: a foto (ou o vídeo) da cena na tela inteira, sem cartão, e o texto grande em caixa alta em cima, a
+  // palavra em destaque em amarelo; o número, gigante. Como o canal de curiosidades do vídeo de referência
+  R.curiosidade = function () {
+    if (!s.fundo && !s.fundo_video) { (R[QUAL[TIPO]] || R.frase)(); return; }
+    const c = conteudo();
+    const b = el(`<div class="bg" ${PERMITE}></div>`);
+    palco.insertBefore(b, palco.firstChild);
+    const midia = s.fundo_video
+      ? el(`<video muted playsinline preload="auto" src="${esc(s.fundo_video)}" data-start="0" data-duration="${DUR}"></video>`, b)
+      : el(`<img alt="" src="${esc(s.fundo)}">`, b);
+    tl.fromTo(midia, { scale: 1.04 }, { scale: 1.14, duration: DUR, ease: "none" }, 0);
+    el(`<i class="escuro topo" ${PERMITE}></i>`, b);
+    const bloco = el(`<div class="bloco" ${PERMITE} style="left:110px;top:70px;width:1700px;text-align:center"></div>`);
+    if (c.kicker) escreve(texto(bloco, "gigante cor-acc contorno", "font-size:96px;margin:0 auto 18px", 1700, 110, 40), limpo(c.kicker),
+                          T(s.t_kicker, 0.1), { jeito: "soco", passo: 0.08 });
+    if (c.num) {
+      const n = numeroEm(bloco, c.num, c.t, "gigante uma-linha cor-acc contorno", 300, 1700, 300, 90);
+      n.style.margin = "0 auto";
+      entra(n, c.t, "soco", 0.5);
+      if (c.principal) escreve(texto(bloco, "gigante contorno", "font-size:96px;margin:14px auto 0", 1600, 230, 40), limpo(c.principal),
+                               c.t_principal, { passo: 0.08, jeito: "soco", d: 0.35 });
+    } else if (c.principal) {
+      escreve(texto(bloco, "gigante contorno", "font-size:128px;margin:0 auto", 1700, c.kicker ? 480 : 600, 48), c.principal,
+              c.t_principal, { passo: 0.09, jeito: "soco", d: 0.35, realce: "cor" });
+    }
+    if (c.sub) escreve(texto(bloco, "medio contorno", "font-size:54px;margin:16px auto 0", 1500, 70, 26), limpo(c.sub),
+                       Math.min(c.t_principal + 1.0, FIM), { passo: 0.05 });
+    flash(Math.max(0, c.t - 0.05));
   };
 
   const QUAL = {

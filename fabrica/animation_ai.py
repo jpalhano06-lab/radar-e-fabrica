@@ -41,7 +41,7 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import animacoes
+from . import ajustes_animacao, animacoes
 from .util import rodar
 
 FONTE = "animation_ai"
@@ -535,13 +535,14 @@ ESQUEMA = {
 }
 
 
-def instrucoes() -> str:
-    linhas = "\n".join(f"- {tipo}: {para}. Campos: {campos}" for tipo, (para, campos) in CATALOGO.items())
+def instrucoes(fora=()) -> str:
+    catalogo_ = {t: v for t, v in CATALOGO.items() if t not in fora}
+    linhas = "\n".join(f"- {tipo}: {para}. Campos: {campos}" for tipo, (para, campos) in catalogo_.items())
     return f"""Você é o diretor de motion graphics de um canal do YouTube. O vídeo é feito de cenas animadas prontas: para
 CADA trecho de fala recebido, escolha um tipo de cena do catálogo e preencha os textos curtos que aparecem na tela.
 Responda só em JSON: {{"trechos": [{{"id": N, "tipo": "...", "dados": {{...}}}}]}}, um item por trecho, na ordem.
 
-CATÁLOGO ({len(CATALOGO)} tipos):
+CATÁLOGO ({len(catalogo_)} tipos):
 {linhas}
 
 REGRAS
@@ -593,9 +594,11 @@ def planejar(projeto, itens, log=print, forcar=False) -> dict:
     from . import openrouter_local
 
     cfg = config(projeto)
+    fora = set(cfg.get("tipos_fora") or [])  # as animações que a pessoa desligou
     arquivo = projeto.pasta / "animation_ai" / "planos.json"
     guardados = {} if forcar or not arquivo.exists() else json.loads(arquivo.read_text(encoding="utf-8"))
-    planos = {item["id"]: guardados[_marca_do_item(item)] for item in itens if _marca_do_item(item) in guardados}
+    planos = {item["id"]: guardados[_marca_do_item(item)] for item in itens
+              if _marca_do_item(item) in guardados and guardados[_marca_do_item(item)].get("tipo") not in fora}
     if planos:
         log(f"  animation-ai: {len(planos)} trecho(s) com o plano guardado")
     anteriores = []
@@ -607,7 +610,7 @@ def planejar(projeto, itens, log=print, forcar=False) -> dict:
         for tentativa in range(1 + int(cfg.get("tentativas", 2))):
             try:
                 resposta = openrouter_local.perguntar(
-                    projeto, "animation-ai: direção", instrucoes(), _pedido(pendentes, anteriores, erros), ESQUEMA,
+                    projeto, "animation-ai: direção", instrucoes(fora), _pedido(pendentes, anteriores, erros), ESQUEMA,
                     log=log, modelo=openrouter_local.principal(projeto))
             except (Exception, SystemExit) as erro:
                 log(f"  animation-ai: a direção não respondeu ({str(erro)[:120]})")
@@ -625,6 +628,8 @@ def planejar(projeto, itens, log=print, forcar=False) -> dict:
                 problemas = conferir(tipo, dados, item["fala"], item["extras"], item["posicao"], item["total"],
                                      tuple(feitos[-2:]), sum(t in SIMPLES for t in planos_tipos(planos)),
                                      lingua=lingua)
+                if tipo in fora:
+                    problemas = [f"o tipo '{tipo}' foi desligado neste canal; escolha outro do catálogo"]
                 if problemas:
                     erros[item["id"]] = problemas
                     ainda.append(item)
@@ -919,7 +924,7 @@ def sons_impacto(tipo, d, dur) -> list:
 def tema(projeto) -> dict:
     cfg = config(projeto)
     base = TEMAS.get(cfg.get("tema") or "impacto", TEMAS["impacto"])
-    return {**base, **(cfg.get("cores") or {})}
+    return ajustes_animacao.aplicar(base, cfg)  # as cores e as letras escolhidas na página Animações do Radar
 
 
 def e_impacto(cores) -> bool:
@@ -939,8 +944,9 @@ COM_FOTO_IMPACTO = ("lista", "checklist", "destaques", "cartoes", "pilha_cartoes
 
 
 def tipos_do_tema(projeto, tipos=None) -> list:
-    """Os tipos que o modelo pode escolher: no impacto, só os que têm receita."""
-    base = list(tipos or DE_COMPLEMENTO)
+    """Os tipos que o modelo pode escolher: no impacto, só os que têm receita; nunca os que a pessoa desligou."""
+    fora = set(config(projeto).get("tipos_fora") or [])  # ajustes_animacao.py
+    base = [t for t in (DE_COMPLEMENTO if tipos is None else tipos) if t not in fora]
     return [t for t in base if t in TIPOS_IMPACTO] if e_impacto(tema(projeto)) else base
 
 
@@ -965,8 +971,7 @@ def montar_html(tipo, dados, dur, cores, canal="", variante=0) -> str:
     <meta name="viewport" content="width=1920, height=1080" />
     <script src="{animacoes.GSAP}"></script>
     <style>
-      @font-face {{ font-family: "Titulo"; src: url("assets/fontes/PlayfairDisplay.ttf"); font-weight: 400 900; }}
-      @font-face {{ font-family: "Texto"; src: url("assets/fontes/Inter.ttf"); font-weight: 100 900; }}
+{ajustes_animacao.css_das_fontes(cores)}
       :root {{ {variaveis} }}
 {css}
     </style>
@@ -1258,14 +1263,16 @@ def fotos_dos_itens(projeto, trecho, tipo, dados, ini, pasta, log=print, com_fot
     return creditos
 
 
-def fotos_impacto(projeto, trecho, tipo, dados, ini, pasta, log=print) -> dict:
+def fotos_impacto(projeto, trecho, tipo, dados, ini, pasta, log=print, itens=True) -> dict:
     """As fotos do motor do impacto: a foto que a cena já tinha vai para o fundo (dados["fundo"]), e cada item, lado da
-    comparação ou passo da ligação ganha a foto da coisa que cita (fotos_dos_itens). Devolve os créditos por cena."""
+    comparação ou passo da ligação ganha a foto da coisa que cita (fotos_dos_itens). Devolve os créditos por cena.
+    itens=False: só o fundo (o mapa não mostra a foto dos itens, e ela iria para os créditos sem aparecer)."""
     # no impacto cada cartão é a sua foto: a que achou entra, mesmo sozinha (com o mínimo de 2, a foto achada para
     # "Interrompe circulação" se perdia e os dois cartões da cena 71 do brasil-selvagem saíam vazios)
     creditos = fotos_dos_itens(projeto, trecho, tipo, dados, ini, pasta, log, com_foto=COM_FOTO_IMPACTO, minimo=1,
-                               exigir_combina=True, buscar_todos=True)
-    if tipo in ("comparar", "antes_depois", "deslizar"):
+                               exigir_combina=True, buscar_todos=True) if itens else {}
+    so_cor = config(projeto).get("fundo") == "cor"  # a pessoa escolheu o fundo só na cor: os cartões seguem com foto
+    if itens and tipo in ("comparar", "antes_depois", "deslizar"):
         lados = [dados.get(k) for k in (("esq", "dir") if tipo == "comparar" else ("antes", "depois"))]
         if all(isinstance(l, dict) for l in lados):
             itens = [{"texto": l.get("titulo") or l.get("rotulo") or l.get("texto") or "", "t": l.get("t", 0)}
@@ -1276,7 +1283,7 @@ def fotos_impacto(projeto, trecho, tipo, dados, ini, pasta, log=print) -> dict:
             for lado, it in zip(lados, itens):
                 if it.get("foto"):
                     lado["foto"], lado["foto_id"] = it["foto"], it["foto_id"]
-    for c in trecho:
+    for c in () if so_cor else trecho:
         foto = _foto_da_cena(projeto, c)
         if foto is None:
             continue
@@ -1297,7 +1304,7 @@ def fotos_impacto(projeto, trecho, tipo, dados, ini, pasta, log=print) -> dict:
                 if _combina(melhor, mostra):
                     melhor["foto"], melhor["foto_id"] = dados["fundo"], dados["fundo_id"]
             break
-    if not dados.get("fundo"):
+    if not dados.get("fundo") and not so_cor:
         _fundo_do_banco(projeto, trecho, dados, pasta, creditos, log)
     return creditos
 
@@ -1599,21 +1606,40 @@ def gravar(projeto, trecho, plano, log=print, exigir_imagem=False):
     tipo, dados = plano["tipo"], plano["dados"]
     resolvidos, eventos = resolver_tempos(tipo, dados, palavras, dur)
     cores = tema(projeto)
+    desenho = plano.get("desenho")
+    if desenho in DESENHOS_DO_MATERIAL:
+        # o material pode ter mudado desde a escolha (a foto da cena trocada): confere de novo
+        if desenho not in desenhos_possiveis(tipo, dados, dur, material_do_trecho(projeto, trecho), e_impacto(cores),
+                                             trecho_antigo(trecho)):
+            desenho = None
+        elif not e_impacto(cores):
+            # num canal de outro estilo (o apple, de fundo claro), a cena do material é desenhada pelo motor do impacto:
+            # a pintura, o mapa ou o vídeo inteiro na tela, no lugar do texto sobre o fundo claro
+            cores = dict(TEMAS["impacto"])
     canal = str(cfg.get("canal") or "")  # o nome do canal no canto, do perfil (animation_ai.canal); vazio, sem nome
     pasta = _pasta_para_gravar(projeto, [c["n"] for c in trecho])
     if e_impacto(cores):
         # o desenho escolhido para variar (escolher_desenhos); o de sempre da receita não vai, e a assinatura não muda
-        if plano.get("desenho") and plano["desenho"] != RECEITA_IMPACTO.get(tipo, "frase"):
-            resolvidos["_layout"] = plano["desenho"]
-        creditos = fotos_impacto(projeto, trecho, tipo, resolvidos, ini, pasta, log)
+        if desenho and desenho != RECEITA_IMPACTO.get(tipo, "frase"):
+            resolvidos["_layout"] = desenho
+        if desenho == "mapa" and trecho_antigo(trecho):
+            resolvidos["_antigo"] = True  # o mapa em sépia, com rosa dos ventos e pergaminho; sem isso, o de hoje
+        creditos = fotos_impacto(projeto, trecho, tipo, resolvidos, ini, pasta, log,
+                                 itens=desenho not in DESENHOS_DO_MATERIAL)  # os três mostram só o material da cena
+        if desenho == "curiosidade":
+            video = _video_de_fundo(projeto, trecho, dur, pasta)
+            if video:
+                resolvidos["fundo_video"] = video  # o vídeo real da cena tocando atrás do texto
         from . import idioma
         if idioma.locale(projeto) != "pt-BR":
             resolvidos["_locale"] = idioma.locale(projeto)  # números no formato da língua (1,500 em inglês)
         eventos = sons_impacto(tipo, resolvidos, dur)  # o motor do impacto mexe em outros momentos que o motor.js
     else:
         creditos = fotos_dos_itens(projeto, trecho, tipo, resolvidos, ini, pasta, log)
-        fundo_da_cena(projeto, trecho, resolvidos, pasta, creditos, log)
-    if exigir_imagem and not tem_imagem(resolvidos):
+        if cfg.get("fundo") != "cor":
+            fundo_da_cena(projeto, trecho, resolvidos, pasta, creditos, log)
+    # quem pediu o fundo só na cor pediu cena sem foto atrás: ela não pode cair por falta de foto
+    if exigir_imagem and cfg.get("fundo") != "cor" and not tem_imagem(resolvidos):
         raise SemImagem("nenhuma foto para a cena animada: só texto não entra no vídeo")
     variante = trecho[0]["n"]
     marca = assinatura(tipo, resolvidos, dur, cores, canal, variante)
@@ -1629,6 +1655,7 @@ def gravar(projeto, trecho, plano, log=print, exigir_imagem=False):
     if anterior.get("assinatura") != marca or not destino.exists():
         pasta.mkdir(parents=True, exist_ok=True)
         animacoes._preparar_pasta(pasta)
+        ajustes_animacao.copiar_fontes(pasta, cores)
         (pasta / "index.html").write_text(montar_html(tipo, resolvidos, dur, cores, canal, variante), encoding="utf-8")
         erros = animacoes._conferir(projeto, pasta, clipe=True)
         if erros:
@@ -1729,29 +1756,137 @@ DESENHOS = {"baralho": ("baralho", "grade", "faixas", "telacheia"), "comparar": 
 SEGUNDOS_POR_ITEM_NA_TELA_CHEIA = 1.2  # menos que isso, cada item passa rápido demais (3,5 s com 4 itens, cena 338)
 
 
-def desenhos_possiveis(tipo, dados, dur) -> list:
-    """Os desenhos em que este plano cabe; o primeiro é o de sempre da receita."""
+def desenhos_possiveis(tipo, dados, dur, material=None, impacto=True, antigo=False) -> list:
+    """Os desenhos em que este plano cabe; o primeiro é o de sempre da receita. material (material_do_trecho): o mapa
+    vira o mapa e, num trecho que fala do passado (antigo, trecho_antigo), a pintura vira o quadro, sem outra opção; o
+    vídeo real põe a curiosidade na frente. Fora do impacto (impacto=False), só os desenhos do material, ou nenhum (a
+    cena fica no estilo do canal)."""
     receita = RECEITA_IMPACTO.get(tipo, "frase")
+    n = len([it for it in (dados or {}).get("itens") or [] if isinstance(it, dict) and (it.get("texto") or it.get("titulo"))])
+    if tipo in TIPOS_IMPACTO:
+        if material == "pintura" and antigo and receita in ("frase", "heroi"):
+            return ["quadro"]
+        if material == "mapa" and (receita in ("frase", "heroi", "ligacao") or (receita == "baralho" and 2 <= n <= 4)):
+            return ["mapa"]
+    if not impacto:
+        return ["curiosidade"] if material == "video" and tipo in TIPOS_IMPACTO and receita in ("frase", "heroi") else []
     if receita == "comparar" and tipo != "comparar":
         return ["comparar"]  # o versus é só para os dois lados com título (antes e depois tem valores contando)
     opcoes = list(DESENHOS.get(receita, (receita,)))
     if receita == "baralho":
-        n = len([it for it in (dados or {}).get("itens") or [] if isinstance(it, dict) and (it.get("texto") or it.get("titulo"))])
         if not 2 <= n <= 4:
             opcoes.remove("grade")
         if not 2 <= n <= 5:
             opcoes = [o for o in opcoes if o not in ("faixas", "telacheia")]
         elif dur / n < SEGUNDOS_POR_ITEM_NA_TELA_CHEIA:
             opcoes.remove("telacheia")
+    if receita in ("frase", "heroi"):
+        # a foto ou o vídeo na tela inteira com o texto grande: com o vídeo real da cena, ele vem primeiro
+        opcoes = ["curiosidade"] + opcoes if material == "video" else opcoes + ["curiosidade"]
     return opcoes
+
+
+# os desenhos pelo material da cena (pedido do usuário em 2026-11-17, do vídeo dos "4 agentes": o canal de história com
+# pintura antiga e mapa, o de curiosidades com vídeo real e letra grande). Somam aos de sempre: o material fica inteiro
+# na tela, no lugar do cartão sobre o fundo escurecido, e em qualquer estilo (gravar desenha a cena no motor do impacto)
+DESENHOS_DO_MATERIAL = ("quadro", "mapa", "curiosidade")
+_PINTURA = re.compile(r"\b(pintura|pintado|quadro a [óo]leo|[óo]leo sobre|aquarela|afresco|gravura|litografia|xilogravura|"
+                      r"iluminura|tape[çc]aria|ilustra[çc][ãa]o antiga|painting|engraving|lithograph|woodcut|fresco)\b", re.I)
+_MAPA = re.compile(r"\b(mapa|mapas|map|carta n[áa]utica|portulano|cartogr\w*)\b", re.I)
+_CAMPO = lambda rotulo, texto: (re.search(rf"{rotulo}:\s*([^.(\n]+)", texto or "", re.I) or [None, ""])[1].strip().lower()
+
+
+def material_do_trecho(projeto, trecho):
+    """O material da foto que vira o fundo da cena animada (a primeira cena do trecho com foto, como em
+    fotos_impacto): "pintura", "mapa", "video" ou None. Lido do que a visão descreveu da foto na conferência."""
+    for c in trecho:
+        try:
+            foto = _foto_da_cena(projeto, c)
+        except Exception:  # noqa: BLE001 - sem como saber, a cena segue com os desenhos de sempre
+            return None
+        if foto is None:
+            continue
+        antes = _o_que_a_cena_tinha(c)
+        legenda = str((antes.get("conferencia") or {}).get("legenda") or "")
+        o_que_e, tipo_imagem = _CAMPO("O que é", legenda), _CAMPO("Tipo de imagem", legenda)
+        if _MAPA.search(o_que_e) and (tipo_imagem.startswith("mapa") or not tipo_imagem):
+            return "mapa"
+        if _PINTURA.search(o_que_e) or (tipo_imagem.startswith("ilustra") and "antiga" in _CAMPO("Época aparente", legenda)):
+            return "pintura"
+        if foto[1].get("tipo") == "video":
+            return "video"
+        return None
+    return None
+
+
+# o passado dito na fala: "em 1539", "desde 1875", "no século XVI", "na Idade Média". Só o ano com a preposição
+# antes: "1500 metros" e "1900 pessoas" não são datas
+_ANO_ANTIGO = re.compile(r"\b(?:em|de|desde|até|ate|no ano de|por volta de|in|since|until|by|around|en|desde el)\s+"
+                         r"(?:1[0-8]\d\d|19[0-4]\d)\b", re.I)
+_SECULO_ANTIGO = re.compile(r"\b(?:s[ée]culo|century|siglo)\s+(?:[IVX]+|\d{1,2})\b|\b(?:[IVX]+|\d{1,2})(?:th|st|nd|rd)?\s+century\b"
+                            r"|\bidade m[ée]dia\b|\bantiguidade\b|\bmiddle ages\b|\bmedieval\b|\bimp[ée]rio romano\b", re.I)
+
+
+def _numero_do_seculo(valor) -> int:
+    """"16", "XVI" ou "xvi" -> 16."""
+    valor = valor.upper()
+    if valor.isdigit():
+        return int(valor)
+    romanos = {"I": 1, "V": 5, "X": 10}
+    return sum(romanos[ch] * (-1 if i + 1 < len(valor) and romanos[ch] < romanos[valor[i + 1]] else 1)
+               for i, ch in enumerate(valor))
+
+
+def trecho_antigo(trecho) -> bool:
+    """O trecho fala do passado (pedido do usuário em 2026-11-17: "mapas e ideias de animações antigas, somente para
+    partes antigas faladas no roteiro; datas mais atuais, dados universais atuais"): a época que o agente marcou na
+    cena (um ano antes de 1950, midia.e_de_epoca) ou um ano ou século antigo dito na fala. Pela fala, nunca pela foto:
+    um mapa antigo num trecho sobre hoje sai com o visual de hoje."""
+    from .midia import e_de_epoca
+
+    for c in trecho:
+        if e_de_epoca(c):
+            return True
+        fala = str(c.get("texto") or "")
+        if _ANO_ANTIGO.search(fala):
+            return True
+        for s in re.findall(_SECULO_ANTIGO, fala):
+            seculo = re.search(r"\b([IVX]+|\d{1,2})\b", s, re.I)
+            if not seculo:
+                return True  # Idade Média, Antiguidade, medieval
+            if _numero_do_seculo(seculo.group(1)) <= 19:  # o século XX e o XXI são de hoje
+                return True
+    return False
+
+
+def _video_de_fundo(projeto, trecho, dur, pasta):
+    """O vídeo real da cena (o primeiro do trecho), cortado na duração da cena animada, para a curiosidade."""
+    for c in trecho:
+        foto = _foto_da_cena(projeto, c)
+        if foto is None:
+            continue
+        if foto[1].get("tipo") != "video":
+            return None
+        destino = pasta / "assets" / "fotos" / f"fundo_{c['n']:04d}.mp4"
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            rodar(["ffmpeg", "-y", "-loglevel", "error", "-i", str(foto[0]), "-t", f"{dur + 0.3:.2f}", "-an",
+                   "-vf", "scale='min(1280,iw)':-2", "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-g", "15",
+                   str(destino)])
+        except Exception:  # noqa: BLE001 - sem o vídeo, a curiosidade vai com a foto (um quadro dele)
+            return None
+        return destino.relative_to(pasta).as_posix() if destino.exists() else None
+    return None
 
 
 def escolher_desenhos(projeto, pares) -> None:
     """Põe plano["desenho"] em cada (cenas, plano) a gravar: em ordem de tempo, junto com as cenas animadas que já estão
     no vídeo, cada uma ganha, entre os desenhos em que cabe, um diferente do da cena animada anterior e o menos usado
-    até ali. Escolhido antes de gravar (a gravação roda em paralelo), sai sempre o mesmo."""
-    if not pares or not e_impacto(tema(projeto)):
+    até ali. Escolhido antes de gravar (a gravação roda em paralelo), sai sempre o mesmo. Fora do impacto, só os
+    desenhos do material da cena (quadro, mapa, curiosidade com vídeo real); o resto fica no estilo do canal."""
+    if not pares:
         return
+    impacto = e_impacto(tema(projeto))
     no_lote = {g[0]["n"] for g, _ in pares}
     linha = []
     for trecho, grupo in trechos_animados(projeto.ler_json("cenas.json")["cenas"]):
@@ -1768,7 +1903,11 @@ def escolher_desenhos(projeto, pares) -> None:
         if par is not None:
             g, plano = par
             dur = max(float(g[-1]["fim"]) - float(g[0]["ini"]), 1.0)
-            opcoes = desenhos_possiveis(plano["tipo"], plano.get("dados"), dur)
+            opcoes = desenhos_possiveis(plano["tipo"], plano.get("dados"), dur, material_do_trecho(projeto, g), impacto,
+                                        trecho_antigo(g))
+            if not opcoes:
+                plano.pop("desenho", None)
+                continue
             livres = [o for o in opcoes if o != anterior] or opcoes
             desenho = min(livres, key=lambda o: (usados.get(o, 0), opcoes.index(o)))
             plano["desenho"] = desenho
@@ -2010,7 +2149,9 @@ def decidir(projeto, itens, log=print, tipos=None) -> dict:
     limiar = float(cfg.get("limiar", 70))
     arquivo = projeto.pasta / "animation_ai" / "decisoes.json"
     guardadas = json.loads(arquivo.read_text(encoding="utf-8")) if arquivo.exists() else {}
-    tipos = list(tipos or DE_COMPLEMENTO)
+    tipos = list(DE_COMPLEMENTO if tipos is None else tipos)
+    if not tipos:  # a pessoa desligou todas as que caberiam aqui: lista vazia não pode virar o catálogo inteiro
+        return {}
     # o plano guardado passa de novo pela conferência: a regra pode ter ficado mais exigente depois (o título em
     # português num roteiro em inglês, cena 338 do everything-you-need-to-answer). Reprovado agora, é pedido de novo
     saida = {}

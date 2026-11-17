@@ -1,0 +1,10 @@
+# Canal do Marcos: criado pelo Radar ao escolher a voz. Herda tudo do documentário.
+base: documentario.yaml
+
+nome: "Canal do Marcos"
+
+voz:
+  provedor: genaipro
+  voice_id: mlvXFS1MP5qndOFkWz1M
+  nome_da_voz: "Edmund - Brit Customer Care: Confident, Professional & Reassuring"
+  idioma_da_voz: en

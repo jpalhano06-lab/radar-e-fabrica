@@ -99,9 +99,64 @@ def test_receitas_do_python_batem_com_as_do_motor():
     qual = js[js.index("const QUAL"):]
     qual = dict(re.findall(r"(\w+):\s*\"(\w+)\"", qual[:qual.index("};")]))
     assert qual == a.RECEITA_IMPACTO
-    for desenhos in a.DESENHOS.values():
+    for desenhos in [*a.DESENHOS.values(), a.DESENHOS_DO_MATERIAL]:
         for d in desenhos:
             assert f"R.{d} = function" in js, d
+
+
+def _cena_com(legenda, tipo="foto", n=1):
+    return {"n": n, "texto": "fala", "conferencia": {"legenda": legenda, "nota": 80, "sujeito": 90},
+            "midia": {"arquivo": f"midia/{n:04d}.jpg", "fonte": "wikimedia", "id": "x", "tipo": tipo}}
+
+
+def _projeto_com_arquivos(tmp_path, cenas):
+    for c in cenas:
+        (tmp_path / c["midia"]["arquivo"]).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / c["midia"]["arquivo"]).write_bytes(b"x")
+    return SimpleNamespace(pasta=tmp_path, imagem=lambda n: tmp_path / "imagens" / f"{n:04d}.png")
+
+
+def test_material_do_trecho(tmp_path):
+    pintura = _cena_com("O que é: Uma pintura a óleo de um navio na tempestade (certeza alta). "
+                        "Tipo de imagem: ilustracao. Época aparente: antiga.")
+    mapa = _cena_com("O que é: Um mapa antigo do mar do Norte com monstros marinhos (certeza alta). "
+                     "Tipo de imagem: mapa ou grafico. Época aparente: antiga.", n=2)
+    grafico = _cena_com("O que é: Um gráfico de barras de vendas (certeza alta). Tipo de imagem: mapa ou grafico.", n=3)
+    video = _cena_com("O que é: Uma arraia na areia (certeza alta). Tipo de imagem: quadro de video.", "video", n=4)
+    foto = _cena_com("O que é: Um leão deitado na savana (certeza alta). Tipo de imagem: foto real.", n=5)
+    p = _projeto_com_arquivos(tmp_path, [pintura, mapa, grafico, video, foto])
+    assert a.material_do_trecho(p, [pintura]) == "pintura"
+    assert a.material_do_trecho(p, [mapa]) == "mapa"
+    assert a.material_do_trecho(p, [grafico]) is None  # gráfico não é mapa
+    assert a.material_do_trecho(p, [video]) == "video"
+    assert a.material_do_trecho(p, [foto]) is None
+    # vale a primeira cena com foto, a mesma que vira o fundo (fotos_impacto)
+    sem_foto = {"n": 9, "texto": "fala", "midia": None}
+    assert a.material_do_trecho(p, [sem_foto, mapa, pintura]) == "mapa"
+    # a foto reprovada pelo Jev não vira fundo, e não decide o material
+    errada = dict(pintura, conferencia={"legenda": pintura["conferencia"]["legenda"], "sujeito": 5, "nota": 2})
+    assert a.material_do_trecho(p, [errada]) is None
+
+
+def test_desenhos_do_material():
+    # pintura e mapa mandam: a cena do material sempre sai com o desenho dele
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", antigo=True) == ["quadro"]
+    assert a.desenhos_possiveis("numero", {}, 6.0, "pintura", antigo=True) == ["quadro"]
+    assert a.desenhos_possiveis("frase", {}, 6.0, "mapa") == ["mapa"]
+    assert a.desenhos_possiveis("linha_do_tempo", {}, 6.0, "mapa") == ["mapa"]
+    lugares = {"itens": [{"texto": "Islândia"}, {"texto": "Noruega"}, {"texto": "Escócia"}]}
+    assert a.desenhos_possiveis("lista", lugares, 6.0, "mapa") == ["mapa"]
+    # lista com pintura segue nos cartões (cada item tem a sua foto)
+    assert "quadro" not in a.desenhos_possiveis("lista", lugares, 6.0, "pintura")
+    # o vídeo real põe a curiosidade na frente
+    assert a.desenhos_possiveis("frase", {}, 6.0, "video")[0] == "curiosidade"
+    # fora do impacto (canal de fundo claro): só o desenho do material, ou nenhum
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", impacto=False, antigo=True) == ["quadro"]
+    assert a.desenhos_possiveis("frase", {}, 6.0, "video", impacto=False) == ["curiosidade"]
+    assert a.desenhos_possiveis("frase", {}, 6.0, None, impacto=False) == []
+    assert a.desenhos_possiveis("lista", lugares, 6.0, None, impacto=False) == []
+    # tipo sem receita no impacto (barras) nunca vira quadro: os valores sumiriam
+    assert a.desenhos_possiveis("barras", {}, 6.0, "pintura", impacto=False) == []
 
 
 def test_desenhos_possiveis():
@@ -112,7 +167,8 @@ def test_desenhos_possiveis():
     assert a.desenhos_possiveis("lista", itens(6), 9.0) == ["baralho"]
     assert a.desenhos_possiveis("comparar", {}, 6.0) == ["comparar", "versus"]
     assert a.desenhos_possiveis("antes_depois", {}, 6.0) == ["comparar"]
-    assert a.desenhos_possiveis("frase", {}, 6.0) == ["frase"]
+    assert a.desenhos_possiveis("frase", {}, 6.0) == ["frase", "curiosidade"]
+    assert a.desenhos_possiveis("numero", {}, 6.0) == ["heroi", "curiosidade"]
 
 
 def test_duas_cenas_animadas_seguidas_nunca_saem_iguais(tmp_path):
@@ -131,3 +187,21 @@ def test_duas_cenas_animadas_seguidas_nunca_saem_iguais(tmp_path):
     pares2 = [(g, {"tipo": pl["tipo"], "dados": pl["dados"]}) for g, pl in pares]
     a.escolher_desenhos(p, pares2)
     assert [pl["desenho"] for _, pl in pares2] == desenhos
+
+
+def test_visual_antigo_so_no_trecho_que_fala_do_passado():
+    # pedido do usuário em 2026-11-17: "mapas e ideias de animações antigas, somente para partes antigas faladas no
+    # roteiro; datas mais atuais, dados universais atuais". Pela fala e pela época do agente, nunca pela foto
+    assert a.trecho_antigo([{"texto": "Em 1539, um mapa avisava que no mar do Norte havia monstros."}])
+    assert a.trecho_antigo([{"texto": "No século XVI, os navegadores temiam o mar."}])
+    assert a.trecho_antigo([{"texto": "Na Idade Média, ninguém atravessava esse mar."}])
+    assert a.trecho_antigo([{"texto": "o acampamento", "epoca": "1898"}])
+    assert not a.trecho_antigo([{"texto": "Em 2024, a rota mais usada passou pelo Canal de Suez."}])
+    assert not a.trecho_antigo([{"texto": "No século XXI, o comércio pelo mar dobrou."}])
+    assert not a.trecho_antigo([{"texto": "O navio leva 1500 contêineres e 1900 pessoas."}])  # número não é data
+    # a pintura só vira quadro num trecho antigo; num trecho de hoje, segue nos desenhos de sempre
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", antigo=True) == ["quadro"]
+    assert "quadro" not in a.desenhos_possiveis("frase", {}, 6.0, "pintura", antigo=False)
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", impacto=False, antigo=False) == []
+    # o mapa vale nos dois tempos (o motor desenha o antigo ou o de hoje pelo _antigo)
+    assert a.desenhos_possiveis("frase", {}, 6.0, "mapa", antigo=False) == ["mapa"]
