@@ -734,44 +734,36 @@ Animações, `animacoes()` em `radar/web/app.js`) e a fábrica é quem confere e
 - **Estilo novo em `TEMAS` ou animação nova em `CATALOGO`:** precisa de nome em `TEMAS_INFO` e `TIPOS_INFO` e de um
   exemplo em `EXEMPLOS`, senão a página fica sem ele (um teste reprova).
 
-## Efeitos de câmera nas fotos
+## Rabisco tremido nas fotos
 
 `fabrica/efeitos_foto.py`, seção `efeitos_foto` no `config.yaml` (fora da seção `render` de propósito: os ajustes dela
-entram no nome de todo clipe). Pedido do usuário em 2026-11-17, de um vídeo de "16 efeitos que o Claude cria" (um
-pacote para quem grava o próprio rosto). Ficaram os que servem a um documentário com fotos de banco:
+entram no nome de todo clipe). Pedido do usuário em 2026-11-17, de um vídeo de "16 efeitos que o Claude cria": um
+contorno amarelo à mão se desenha em volta da pessoa da foto e treme (o traço é redesenhado com outro tremor a cada 3
+quadros, como animação feita à mão), por cima do movimento lento de sempre.
 
-- **revelar** (recuo que revela): começa no detalhe (o assunto ou o rosto) e recua até a foto inteira.
-- **profundidade** (camadas em profundidade): o assunto recortado anda na frente e o fundo, com o assunto apagado
-  (`cv2.inpaint`), mais devagar atrás.
-- **moldura** (quebra de moldura): a foto num quadro de borda branca sobre ela mesma desfocada, e o assunto cresce
-  para fora do quadro.
-- **rabisco** (rabisco tremido): um contorno amarelo à mão se desenha em volta do assunto e treme (o traço é
-  redesenhado a cada 3 quadros, como animação à mão).
-- **celular** (mockup de celular): a foto na tela de um celular, só quando a fala cita app, site ou rede social e a
-  foto não é ela mesma um celular ou uma tela (`pede_celular`).
-- **atravessar** (zoom que atravessa): na troca de bloco, entre duas fotos sem outro efeito, a câmera mergulha no fim
-  de uma e sai de dentro da seguinte, com desfoque.
-- Ficaram de fora, de propósito: tela verde (a fábrica barra chroma), zoom digital com "REC", vertigem, mundo de
-  interface e órbita (de quem aparece falando, ou propaganda de software).
-
-Como entra: `render._efeitos_da_linha` pede a escolha (`escolher`) e `render._clipe` grava a cena escolhida por
-`renderizar`, quadro a quadro em numpy e OpenCV, que segue o caminho dos outros clipes (título, símbolo, visual do
-canal). **Poucos e espaçados**: um a cada `intervalo` (15 s) de foto, nunca o mesmo duas vezes seguidas, e o recuo no
-máximo a cada `intervalo_revelar` (30 s): sem esse limite ele era 46 dos 68 efeitos do everything-you-need-to-answer.
-Só na tela deitada, só em cena de foto inteira (não cortada pelo personagem) de 2,5 s ou mais. **O nome do clipe sem
-efeito não muda** (`assinatura` vazia): nenhum vídeo antigo renderiza de novo por causa disto.
-
-- **O recorte só em cena de animal ou com rosto** (`pode_ter_assunto`, `tem_assunto`): em cena aberta o GrabCut pega
-  qualquer coisa (o céu da caverna do ouro-da-serra-gaucha, uma fileira de casas). Com rosto, o GrabCut parte do
-  corpo abaixo dele, e o rosto tem de ficar dentro do recorte; foto de grupo (mais de 2 rostos) e gente pequena
-  (rosto com menos de 6% da largura) ficam fora. O recorte passa nas contas de acabamento de `recorte.limpo`. Sem
-  recorte bom, a cena fica com o recuo.
-- **Rápido**: o GrabCut roda na foto reduzida (420 px, lida já reduzida do JPEG com `draft`) e só nas cenas que podem
-  ter o assunto; a máscara fica em `render/efeitos/` pelo arquivo e pela data. Medido: a escolha de um vídeo de 20 min
-  leva uns 23 s na primeira vez, e cada clipe com efeito de 3 a 8 s. A mistura das camadas é `cv2.blendLinear` (em
-  numpy a moldura levava 70 s por clipe).
-- **Nunca para o vídeo**: falhou a escolha, ninguém ganha efeito; falhou o desenho, a cena sai com o movimento lento.
-- Conferido num render completo de uma cópia do teste-animacao-1min (fora de `projetos/`) e em `tests/test_efeitos_foto.py`.
+- **Só o rabisco ficou.** Seis efeitos foram feitos e testados (recuo que revela, camadas em profundidade, quebra de
+  moldura, rabisco, celular e zoom que atravessa); o usuário aprovou só o rabisco ("único que eu aprovo é o rabisco, o
+  resto pode remover"). **Não trazer os outros de volta sem ele pedir.** Escolha antiga de um efeito que saiu não
+  muda o nome do clipe (`assinatura` vazia).
+- **Só em foto com uma ou duas pessoas**, achadas por uma detecção própria e exigente (`_rostos`: YuNet com confiança
+  0,88, rosto inteiro dentro da foto e com 6% da largura ou mais; roda só nas fotos em que o `rostos.py`, com 0,7, já
+  achou alguém). Medido em 7 fotos: rostos de verdade de 0,89 a 0,92; falsos (mãos segurando uma tampa, uma taça de
+  vinho) de 0,74 a 0,82, e com 0,7 o laço saía em volta de nada. Foto de grupo e gente pequena ficam fora.
+- **Animal ficou de fora, de propósito.** Sem detector, o GrabCut pegava o fundo (na cena 9 do teste-animacao-1min, a
+  água em vez da água-viva), e nem cor nem forma do recorte separavam o certo do errado. Conferir cada recorte com a
+  visão gratuita foi testado: acertava, mas levava de 5 a 8 minutos por vídeo e parava quando os gratuitos batiam no
+  limite (o Groq recusava chaves e o OpenRouter devolvia 429). **Não pendurar o render numa IA.**
+- **O contorno**: a silhueta da pessoa quando o GrabCut (a partir do corpo abaixo do rosto e, não saindo, do meio da
+  foto) convence pelas contas e tem todo rosto dentro (`mascara`); senão, um laço à mão em volta da cabeça e dos
+  ombros (`laco`). Nos vídeos testados quase sempre sai o laço.
+- Como entra: `render._efeitos_da_linha` pede a escolha (`escolher`) e `render._clipe` grava a cena escolhida por
+  `renderizar`, quadro a quadro em numpy e OpenCV, que segue o caminho dos outros clipes (título, símbolo, visual do
+  canal). **Pouco e espaçado**: no máximo um a cada `intervalo` (30 s). Só na tela deitada, só em cena de foto inteira
+  (não cortada pelo personagem) de 2,5 s ou mais. **O nome do clipe sem rabisco não muda**: nenhum vídeo antigo
+  renderiza de novo por causa disto.
+- **Rápido**: a escolha de um vídeo de 20 min leva uns 3 s (o everything-you-need-to-answer: 5 rabiscos), e cada clipe
+  com rabisco grava em uns 7 s.
+- **Nunca para o vídeo**: falhou a escolha, ninguém ganha o rabisco; falhou o desenho, a cena sai com o movimento lento.
 
 ## Texto na tela: saiu da fábrica
 

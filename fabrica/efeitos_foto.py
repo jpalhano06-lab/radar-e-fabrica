@@ -1,142 +1,140 @@
-"""Efeitos de câmera nas fotos do vídeo: o que sai de um vídeo editado à mão, feito no próprio computador e de graça.
+"""O rabisco tremido nas fotos do vídeo: um contorno amarelo à mão que se desenha em volta da pessoa e treme.
 
-Pedido do usuário em 2026-11-17, de um vídeo de "16 efeitos que o Claude cria" (um pacote vendido para quem grava o
-próprio rosto). Dos efeitos de lá, ficaram os que servem a um documentário narrado com fotos e vídeos de banco:
+Pedido do usuário em 2026-11-17, de um vídeo de "16 efeitos que o Claude cria". Seis efeitos foram feitos e testados
+(recuo que revela, camadas em profundidade, quebra de moldura, rabisco, celular e zoom que atravessa); o usuário
+aprovou só o rabisco ("único que eu aprovo é o rabisco, o resto pode remover"). Os outros saíram: não trazer de volta
+sem ele pedir.
 
-- revelar ("recuo que revela"): a câmera começa num detalhe da foto (o assunto, o rosto) e recua até a foto inteira.
-- profundidade ("camadas em profundidade"): o assunto recortado anda na frente e o fundo atrás, mais devagar.
-- moldura ("quebra de moldura"): a foto num quadro com borda branca, e o assunto cresce para fora dele.
-- rabisco ("rabisco tremido"): um contorno à mão, tremendo, desenha-se em volta do assunto.
-- celular ("mockup de celular"): a foto na tela de um celular, quando a fala cita app, site ou rede social.
-- atravessar ("zoom que atravessa"): na troca de assunto (bloco), a câmera mergulha no fim de uma foto e sai do
-  começo da seguinte.
-
-Ficaram de fora a tela verde (a fábrica bloqueia material de chroma), o zoom digital com "REC", a vertigem, o mundo de
-interface e a órbita: são de quem aparece falando, ou de propaganda de software.
+Só em foto com uma ou duas pessoas, achadas pelo detector de rostos da fábrica (rostos.py, YuNet, no próprio
+computador): ele é confiável, e o contorno é desenhado em volta de quem ele achou. O contorno segue a silhueta (o
+GrabCut do OpenCV a partir do rosto, como em recorte.py) quando o recorte convence pelas contas e tem todo rosto
+dentro; senão, é um laço à mão em volta da cabeça e dos ombros. Animal ficou de fora: sem detector, o GrabCut pegava
+o fundo (na cena 9 do teste-animacao-1min, a água em vez da água-viva), e conferir cada recorte com a visão gratuita
+levava de 5 a 8 minutos por vídeo e parava quando os gratuitos batiam no limite.
 
 Como entra: o render (render._tarefas_da_linha) pede a escolha (escolher) e, para a cena escolhida, o clipe sai daqui
 (renderizar), quadro a quadro em numpy e OpenCV, e segue para o mesmo caminho dos outros clipes (título, símbolo,
-visual do canal). Poucos e espaçados: um a cada `intervalo` segundos de foto, nunca o mesmo duas vezes seguidas. O
-recorte do assunto é o GrabCut do OpenCV (como em recorte.py), conferido pelas contas de acabamento (recorte.limpo);
-sem recorte bom, a cena fica com um efeito que não precisa dele. Só na tela deitada. Nunca para o vídeo: falhou, a
-cena sai com o movimento lento de sempre.
+visual do canal). Pouco e espaçado: no máximo um a cada `intervalo` segundos. Só na tela deitada. Nunca para o vídeo:
+falhou, a cena sai com o movimento lento de sempre.
 """
 import hashlib
 import json
 import math
-import random
-import re
 import subprocess
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-VERSAO = 3  # suba quando mudar o desenho: os clipes com efeito renderizam de novo (os outros não mudam de nome)
-EFEITOS = ("revelar", "profundidade", "moldura", "rabisco", "celular")
-COM_RECORTE = ("profundidade", "moldura", "rabisco")
-ORDEM = ("profundidade", "rabisco", "revelar", "moldura", "celular")  # a preferência, quando todos cabem
-DURACAO_MINIMA = 2.5   # segundos: menos que isso o efeito não dá tempo de acontecer
-ATRAVESSAR = 0.4       # segundos do mergulho no fim de uma foto e da saída no começo da seguinte
+VERSAO = 10  # suba quando mudar o desenho: os clipes com rabisco renderizam de novo (os outros não mudam de nome)
+EFEITO = "rabisco"
+DURACAO_MINIMA = 2.5   # segundos: menos que isso o contorno não dá tempo de se desenhar
 AMARELO = (63, 210, 255)  # BGR do #FFD23F, a cor de destaque do impacto
-_FALA_DE_TELA = re.compile(r"\b(app|apps|aplicativos?|sites?|website|instagram|tiktok|youtube|whatsapp|facebook|"
-                           r"twitter|rede social|redes sociais|internet|online|celular|smartphone|iphone|android|"
-                           r"google|post|postou|postagem|v[ií]deo viral|viralizou)\b", re.I)
-_FOTO_DE_TELA = re.compile(r"\b(celular|smartphone|telefone|phone|tela|screen|monitor|computador|notebook|laptop|"
-                           r"tablet|interface|aplicativo|captura)\b", re.I)
+MAX_ROSTOS = 2  # foto de grupo fica fora: o recorte pegava o céu da caverna junto com as pessoas (ouro-da-serra, 183)
+ROSTO_MINIMO = 0.06  # da largura da foto: gente menor que isso (pessoas ao longe) não ganha rabisco
 
 
 def config(projeto) -> dict:
-    padrao = {"ativo": True, "intervalo": 15, "intervalo_revelar": 30, "atravessar": True}
+    padrao = {"ativo": True, "intervalo": 30}
     return {**padrao, **(projeto.config.get("efeitos_foto") or {}), **((projeto.perfil.get("efeitos_foto") or {}))}
 
 
 # ------------------------------------------------------------------------------------------------ a escolha
 
-def _legenda(cena) -> str:
-    return str((cena.get("conferencia") or {}).get("legenda") or "")
+CONFIANCA = 0.88  # do YuNet. O rostos.py aceita 0,7 (para o corte da foto, um falso rosto só desloca o corte); para o
+# laço em volta, medido em 7 fotos: rostos de verdade de 0,89 a 0,92, falsos (mãos segurando uma tampa, uma taça de
+# vinho) de 0,74 a 0,82
+_CACHE_ROSTOS = {}
 
 
-def pede_celular(cena) -> bool:
-    """A fala cita app, site ou rede social, e a foto não é ela mesma um celular ou uma tela (celular dentro de
-    celular)."""
-    o_que_e = (re.search(r"O que é:\s*([^(\n]+)", _legenda(cena)) or [None, ""])[1]
-    return bool(_FALA_DE_TELA.search(str(cena.get("texto") or ""))) and not _FOTO_DE_TELA.search(o_que_e)
+def _rostos(foto) -> list:
+    """Os rostos certos e grandes o bastante para o rabisco, inteiros dentro da foto, em frações da foto:
+    [(x, y, largura, altura)]. Detecção própria, mais exigente que a do rostos.py."""
+    from PIL import Image
+
+    from . import rostos
+
+    foto = Path(foto)
+    try:
+        chave = (str(foto), foto.stat().st_mtime_ns)
+    except OSError:
+        return []
+    if chave in _CACHE_ROSTOS:
+        return _CACHE_ROSTOS[chave]
+    achados = []
+    if not rostos.rostos(foto):  # o detector normal, já guardado pela foto: sem ninguém, nem roda o exigente
+        _CACHE_ROSTOS[chave] = achados
+        return achados
+    try:
+        with Image.open(foto) as im:
+            im.draft("RGB", (960, 960))
+            im = im.convert("RGB")
+            im.thumbnail((960, 960))
+            matriz = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
+        a, l_ = matriz.shape[:2]
+        detector = cv2.FaceDetectorYN.create(rostos.MODELO, "", (l_, a), CONFIANCA, 0.3, 5000)
+        _, brutos = detector.detect(matriz)
+        for r in (brutos if brutos is not None else []):
+            x, y, w, h = float(r[0]) / l_, float(r[1]) / a, float(r[2]) / l_, float(r[3]) / a
+            # o rosto inteiro dentro da foto: cabeça cortada na borda não ganha laço
+            if w >= ROSTO_MINIMO and x >= 0.02 and y >= 0.02 and x + w <= 0.98 and y + h <= 0.98:
+                achados.append((x, y, w, h))
+    except Exception:  # noqa: BLE001 - sem detector, sem rabisco
+        achados = []
+    _CACHE_ROSTOS[chave] = achados
+    return achados
+
+
+def tem_pessoa(foto) -> bool:
+    """Uma ou duas pessoas grandes o bastante na foto."""
+    return 1 <= len(_rostos(foto)) <= MAX_ROSTOS
 
 
 def escolher(linha, pasta, cfg_render, cfg, preparar) -> dict:
-    """{ordem do pedaço: {"efeito": nome, "entra": bool, "sai": bool}} para os pedaços que ganham efeito.
+    """{ordem do pedaço: {"efeito": "rabisco"}} para os pedaços que ganham o rabisco.
 
     linha: os pedaços do render (render._linha_do_tempo). preparar(arquivo) devolve a foto como ela entra na tela e
-    se ela preenche a tela (render._foto_na_tela); o recorte só vale para foto que preenche. Sai sempre o mesmo para
+    se ela preenche a tela (render._foto_na_tela); o rabisco só vale para foto que preenche. Sai sempre o mesmo para
     a mesma linha: o nome dos clipes depende disso."""
     if not cfg.get("ativo", True) or cfg_render.get("vertical"):
         return {}
-    escolhidos, ultimo_t, ultimo_efeito, usados, ultimo_revelar = {}, -1e9, None, {}, -1e9
-    fps = cfg_render.get("fps", 30)
-
-    def foto(p):
-        return p.get("tipo") == "cena" and p.get("origem") == "foto" and p["arquivo"].exists()
-
-    intervalo = float(cfg.get("intervalo", 15))
+    escolhidos, ultimo_t = {}, -1e9
+    intervalo = float(cfg.get("intervalo", 30))
     for p in linha:
-        dur = p["fim"] - p["ini"]
-        if not foto(p) or dur < DURACAO_MINIMA or p["ini"] - ultimo_t < intervalo:
+        if p.get("tipo") != "cena" or p.get("origem") != "foto" or not p["arquivo"].exists():
             continue
-        # só a cena inteira (um pedaço cortado pelo personagem não tem o assunto inteiro na tela)
+        if p["fim"] - p["ini"] < DURACAO_MINIMA or p["ini"] - ultimo_t < intervalo:
+            continue
+        # só a cena inteira (um pedaço cortado pelo personagem não tem a pessoa inteira na tela)
         if abs(p["ini"] - float(p["cena"].get("ini", p["ini"]))) > 0.05:
             continue
-        tela, preenche = preparar(p["arquivo"])
-        # o recuo é o que cabe em quase toda foto: sem limite, ele era 46 dos 68 efeitos do everything-you-need-to-answer
-        possiveis = ["revelar"] if p["ini"] - ultimo_revelar >= float(cfg.get("intervalo_revelar", 30)) else []
-        if pede_celular(p["cena"]):
-            possiveis.append("celular")
-        if preenche and pode_ter_assunto(p["cena"], tela):
-            m = mascara(tela, pasta)
-            if m is not None and tem_assunto(p["cena"], tela, m):
-                possiveis += list(COM_RECORTE)
-        if not possiveis:
+        try:
+            tela, preenche = preparar(p["arquivo"])
+            if not preenche or not tem_pessoa(tela):
+                continue
+        except Exception:  # noqa: BLE001 - na dúvida, sem rabisco
             continue
-        livres = [e for e in possiveis if e != ultimo_efeito] or possiveis
-        efeito = min(livres, key=lambda e: (usados.get(e, 0), ORDEM.index(e)))
-        escolhidos[p["ordem"]] = {"efeito": efeito}
-        usados[efeito] = usados.get(efeito, 0) + 1
-        ultimo_t, ultimo_efeito = p["ini"], efeito
-        if efeito == "revelar":
-            ultimo_revelar = p["ini"]
-    if cfg.get("atravessar", True):
-        # o zoom que atravessa: na troca de bloco, entre duas fotos que não têm outro efeito
-        for a, b in zip(linha, linha[1:]):
-            if not (foto(a) and foto(b)):
-                continue
-            if a["ordem"] in escolhidos or b["ordem"] in escolhidos:
-                continue
-            bloco_a, bloco_b = a["cena"].get("bloco"), b["cena"].get("bloco")
-            if bloco_a is None or bloco_a == bloco_b or round((a["fim"] - a["ini"]) * fps) < 2 * ATRAVESSAR * fps:
-                continue
-            if round((b["fim"] - b["ini"]) * fps) < 2 * ATRAVESSAR * fps:
-                continue
-            escolhidos.setdefault(a["ordem"], {"efeito": None})["sai"] = True
-            escolhidos.setdefault(b["ordem"], {"efeito": None})["entra"] = True
+        escolhidos[p["ordem"]] = {"efeito": EFEITO}
+        ultimo_t = p["ini"]
     return escolhidos
 
 
 def assinatura(escolha) -> str:
     """O pedaço do nome do clipe: vazio sem efeito, para os outros clipes não mudarem de nome."""
-    if not escolha:
+    if not escolha or escolha.get("efeito") != EFEITO:
         return ""
-    return f"|efeito:{escolha.get('efeito')}:{int(bool(escolha.get('entra')))}{int(bool(escolha.get('sai')))}:v{VERSAO}"
+    return f"|efeito:{EFEITO}:v{VERSAO}"
 
 
-# ------------------------------------------------------------------------------------------------ o recorte
+# ------------------------------------------------------------------------------------------------ o contorno
 
-LADO = 420
-FRACAO_MIN, FRACAO_MAX = 0.08, 0.55
+LADO = 560
+FRACAO_MIN, FRACAO_MAX = 0.06, 0.45
 
 
 def mascara(foto, pasta):
-    """A máscara do assunto da foto (0 a 255, reduzida a LADO px), ou None se o recorte não convence. Guardada em
-    pasta, pelo arquivo e pela data: cada foto é recortada uma vez."""
+    """A silhueta da pessoa (0 a 255, reduzida a LADO px), ou None se o recorte não convence. Guardada em pasta, pelo
+    arquivo e pela data: cada foto é recortada uma vez."""
     foto = Path(foto)
     pasta = Path(pasta)
     chave = hashlib.sha1(f"{foto}|{foto.stat().st_mtime_ns}|{VERSAO}".encode()).hexdigest()[:12]
@@ -149,20 +147,31 @@ def mascara(foto, pasta):
             return m
     pasta.mkdir(parents=True, exist_ok=True)
     achados = _rostos(foto)
-    m, motivo = _recortar(foto, pasta, achados)
-    if m is None and achados:
-        # o corpo a partir do rosto não saiu (camisa escura no fundo escuro): o retângulo do meio da foto, e
-        # tem_assunto confere se o rosto ficou dentro
-        m, motivo = _recortar(foto, pasta)
+    m, motivo = None, "sem rosto"
+    # primeiro o corpo a partir do rosto; não saindo, o retângulo do meio da foto (o homem das faíscas do
+    # ouro-da-serra-gaucha, camisa escura no fundo escuro, só saiu assim). Nos dois, todo rosto dentro do recorte
+    for jeito in ((achados,), ()) if achados else ():
+        m, motivo = _recortar(foto, pasta, *jeito)
+        if m is not None and not _rostos_dentro(m, achados):
+            m, motivo = None, "o recorte deixou um rosto de fora"
+        if m is not None:
+            break
     if m is not None:
         cv2.imwrite(str(arquivo), m)
-    nota.write_text(json.dumps({"ok": m is not None, "motivo": motivo}), encoding="utf-8")
+    nota.write_text(json.dumps({"ok": m is not None, "motivo": motivo}, ensure_ascii=False), encoding="utf-8")
     return m
 
 
+def _rostos_dentro(m, achados) -> bool:
+    a, l_ = m.shape[:2]
+    return all(m[min(a - 1, int((y + h / 2) * a)), min(l_ - 1, int((x + w / 2) * l_))] >= 128
+               for x, y, w, h in achados)
+
+
 def _recortar(foto, pasta, rostos_=None):
-    """GrabCut na foto reduzida (LADO px): a máscara fica nesse tamanho e é ampliada na hora de desenhar. Com rostos
-    (frações da foto), o retângulo de partida é o corpo de quem aparece: do alto da cabeça a uns quatro rostos abaixo."""
+    """GrabCut na foto reduzida (LADO px), partindo do corpo de quem aparece (do alto da cabeça a uns quatro rostos
+    abaixo) ou, sem rostos_, do retângulo do meio da foto. A máscara fica nesse tamanho e é ampliada na hora de
+    desenhar."""
     from PIL import Image
 
     from . import recorte
@@ -176,7 +185,6 @@ def _recortar(foto, pasta, rostos_=None):
     except Exception:  # noqa: BLE001
         return None, "foto não abre"
     a, l_ = pequena.shape[:2]
-    m = np.zeros((a, l_), np.uint8)
     rect = (int(l_ * 0.12), int(a * 0.08), int(l_ * 0.76), int(a * 0.88))
     if rostos_:
         x0 = min(x - w * 1.3 for x, y, w, h in rostos_)
@@ -185,8 +193,9 @@ def _recortar(foto, pasta, rostos_=None):
         y1 = max(y + h * 5.0 for x, y, w, h in rostos_)
         x0, y0, x1, y1 = max(0.01, x0), max(0.01, y0), min(0.99, x1), min(0.99, y1)
         rect = (int(x0 * l_), int(y0 * a), max(8, int((x1 - x0) * l_)), max(8, int((y1 - y0) * a)))
+    m = np.zeros((a, l_), np.uint8)
     try:
-        cv2.grabCut(pequena, m, rect, np.zeros((1, 65)), np.zeros((1, 65)), 3, cv2.GC_INIT_WITH_RECT)
+        cv2.grabCut(pequena, m, rect, np.zeros((1, 65)), np.zeros((1, 65)), 5, cv2.GC_INIT_WITH_RECT)
     except cv2.error:
         return None, "grabcut falhou"
     assunto = np.where((m == cv2.GC_FGD) | (m == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
@@ -197,8 +206,7 @@ def _recortar(foto, pasta, rostos_=None):
         return None, "nenhum assunto"
     areas = estat[1:, cv2.CC_STAT_AREA]
     k = int(np.argmax(areas)) + 1
-    # com rosto, o maior pedaço basta (as faíscas e os reflexos em volta saem); sem rosto, o assunto tem de ser um só
-    if areas.max() / areas.sum() < (0.65 if rostos_ else 0.85):
+    if areas.max() / areas.sum() < 0.65:  # o maior pedaço basta (as faíscas e os reflexos em volta saem)
         return None, "assunto em pedaços"
     assunto = (rotulos == k).astype(np.uint8) * 255
     contornos, _ = cv2.findContours(assunto, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -206,63 +214,41 @@ def _recortar(foto, pasta, rostos_=None):
     fracao = float((assunto > 0).mean())
     if not FRACAO_MIN <= fracao <= FRACAO_MAX:
         return None, f"assunto ocupa {fracao:.0%} da foto"
-    beirada = np.concatenate([assunto[0], assunto[:, 0], assunto[:, -1]])  # embaixo pode encostar (o chão)
+    # uma faixa de 3% dos lados (a cabeça pode encostar em cima e o corpo embaixo)
+    faixa = max(2, int(min(a, l_) * 0.03))
+    beirada = np.concatenate([assunto[:, :faixa].ravel(), assunto[:, -faixa:].ravel()])
     if float((beirada > 0).mean()) > 0.15:
         return None, "assunto colado na borda"
     # as contas de acabamento do recorte da colagem: sem fundo grudado e sem pontas
     teste = Path(pasta) / f"_teste_{hashlib.sha1(str(foto).encode()).hexdigest()[:8]}.png"
     try:
-        cv2.imwrite(str(teste), np.dstack([pequena, assunto]))
-        if not recorte.limpo(teste):
+        Path(pasta).mkdir(parents=True, exist_ok=True)
+        # sem o arquivo, recorte.limpo lia "nada grudado" e aprovava tudo: sem conferir, não passa
+        if not cv2.imwrite(str(teste), np.dstack([pequena, assunto])) or not recorte.limpo(teste):
             return None, "recorte sujo"
     finally:
         teste.unlink(missing_ok=True)
     return assunto, "ok"
 
 
-MAX_ROSTOS = 2  # foto de grupo fica fora: o recorte pegava o céu da caverna junto com as pessoas (ouro-da-serra, 183)
+def laco(foto, W, H):
+    """Sem silhueta boa: o laço em volta da cabeça e dos ombros de cada pessoa, na tela (W x H), como máscara."""
+    from PIL import Image
 
-
-ROSTO_MINIMO = 0.06  # da largura da foto: gente menor que isso (pessoas ao longe) não se recorta
-
-
-def _rostos(foto) -> list:
-    """Os rostos grandes o bastante para recortar quem aparece."""
-    from . import rostos
-
-    try:
-        return [r for r in rostos.rostos(Path(foto)) if r[2] >= ROSTO_MINIMO]
-    except Exception:  # noqa: BLE001
-        return []
-
-
-def pode_ter_assunto(cena, foto) -> bool:
-    """Antes do recorte (uns segundos por foto): só cena de animal (o campo animal do agente) ou foto com rosto. Em
-    cena aberta o GrabCut pega qualquer coisa (o céu de uma caverna, uma fileira de casas), e o contorno em volta
-    disso parece engano."""
-    return bool(cena.get("animal")) or 1 <= len(_rostos(foto)) <= MAX_ROSTOS
-
-
-def tem_assunto(cena, foto, m) -> bool:
-    """O recorte é do assunto da cena: cena de animal, ou foto com rosto e todo rosto dentro do recorte."""
-    if cena.get("animal"):
-        return True
-    achados = _rostos(foto)
-    if not 1 <= len(achados) <= MAX_ROSTOS:
-        return False
-    a, l_ = m.shape[:2]
-    for x, y, w, h in achados:
-        if m[min(a - 1, int((y + h / 2) * a)), min(l_ - 1, int((x + w / 2) * l_))] < 128:
-            return False
-    return True
+    with Image.open(foto) as im:
+        largo, alto = im.size
+    escala = max(W / largo, H / alto)
+    dx, dy = (largo * escala - W) / 2, (alto * escala - H) / 2
+    m = np.zeros((H, W), np.uint8)
+    for x, y, w, h in _rostos(foto):
+        cx = (x + w / 2) * largo * escala - dx
+        cy = (y + h * 0.85) * alto * escala - dy  # um pouco abaixo do rosto: cabeça e ombros
+        eixo_x, eixo_y = w * largo * escala * 1.25, h * alto * escala * 1.35
+        cv2.ellipse(m, (int(cx), int(cy)), (int(eixo_x), int(eixo_y)), 0, 0, 360, 255, -1)
+    return m
 
 
 # ------------------------------------------------------------------------------------------------ o desenho
-
-def _suave(p):
-    p = min(max(p, 0.0), 1.0)
-    return p * p * (3 - 2 * p)
-
 
 def _sai(p):  # desacelera no fim
     p = min(max(p, 0.0), 1.0)
@@ -277,26 +263,25 @@ def _tela(foto, W, H):
     imagem = cv2.resize(imagem, (math.ceil(largo * escala), math.ceil(alto * escala)), interpolation=cv2.INTER_AREA
                         if escala < 1 else cv2.INTER_CUBIC)
     y0, x0 = (imagem.shape[0] - 2 * H) // 2, (imagem.shape[1] - 2 * W) // 2
-    return imagem[y0:y0 + 2 * H, x0:x0 + 2 * W], (x0, y0, escala)
+    return imagem[y0:y0 + 2 * H, x0:x0 + 2 * W]
 
 
-def _no_lugar(img, s, ax, ay, tx, ty, W, H, borda=cv2.BORDER_REFLECT):
+def _mascara_na_tela(m, foto, W, H):
+    """A máscara (pequena) ampliada e cortada exatamente como a foto em _tela, já no tamanho da tela (W x H)."""
+    from PIL import Image
+
+    with Image.open(foto) as im:
+        largo, alto = im.size
+    escala = max(W / largo, H / alto)
+    m = cv2.resize(m, (math.ceil(largo * escala), math.ceil(alto * escala)), interpolation=cv2.INTER_LINEAR)
+    y0, x0 = (m.shape[0] - H) // 2, (m.shape[1] - W) // 2
+    return m[y0:y0 + H, x0:x0 + W]
+
+
+def _no_lugar(img, s, ax, ay, tx, ty, W, H):
     """img (no dobro da tela) escalada por s em volta do ponto (ax, ay) da tela e posta em (tx, ty) da tela."""
     M = np.float32([[s / 2, 0, tx - s * ax], [0, s / 2, ty - s * ay]])
-    return cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=borda)
-
-
-def _misturar(base, cima, alfa):
-    """cima sobre base com a transparência alfa (0 a 255). O blendLinear do OpenCV: em numpy cada mistura de uma
-    tela inteira levava dezenas de milissegundos."""
-    peso = alfa.astype(np.float32) * (1 / 255)
-    return cv2.blendLinear(cima, base, peso, 1 - peso)
-
-
-def _centro_do_assunto(m2):
-    """O centro do assunto, na tela (a máscara está no dobro)."""
-    ys, xs = np.nonzero(m2 > 128)
-    return float(xs.mean()) / 2, float(ys.min() + (ys.max() - ys.min()) * 0.4) / 2
+    return cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 
 def _movimento_base(movimento, p, W, H, zoom=1.12):
@@ -312,37 +297,37 @@ def _movimento_base(movimento, p, W, H, zoom=1.12):
 
 
 def renderizar(tarefa, foto, cfg_render, pasta, destino) -> Path:
-    """Grava em destino o clipe da cena com o efeito (sem som). foto: a foto como ela entra na tela."""
+    """Grava em destino o clipe da cena com o rabisco (sem som). foto: a foto como ela entra na tela. Sem pessoa na
+    foto, o clipe sai só com o movimento lento."""
     W, H = cfg_render.get("largura", 1920), cfg_render.get("altura", 1080)
     fps = cfg_render.get("fps", 30)
     frames = int(tarefa["frames"])
-    escolha = tarefa.get("efeito_foto") or {}
-    efeito = escolha.get("efeito")
-    tela, _ = _tela(foto, W, H)
-    m2 = None
-    if efeito in COM_RECORTE:
+    tela = _tela(foto, W, H)
+    movimento = tarefa.get("movimento", "aproximar")
+    contorno = None
+    if (tarefa.get("efeito_foto") or {}).get("efeito") == EFEITO and tem_pessoa(foto):
         m = mascara(foto, pasta)
-        if m is None:
-            efeito = "revelar"
-        else:
-            m2, _ = _tela_da_mascara(m, foto, W, H)
-    desenho = DESENHOS.get(efeito) or _so_movimento
-    tarefa = {**tarefa, "_zoom": float(cfg_render.get("zoom_maximo", 1.12))}
+        contorno = _mascara_na_tela(m, foto, W, H) if m is not None else laco(foto, W, H)
+    if contorno is not None and contorno.any():
+        desenho = _rabisco(tela, contorno, W, H, frames, movimento)
+    else:
+        zoom = float(cfg_render.get("zoom_maximo", 1.12))
+
+        def desenho(i):
+            s, cx, cy = _movimento_base(movimento, i / max(frames - 1, 1), W, H, zoom)
+            return _no_lugar(tela, s, cx, cy, W / 2, H / 2, W, H)
     destino = Path(destino)
     comando = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
                "-r", str(fps), "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "14",
                "-pix_fmt", "yuv420p", "-an", str(destino)]
     processo = subprocess.Popen(comando, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        contexto = desenho(tela, m2, W, H, frames, fps, tarefa)
         for i in range(frames):
-            quadro = contexto(i)
-            quadro = _atravessar(quadro, i, frames, fps, escolha, W, H)
-            processo.stdin.write(np.ascontiguousarray(quadro).tobytes())
+            processo.stdin.write(np.ascontiguousarray(desenho(i)).tobytes())
         processo.stdin.close()
         erro = processo.stderr.read().decode("utf-8", "replace")
         if processo.wait() != 0:
-            raise RuntimeError(f"o FFmpeg não gravou o efeito: {erro[-300:]}")
+            raise RuntimeError(f"o FFmpeg não gravou o rabisco: {erro[-300:]}")
     except BaseException:
         processo.kill()
         destino.unlink(missing_ok=True)
@@ -350,130 +335,9 @@ def renderizar(tarefa, foto, cfg_render, pasta, destino) -> Path:
     return destino
 
 
-def _tela_da_mascara(m, foto, W, H):
-    """A máscara (pequena) ampliada e cortada exatamente como a foto em _tela."""
-    from PIL import Image
-
-    with Image.open(foto) as im:
-        largo, alto = im.size
-    escala = max(2 * W / largo, 2 * H / alto)
-    m = cv2.resize(m, (math.ceil(largo * escala), math.ceil(alto * escala)), interpolation=cv2.INTER_LINEAR)
-    m = cv2.GaussianBlur(m, (0, 0), 2)
-    y0, x0 = (m.shape[0] - 2 * H) // 2, (m.shape[1] - 2 * W) // 2
-    return m[y0:y0 + 2 * H, x0:x0 + 2 * W], None
-
-
-def _atravessar(quadro, i, frames, fps, escolha, W, H):
-    """O zoom que atravessa: a câmera mergulha no centro nos últimos ATRAVESSAR segundos (sai) e sai de dentro da
-    foto nos primeiros (entra), com o desfoque de movimento."""
-    n = max(2, int(ATRAVESSAR * fps))
-    p = None
-    if escolha.get("sai") and i >= frames - n:
-        p = (i - (frames - n)) / (n - 1)
-        s = 1 + 1.6 * p ** 2.2
-    elif escolha.get("entra") and i < n:
-        p = 1 - i / (n - 1)
-        s = 1 + 1.0 * _suave(p) ** 1.5
-    if p is None:
-        return quadro
-    M = np.float32([[s, 0, W / 2 - s * W / 2], [0, s, H / 2 - s * H / 2]])
-    quadro = cv2.warpAffine(quadro, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-    raio = int(2 + 22 * p) | 1
-    borrado = cv2.GaussianBlur(quadro, (raio, raio), 0)
-    return cv2.addWeighted(quadro, 1 - 0.7 * p, borrado, 0.7 * p, 0)
-
-
-def _so_movimento(tela, m2, W, H, frames, fps, tarefa):
-    movimento = tarefa.get("movimento", "aproximar")
-
-    def quadro(i):
-        s, cx, cy = _movimento_base(movimento, i / max(frames - 1, 1), W, H, tarefa.get("_zoom", 1.12))
-        return _no_lugar(tela, s, cx, cy, W / 2, H / 2, W, H)
-    return quadro
-
-
-def _revelar(tela, m2, W, H, frames, fps, tarefa):
-    """Começa no detalhe (o assunto, se o recorte achou; senão um pouco acima do meio) e recua até a foto inteira."""
-    alvo = _centro_do_assunto(m2) if m2 is not None else (W / 2, H * 0.42)
-    perto = 1.75
-
-    def quadro(i):
-        p = i / max(frames - 1, 1)
-        q = _sai(p / 0.75)
-        s = perto + (1.0 - perto) * q + 0.03 * max(0.0, p - 0.75) / 0.25
-        cx = alvo[0] + (W / 2 - alvo[0]) * q
-        cy = alvo[1] + (H / 2 - alvo[1]) * q
-        # o centro nunca deixa a borda da foto entrar na tela
-        cx = min(max(cx, W / (2 * s)), W - W / (2 * s))
-        cy = min(max(cy, H / (2 * s)), H - H / (2 * s))
-        return _no_lugar(tela, s, cx, cy, W / 2, H / 2, W, H)
-    return quadro
-
-
-def _profundidade(tela, m2, W, H, frames, fps, tarefa):
-    """O fundo (com o assunto apagado) anda devagar para um lado; o assunto, na frente, cresce e anda para o outro."""
-    pequena = cv2.resize(tela, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
-    buraco = cv2.dilate(cv2.resize(m2, (W // 2, H // 2)), np.ones((15, 15), np.uint8))
-    fundo = cv2.inpaint(pequena, (buraco > 60).astype(np.uint8) * 255, 9, cv2.INPAINT_TELEA)
-    fundo = cv2.GaussianBlur(cv2.resize(fundo, (2 * W, 2 * H), interpolation=cv2.INTER_CUBIC), (0, 0), 3)
-    ys, xs = np.nonzero(m2 > 128)
-    ax, ay = float(xs.mean()) / 2, float(ys.max()) / 2  # o pé do assunto
-    lado = 1 if ax < W / 2 else -1
-
-    def quadro(i):
-        p = _suave(i / max(frames - 1, 1))
-        base = _no_lugar(fundo, 1.06 + 0.05 * p, W / 2, H / 2, W / 2 + lado * 0.012 * W * p, H / 2, W, H)
-        s = 1.06 + 0.12 * p
-        frente = _no_lugar(tela, s, ax, ay, ax - lado * 0.018 * W * p, ay + 0.01 * H * (1 - p), W, H)
-        alfa = _no_lugar(m2, s, ax, ay, ax - lado * 0.018 * W * p, ay + 0.01 * H * (1 - p), W, H, cv2.BORDER_CONSTANT)
-        return _misturar(base, frente, alfa)
-    return quadro
-
-
-def _moldura(tela, m2, W, H, frames, fps, tarefa):
-    """A foto num quadro de borda branca sobre a própria foto desfocada; depois o assunto cresce e sai do quadro."""
-    fundo = cv2.GaussianBlur(cv2.resize(tela, (W // 4, H // 4), interpolation=cv2.INTER_AREA), (0, 0), 6)
-    fundo = (cv2.resize(fundo, (2 * W, 2 * H), interpolation=cv2.INTER_CUBIC) * 0.42).astype(np.uint8)
-    ys, xs = np.nonzero(m2 > 128)
-    escala_q = 0.70
-    cx_q, cy_q = W / 2, H * 0.53
-    pe = (float(xs.mean()) / 2, float(ys.max()) / 2)
-    borda = 12
-    x0, y0 = int(cx_q - W * escala_q / 2), int(cy_q - H * escala_q / 2)
-    x1, y1 = int(cx_q + W * escala_q / 2), int(cy_q + H * escala_q / 2)
-    quadro_mascara = np.zeros((H, W), np.uint8)
-    cv2.rectangle(quadro_mascara, (x0, y0), (x1, y1), 255, -1)
-    contorno = np.zeros((H, W), np.uint8)
-    cv2.rectangle(contorno, (x0 - borda, y0 - borda), (x1 + borda, y1 + borda), 255, -1)
-    sombra = cv2.GaussianBlur(contorno, (0, 0), 28)
-    # o fundo, a sombra e a borda branca não mexem: feitos uma vez (por quadro, o clipe levava 70 s)
-    parado = _no_lugar(fundo, 1.0, W / 2, H / 2, W / 2, H / 2, W, H)
-    parado = _misturar(parado, np.zeros_like(parado), (sombra * 0.6).astype(np.uint8))
-    parado[contorno > 0] = (245, 245, 245)
-
-    def quadro(i):
-        p = i / max(frames - 1, 1)
-        z = 1.0 + 0.04 * p
-        base = parado.copy()
-        dentro = _no_lugar(tela, escala_q * z, W / 2, H / 2, cx_q, cy_q, W, H)
-        base = _misturar(base, dentro, quadro_mascara)
-        # o assunto: começa no lugar dele dentro do quadro e cresce a partir do pé, passando por cima da borda
-        q = _sai((p - 0.22) / 0.4)
-        s = escala_q * z * (1 + 0.22 * q)
-        px = cx_q + (pe[0] - W / 2) * escala_q * z
-        py = cy_q + (pe[1] - H / 2) * escala_q * z
-        frente = _no_lugar(tela, s, pe[0], pe[1], px, py, W, H)
-        alfa = _no_lugar(m2, s, pe[0], pe[1], px, py, W, H, cv2.BORDER_CONSTANT)
-        if q <= 0:
-            alfa = cv2.bitwise_and(alfa, quadro_mascara)
-        return _misturar(base, frente, alfa)
-    return quadro
-
-
-def _rabisco(tela, m2, W, H, frames, fps, tarefa):
-    """O movimento lento de sempre e, por cima, um contorno à mão que se desenha em volta do assunto e treme (o traço
-    é redesenhado com outro tremor a cada 3 quadros, como animação feita à mão)."""
-    m = cv2.resize(m2, (W, H), interpolation=cv2.INTER_LINEAR)
+def _rabisco(tela, m, W, H, frames, movimento):
+    """O movimento lento de sempre e, por cima, um contorno à mão que se desenha em volta da máscara (W x H) e treme
+    (o traço é redesenhado com outro tremor a cada 3 quadros, como animação feita à mão)."""
     m = cv2.dilate((m > 128).astype(np.uint8) * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41)))
     contornos, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     contorno = max(contornos, key=cv2.contourArea)[:, 0, :].astype(np.float32)
@@ -481,7 +345,6 @@ def _rabisco(tela, m2, W, H, frames, fps, tarefa):
     pontos = cv2.approxPolyDP(np.ascontiguousarray(contorno[::passo]).reshape(-1, 1, 2), 3, True)[:, 0, :]
     # o laço passa um pouco do começo, como quem circula com a caneta
     pontos = np.vstack([pontos, pontos[: max(2, len(pontos) // 8)]])
-    movimento = tarefa.get("movimento", "aproximar")
     t0, t1 = 0.12, 0.62
 
     def quadro(i):
@@ -504,68 +367,3 @@ def _rabisco(tela, m2, W, H, frames, fps, tarefa):
         cv2.polylines(base, [segunda], False, AMARELO, 3, cv2.LINE_AA, shift=2)
         return base
     return quadro
-
-
-def _celular(tela, m2, W, H, frames, fps, tarefa):
-    """A foto na tela de um celular que sobe do pé da tela, sobre a própria foto desfocada e escura."""
-    fundo = cv2.GaussianBlur(cv2.resize(tela, (W // 4, H // 4), interpolation=cv2.INTER_AREA), (0, 0), 5)
-    fundo = (cv2.resize(fundo, (W, H), interpolation=cv2.INTER_CUBIC) * 0.38).astype(np.uint8)
-    alt, larg = int(H * 0.86), int(H * 0.86 * 0.49)
-    raio, aro = 58, 16
-    # a tela do celular: o meio da foto, em pé, no formato da tela
-    tela_l, tela_a = larg - 2 * aro, alt - 2 * aro
-    fatia = int(2 * H * tela_l / tela_a)
-    meio = tela[:, (2 * W - fatia) // 2:(2 * W - fatia) // 2 + fatia]
-    conteudo = cv2.resize(meio, (tela_l, tela_a), interpolation=cv2.INTER_AREA)
-    corpo = np.zeros((alt, larg), np.uint8)
-    _retangulo_redondo(corpo, 0, 0, larg - 1, alt - 1, raio, 255)
-    vidro = np.zeros((alt, larg), np.uint8)
-    _retangulo_redondo(vidro, aro, aro, larg - 1 - aro, alt - 1 - aro, raio - aro, 255)
-    sombra = cv2.GaussianBlur(np.pad(corpo, 60), (0, 0), 30)
-
-    def quadro(i):
-        p = i / max(frames - 1, 1)
-        q = _sai(p / 0.35)
-        x = (W - larg) // 2
-        y = int((H - alt) / 2 + 30 + (1 - q) * H * 0.75)
-        z = 1.0 + 0.05 * p
-        img = fundo.copy()
-        # a sombra e o corpo escuro
-        _colar(img, np.zeros((alt + 120, larg + 120, 3), np.uint8), (sombra * 0.75).astype(np.uint8), x - 60, y - 30)
-        _colar(img, np.full((alt, larg, 3), 18, np.uint8), corpo, x, y)
-        dentro = cv2.resize(conteudo, None, fx=z, fy=z, interpolation=cv2.INTER_LINEAR)
-        dy, dx = (dentro.shape[0] - conteudo.shape[0]) // 2, (dentro.shape[1] - conteudo.shape[1]) // 2
-        dentro = dentro[dy:dy + conteudo.shape[0], dx:dx + conteudo.shape[1]]
-        tela_cel = np.zeros((alt, larg, 3), np.uint8)
-        tela_cel[aro:alt - aro, aro:larg - aro] = dentro
-        cv2.rectangle(tela_cel, (larg // 2 - 60, aro + 14), (larg // 2 + 60, aro + 44), (0, 0, 0), -1)
-        cv2.circle(tela_cel, (larg // 2 - 60, aro + 29), 15, (0, 0, 0), -1)
-        cv2.circle(tela_cel, (larg // 2 + 60, aro + 29), 15, (0, 0, 0), -1)
-        _colar(img, tela_cel, vidro, x, y)
-        return img
-    return quadro
-
-
-def _retangulo_redondo(img, x0, y0, x1, y1, r, cor):
-    cv2.rectangle(img, (x0 + r, y0), (x1 - r, y1), cor, -1)
-    cv2.rectangle(img, (x0, y0 + r), (x1, y1 - r), cor, -1)
-    for cx, cy in ((x0 + r, y0 + r), (x1 - r, y0 + r), (x0 + r, y1 - r), (x1 - r, y1 - r)):
-        cv2.circle(img, (cx, cy), r, cor, -1, cv2.LINE_AA)
-
-
-def _colar(base, cima, alfa, x, y):
-    """Cola cima em base na posição (x, y), com a transparência alfa, cortando o que sai da tela."""
-    H, W = base.shape[:2]
-    h, w = alfa.shape[:2]
-    ax0, ay0 = max(0, -x), max(0, -y)
-    bx0, by0 = max(0, x), max(0, y)
-    bx1, by1 = min(W, x + w), min(H, y + h)
-    if bx1 <= bx0 or by1 <= by0:
-        return
-    pedaco = base[by0:by1, bx0:bx1]
-    base[by0:by1, bx0:bx1] = _misturar(pedaco, cima[ay0:ay0 + by1 - by0, ax0:ax0 + bx1 - bx0],
-                                       alfa[ay0:ay0 + by1 - by0, ax0:ax0 + bx1 - bx0])
-
-
-DESENHOS = {"revelar": _revelar, "profundidade": _profundidade, "moldura": _moldura, "rabisco": _rabisco,
-            "celular": _celular}

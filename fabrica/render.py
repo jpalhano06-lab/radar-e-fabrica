@@ -266,7 +266,7 @@ def _tarefas_da_linha(projeto, linha, cfg, pasta_clipes, transicao, so_prontas=F
 
 
 def _efeitos_da_linha(projeto, linha, cfg, pasta_base) -> dict:
-    """Os efeitos de câmera de cada pedaço (efeitos_foto.py): poucos, espaçados, só na tela deitada. Nunca para o
+    """O rabisco de cada pedaço (efeitos_foto.py): pouco, espaçado, só na tela deitada. Nunca para o
     vídeo: se a escolha falhar, ninguém ganha efeito."""
     pasta_fotos = pasta_base / "fotos"
     pasta_fotos.mkdir(parents=True, exist_ok=True)
@@ -526,7 +526,7 @@ def _clipe(tarefa, pasta_fotos, pasta_textos, perfil, cfg):
         foto = _preparar_foto(arquivo, pasta_fotos, cfg)
         entradas, filtro = ["-i", foto], _filtro_foto(tarefa["movimento"], frames, cfg)
         if tarefa.get("efeito_foto"):
-            # o efeito de câmera (efeitos_foto.py) sai num vídeo à parte, que segue o caminho dos outros clipes
+            # o rabisco (efeitos_foto.py) sai num vídeo à parte, que segue o caminho dos outros clipes
             efeito = destino.with_name(destino.stem + ".efeito.mp4")
             try:
                 efeitos_foto.renderizar(tarefa, foto, cfg, pasta_fotos.parent / "efeitos", efeito)
