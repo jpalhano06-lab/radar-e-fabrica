@@ -58,6 +58,7 @@ _USOS = (("uso_groq.json", "Groq"), ("uso_openrouter.json", "OpenRouter"), ("uso
 # (narracao.narrar) e guarda a medida em genaipro_medido.json; a estimativa usa a média medida de cada modelo.
 CREDITOS_POR_CARACTERE_PADRAO = 0.064
 ARQUIVO_MEDIDAS = "genaipro_medido.json"
+NOMES = {"genaipro": "GenAIPro", "openspeaker": "OpenSpeaker"}
 
 
 def _medidas() -> dict:
@@ -70,8 +71,13 @@ def _medidas() -> dict:
         return {}
 
 
-def creditos_por_caractere(config, modelo: str = "") -> tuple:
+def creditos_por_caractere(config, modelo: str = "", provedor: str = "genaipro") -> tuple:
     """Créditos gastos por caractere e de onde o número vem (medido no saldo ou o padrão do config)."""
+    if provedor == "openspeaker":
+        # o OpenSpeaker cobra por caractere com taxa fixa, medida no contador do site: 1,12 crédito por caractere
+        from .openspeaker import CREDITOS_POR_CARACTERE
+        padrao = (config.get("openspeaker") or {}).get("creditos_por_caractere", CREDITOS_POR_CARACTERE)
+        return float(padrao), "tabela do OpenSpeaker"
     medida = (_medidas().get("modelos") or {}).get(modelo or "") or {}
     if medida.get("caracteres", 0) >= 2000 and medida.get("creditos", 0) > 0:
         return medida["creditos"] / medida["caracteres"], "medido no saldo da GenAIPro"
@@ -93,31 +99,45 @@ def guardar_medida(modelo: str, caracteres: int, creditos: float) -> None:
         (RAIZ / ARQUIVO_MEDIDAS).write_text(json.dumps(dados, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def preco_por_credito(config) -> tuple:
-    """Quanto custa um crédito da GenAIPro e de onde esse preço vem (pacote: preço dividido pelos créditos)."""
-    plano = plano_da_voz(config)
+def preco_por_credito(config, provedor: str = "genaipro") -> tuple:
+    """Quanto custa um crédito do narrador pago e de onde esse preço vem (pacote: preço dividido pelos créditos)."""
+    plano = plano_da_voz(config, provedor)
     mensal, incluido = plano.get("preco_mensal", 0) or 0, plano.get("incluido_no_mes", 0) or 0
     if mensal > 0 and incluido > 0:
-        return mensal / incluido, f"pacote {plano.get('plano', 'GenAIPro')}"
-    return preco_avulso_por_mil(config) / 1000, "tarifa avulsa da API"
+        return mensal / incluido, f"pacote {plano.get('plano', NOMES[provedor])}"
+    return preco_avulso_por_mil(config, provedor) / 1000, "tarifa avulsa da API"
 
 
-def preco_por_caractere(config, modelo: str = "") -> tuple:
+def preco_por_caractere(config, modelo: str = "", provedor: str = "genaipro") -> tuple:
     """Quanto custa, de verdade, um caractere de narração: créditos por caractere vezes o preço do crédito."""
-    por_credito, origem = preco_por_credito(config)
-    creditos, _ = creditos_por_caractere(config, modelo)
+    por_credito, origem = preco_por_credito(config, provedor)
+    creditos, _ = creditos_por_caractere(config, modelo, provedor)
     return por_credito * creditos, origem
 
 
-def plano_da_voz(config) -> dict:
-    """O pacote de créditos da GenAIPro. Config antiga só tinha a assinatura da ElevenLabs."""
+def plano_da_voz(config, provedor: str = "genaipro") -> dict:
+    """O pacote de créditos do narrador pago. Config antiga só tinha a assinatura da ElevenLabs."""
     assinaturas = config.get("assinaturas") or {}
+    if provedor == "openspeaker":
+        return assinaturas.get("openspeaker") or {}
     return assinaturas.get("genaipro") or assinaturas.get("elevenlabs") or {}
 
 
-def preco_avulso_por_mil(config) -> float:
+def preco_avulso_por_mil(config, provedor: str = "genaipro") -> float:
+    """US$ por mil créditos quando o config não tem o pacote comprado."""
     precos = config.get("precos") or {}
+    if provedor == "openspeaker":
+        return precos.get("openspeaker_por_mil_creditos", 0.00476)
     return precos.get("genaipro_por_mil_caracteres", precos.get("elevenlabs_por_mil_caracteres", 0.022))
+
+
+def provedor_da_voz(projeto) -> str:
+    """O narrador pago deste vídeo: "openspeaker" ou "genaipro" (o padrão de antes)."""
+    try:
+        provedor = (projeto.perfil.get("voz") or {}).get("provedor", "genaipro")
+    except AttributeError:
+        provedor = "genaipro"
+    return "openspeaker" if provedor == "openspeaker" else "genaipro"
 
 
 def registrar(projeto, categoria: str, motivo: str, valor_usd: float, detalhes: Optional[dict] = None,
@@ -278,8 +298,11 @@ def resumo(projeto) -> dict:
 
     por_categoria: dict = {}
     medidas: dict = {}
-    por_credito, _ = preco_por_credito(projeto.config)
-    itens = [_narracao_em_creditos(h, projeto.config, por_credito) if h["categoria"] == "narracao" else h
+    # o preço do crédito é o do narrador pago deste vídeo; o recálculo das contas antigas é sempre da GenAIPro
+    provedor = provedor_da_voz(projeto)
+    por_credito, _ = preco_por_credito(projeto.config, provedor)
+    por_credito_antigo, _ = preco_por_credito(projeto.config)
+    itens = [_narracao_em_creditos(h, projeto.config, por_credito_antigo) if h["categoria"] == "narracao" else h
              for h in itens]
     caracteres_narrados = sum((h.get("detalhes") or {}).get("caracteres", 0) for h in itens
                               if h["categoria"] == "narracao")
@@ -300,8 +323,8 @@ def resumo(projeto) -> dict:
     minutos = duracao / 60
     cenas = len(projeto.ler_json("cenas.json").get("cenas", [])) if projeto.existe("cenas.json") else 0
 
-    por_unidade, origem_narracao = preco_por_caractere(projeto.config)
-    plano = plano_da_voz(projeto.config)
+    por_unidade, origem_narracao = preco_por_caractere(projeto.config, provedor=provedor)
+    plano = plano_da_voz(projeto.config, provedor)
     creditos = medidas.get("narracao", 0)
     return {
         "total_usd": round(total, 4),

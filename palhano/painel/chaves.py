@@ -24,6 +24,10 @@ PROVEDORES = {
     "genaipro": {"nome": "GenAI Pro", "obrigatoria": False, "env": "GENAIPRO_API",
                  "para": "Narração realista. Só é usada quando o narrador é a GenAI Pro.",
                  "link": "https://genaipro.io"},
+    "openspeaker": {"nome": "OpenSpeaker", "obrigatoria": False, "env": "OPENSPEAKER_API",
+                    "para": "Narração realista mais barata (as mesmas vozes da ElevenLabs). "
+                            "Só é usada quando o narrador é o OpenSpeaker.",
+                    "link": "https://ai33.pro/app/api-document"},
     "gemini": {"nome": "Google Gemini", "obrigatoria": False, "env": "GEMINI_API_KEY",
                "para": "Descreve as imagens para a conferência (o plano grátis do Google serve).",
                "link": "https://aistudio.google.com/apikey"},
@@ -90,6 +94,12 @@ def testar(provedor: str, valor: str) -> tuple[str, str]:
                 d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
                 saldo = d.get("balance") or d.get("credits") or (d.get("data") or {}).get("balance")
                 return "testada", f"saldo {saldo}" if saldo is not None else ""
+        elif provedor == "openspeaker":
+            r = httpx.get("https://api.ai33.pro/v1/credits", headers={"xi-api-key": valor, **ua}, timeout=20)
+            if r.status_code == 200:
+                d = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                saldo = d.get("credits")
+                return "testada", f"saldo {saldo}" if saldo is not None else ""
         elif provedor == "gemini":
             r = httpx.get("https://generativelanguage.googleapis.com/v1beta/models", headers={"x-goog-api-key": valor},
                           timeout=20)
@@ -138,6 +148,6 @@ def faltando(usuario_id: int, narrador: str) -> list:
     tem = {x["provedor"] for x in banco.todos(
         "SELECT DISTINCT provedor FROM chaves WHERE usuario_id=? AND estado!='recusada'", usuario_id)}
     precisa = [p for p, i in PROVEDORES.items() if i["obrigatoria"]]
-    if narrador == "genaipro":
-        precisa.append("genaipro")
+    if narrador in ("genaipro", "openspeaker"):
+        precisa.append(narrador)
     return [PROVEDORES[p]["nome"] for p in precisa if p not in tem]

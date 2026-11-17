@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import drive, faxina, garimpo, video_ia
-from . import acordado, animacoes, aprendizados, cenas, chatgpt_assinatura, corrigir, diretor, entrega_pc, fish, pago, voz_local, publicacao, qualidade, shorts, thumbnail, rostos, revisao_video, trilha, custos, custos_reais, genaipro, imagens, limpeza, lixeira, midia, narracao, nichos, render, roteirista, verificar
+from . import acordado, animacoes, aprendizados, cenas, chatgpt_assinatura, corrigir, diretor, entrega_pc, fish, pago, voz_local, publicacao, qualidade, shorts, thumbnail, rostos, revisao_video, trilha, custos, custos_reais, genaipro, openspeaker, imagens, limpeza, lixeira, midia, narracao, nichos, render, roteirista, verificar
 from . import tempos
 from . import texto as tx
 from . import youtube_publicar as ytpub
@@ -990,8 +990,8 @@ class CriarProjetoPayload(BaseModel):
     nome: str
     roteiro: str
     perfil: Optional[str] = "perfis/livro-de-enoque.yaml"
-    voz: Optional[str] = "pt-BR-AntonioNeural"  # nome de voz Edge-TTS, usado quando voz_provedor não é "genaipro"
-    voz_provedor: Optional[str] = None  # None/"edge-tts" usa a voz acima; "genaipro" usa os campos abaixo
+    voz: Optional[str] = "pt-BR-AntonioNeural"  # nome de voz Edge-TTS, usado quando voz_provedor não é pago
+    voz_provedor: Optional[str] = None  # None/"edge-tts" usa a voz acima; "genaipro"/"openspeaker", os campos abaixo
     voz_id: Optional[str] = None
     voz_modelo: Optional[str] = None
     voz_idioma: Optional[str] = None  # "pt", "es" ou "en" — só pra lembrar a aba certa ao reabrir
@@ -1022,7 +1022,7 @@ class ImagensAjustesPayload(BaseModel):
 
 class VozAjustesPayload(BaseModel):
     """Ajustes de voz só deste projeto (GenAIPro ou Edge-TTS), sem tocar no perfil do canal."""
-    provedor: Optional[str] = None  # "genaipro", "fish" (grátis) ou "edge-tts" (antigo; "elevenlabs" = GenAIPro)
+    provedor: Optional[str] = None  # "genaipro", "openspeaker", "fish" (grátis) ou "edge-tts" (antigo)
     voice_id: Optional[str] = None
     nome: Optional[str] = None
     idioma: Optional[str] = None  # "pt", "es" ou "en" — só pra lembrar a aba certa ao reabrir
@@ -1401,9 +1401,9 @@ def criar_projeto(payload: CriarProjetoPayload, bg_tasks: BackgroundTasks):
             "idioma": payload.voz_idioma,
             "velocidade": payload.voz_velocidade,
         })
-    elif payload.voz_provedor in ("genaipro", "elevenlabs"):
+    elif payload.voz_provedor in ("genaipro", "elevenlabs", "openspeaker"):
         p.definir_voz_override({
-            "provedor": "genaipro",
+            "provedor": "openspeaker" if payload.voz_provedor == "openspeaker" else "genaipro",
             "voice_id": payload.voz_id or payload.voz_elevenlabs_id,
             "nome": payload.voz_nome,
             "idioma": payload.voz_idioma or payload.voz_elevenlabs_idioma,
@@ -1584,7 +1584,7 @@ def _voz_do_canal(caminho: Path) -> Optional[Dict[str, Any]]:
     except (Exception, SystemExit):
         return None
     voice_id = str(voz.get("voice_id") or "").strip()
-    if voz.get("provedor") not in ("genaipro", "fish") or not voice_id or "COLE" in voice_id:
+    if voz.get("provedor") not in ("genaipro", "openspeaker", "fish") or not voice_id or "COLE" in voice_id:
         return None
     return {k: v for k, v in {
         "provedor": voz.get("provedor"), "voice_id": voice_id, "nome": voz.get("nome_da_voz"),
@@ -1613,10 +1613,11 @@ def _bloco_da_voz(voz: Dict[str, Any]) -> Dict[str, Any]:
         if voz.get("idioma"):
             bloco.update({"idioma": str(voz["idioma"])[:2], "idioma_da_voz": voz["idioma"]})
         return bloco
-    if provedor not in ("genaipro", "fish") or not str(voz.get("voice_id") or "").strip():
-        raise HTTPException(status_code=400, detail="Escolha uma voz da GenAI Pro ou da Fish Audio antes de salvar o canal.")
+    if provedor not in ("genaipro", "openspeaker", "fish") or not str(voz.get("voice_id") or "").strip():
+        raise HTTPException(status_code=400,
+                            detail="Escolha uma voz da GenAI Pro, do OpenSpeaker ou da Fish Audio antes de salvar o canal.")
     bloco = {"provedor": provedor, "voice_id": str(voz["voice_id"]).strip()}
-    if provedor == "genaipro":  # escolhida de propósito: não vira a voz local (Projeto.sem_narracao_paga)
+    if provedor in ("genaipro", "openspeaker"):  # escolhida de propósito: não vira a voz local (Projeto.sem_narracao_paga)
         bloco["paga_escolhida"] = True
     for chave, destino in (("nome", "nome_da_voz"), ("idioma", "idioma_da_voz"), ("modelo", "modelo"),
                            ("estabilidade", "estabilidade"), ("similaridade", "similaridade"), ("estilo", "estilo"),
@@ -1811,6 +1812,54 @@ def creditos_genaipro():
             "preco_por_minuto_usd": round(por_caractere * ritmo, 4), "origem_do_preco": origem}
 
 
+@app.get("/api/vozes/openspeaker")
+def listar_vozes_openspeaker(idioma: str = "pt", busca: str = "", genero: str = "", pagina: int = 0,
+                             provedor: str = "elevenlabs"):
+    """Vozes da biblioteca do OpenSpeaker (ai33.pro), com prévia em áudio. Não gasta créditos.
+
+    A API do OpenSpeaker já filtra e pagina por idioma, então aqui não é preciso juntar páginas como na GenAIPro.
+    A resposta fica guardada por uma hora pra não repetir a consulta."""
+    idioma_id = idioma if any(i["id"] == idioma for i in openspeaker.IDIOMAS) else "pt"
+    genero = genero if genero in ("male", "female") else ""
+    busca = (busca or "").strip()[:60]
+    base = {"modelos": [], "idiomas": openspeaker.IDIOMAS, "idioma_atual": idioma_id,
+            "preco_por_mil": round(custos_reais.preco_por_caractere(
+                config_geral(), provedor="openspeaker")[0] * 1000, 4)}
+    if not openspeaker.tem_chave():
+        return {**base, "vozes": [], "erro": "Falta a chave do OpenSpeaker. Cole em OPENSPEAKER_API no .env."}
+    nome_do_idioma = next((i["nome"] for i in openspeaker.IDIOMAS if i["id"] == idioma_id), "")
+    chave_cache = ("openspeaker", provedor, idioma_id, busca.lower(), genero, pagina)
+    com_aviso = lambda lista: [v | openspeaker.lentidao(v.get("voice_id")) for v in lista]
+    guardado = _CACHE_VOZES.get(chave_cache)
+    if guardado and time.time() - guardado[0] < _CACHE_VOZES_SEGUNDOS:
+        return {**base, "vozes": com_aviso(guardado[1][0]), "tem_mais": guardado[1][1]}
+    try:
+        vozes = openspeaker.vozes(busca=busca or None, idioma=nome_do_idioma or None, genero=genero or None,
+                                  quantidade=60, pagina=pagina, provedor=provedor)
+    except SystemExit as e:
+        return {**base, "vozes": [], "erro": str(e)}
+    tem_mais = len(vozes) >= 60
+    _CACHE_VOZES[chave_cache] = (time.time(), (vozes, tem_mais))
+    return {**base, "vozes": com_aviso(vozes), "tem_mais": tem_mais}
+
+
+@app.get("/api/openspeaker/creditos")
+def creditos_openspeaker():
+    """Saldo do OpenSpeaker e quanto isso rende em minutos de narração. Não gasta nada."""
+    if not openspeaker.tem_chave():
+        return {"configurada": False, "creditos": 0, "pacotes": []}
+    try:
+        conta = openspeaker.conta()
+    except SystemExit as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    por_caractere, origem = custos_reais.preco_por_caractere(config_geral(), provedor="openspeaker")
+    por_caractere_creditos, _ = custos_reais.creditos_por_caractere(config_geral(), provedor="openspeaker")
+    ritmo = 900  # caracteres por minuto de uma narração típica
+    return {**conta, "configurada": True,
+            "minutos_de_narracao": int(conta["creditos"] / (por_caractere_creditos * ritmo)),
+            "preco_por_minuto_usd": round(por_caractere * ritmo, 4), "origem_do_preco": origem}
+
+
 @app.get("/api/imagens/provedores")
 def listar_provedores_imagem():
     """Os provedores de imagem de IA que o usuário pode escolher por projeto. O padrão é o OpenRouter."""
@@ -1898,6 +1947,14 @@ CHAVES_CONHECIDAS = [
         "obrigatoria": True,
         "sem_ela": "Só dá pra narrar com a voz grátis do Edge-TTS.",
         "onde": "genaipro.io",
+    },
+    {
+        "env": "OPENSPEAKER_API",
+        "nome": "OpenSpeaker",
+        "para_que": "Narração com as mesmas vozes da ElevenLabs por créditos mais baratos (ai33.pro).",
+        "obrigatoria": False,
+        "sem_ela": "A narração paga continua na GenAI Pro.",
+        "onde": "ai33.pro",
     },
     {
         "env": "ELEVENLABS_API_KEY",

@@ -50,7 +50,7 @@ class Projeto:
         if voz.get("paga_escolhida") or not voz_local.instalado("omnivoice"):
             return
         if (self.config.get("voz_local") or {}).get("no_lugar_das_pagas", True) and \
-                (voz.get("provedor") or "genaipro") in ("genaipro", "elevenlabs"):
+                (voz.get("provedor") or "genaipro") in ("genaipro", "elevenlabs", "openspeaker"):
             self.perfil["voz"] = {**voz, "provedor": "local", "provedor_pago": voz.get("provedor") or "genaipro",
                                   "pagas_trocadas": True}
 

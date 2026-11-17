@@ -3,14 +3,19 @@
 base: documentario.yaml
 nome: Mercado Alerta COLOMBIA
 voz:
-  provedor: genaipro
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). Esta voz é
+  # PROVISÓRIA: o catálogo do OpenSpeaker não tem nenhuma das vozes antigas, então todos os canais
+  # ficaram com a mesma voz em inglês até a escolha definitiva, canal por canal.
+  # Voz antiga na GenAI Pro: hyKxCTlAqtnW188CgltM (Salva - The Spanish Narrator).
+  provedor: openspeaker
   paga_escolhida: true             # escolhida no Radar: não vira a voz local
-  voice_id: hyKxCTlAqtnW188CgltM
-  nome_da_voz: Salva - The Spanish Narrator
+  voice_id: elevenlabs_nPczCjzI2devNBz1zQrb
+  nome_da_voz: Brian - Deep, Resonant and Comforting
   idioma_da_voz: es
 
 imagens:
-  provedor: openrouter
+  provedor: assinatura
+  provedor_reserva: openrouter
 
 # País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
 lugar:

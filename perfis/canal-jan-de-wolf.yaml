@@ -3,10 +3,14 @@
 base: documentario.yaml
 nome: Jan de WOLF
 voz:
-  provedor: genaipro
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). Esta voz é
+  # PROVISÓRIA: o catálogo do OpenSpeaker não tem nenhuma das vozes antigas, então todos os canais
+  # ficaram com a mesma voz em inglês até a escolha definitiva, canal por canal.
+  # Voz antiga na GenAI Pro: dLPO5AsXc3FZDbTh1IKa (Ido - Informal, Friendly Narrator).
+  provedor: openspeaker
   paga_escolhida: true             # escolhida no Radar: não vira a voz local
-  voice_id: dLPO5AsXc3FZDbTh1IKa
-  nome_da_voz: Ido - Informal, Friendly Narrator
+  voice_id: elevenlabs_nPczCjzI2devNBz1zQrb
+  nome_da_voz: Brian - Deep, Resonant and Comforting
   idioma_da_voz: nl
 
 imagens:

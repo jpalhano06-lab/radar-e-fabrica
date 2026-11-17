@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import animacoes, avatar, cenas, trilha, claude_local, revisao_video, corrigir, custos, gemini_local, genaipro, groq_local, jev_local, openrouter_local, efeitos, imagens, meditacao, midia, musica, narracao, render
+from . import animacoes, avatar, cenas, trilha, claude_local, revisao_video, corrigir, custos, gemini_local, genaipro, openspeaker, groq_local, jev_local, openrouter_local, efeitos, imagens, meditacao, midia, musica, narracao, render
 from . import checagem_video, conferir_voz, custos_reais, pacote, pago, publicacao, qualidade, shorts, thumbnail
 from . import texto as tx
 from .config import RAIZ, carregar_perfil, config_geral
@@ -1128,17 +1128,28 @@ def cmd_entregar(a):
 
 
 def cmd_creditos(a):
-    c = genaipro.conta()
     numero = lambda n: f"{n:,}".replace(",", ".")
-    por_caractere, origem = custos_reais.preco_por_caractere(config_geral())
-    taxa, de_onde = custos_reais.creditos_por_caractere(config_geral())
-    log(f"GenAIPro, conta {c['usuario']}: {numero(c['creditos'])} créditos "
-        f"({taxa:.3f} crédito por caractere narrado, {de_onde})")
-    for pacote in c["pacotes"]:
-        log(f"  {numero(pacote['creditos'])} vencem em {(pacote['vence'] or '')[:10]}")
     ritmo = 900  # caracteres por minuto de uma narração típica
-    log(f"  dá para cerca de {int(c['creditos'] / (taxa * ritmo) / 60)} horas de narração, "
-        f"a {custos.dinheiro(por_caractere * ritmo)} por minuto ({origem})")
+    if genaipro.tem_chave():
+        c = genaipro.conta()
+        por_caractere, origem = custos_reais.preco_por_caractere(config_geral())
+        taxa, de_onde = custos_reais.creditos_por_caractere(config_geral())
+        log(f"GenAIPro, conta {c['usuario']}: {numero(c['creditos'])} créditos "
+            f"({taxa:.3f} crédito por caractere narrado, {de_onde})")
+        for pacote in c["pacotes"]:
+            log(f"  {numero(pacote['creditos'])} vencem em {(pacote['vence'] or '')[:10]}")
+        log(f"  dá para cerca de {int(c['creditos'] / (taxa * ritmo) / 60)} horas de narração, "
+            f"a {custos.dinheiro(por_caractere * ritmo)} por minuto ({origem})")
+    if openspeaker.tem_chave():
+        c = openspeaker.conta()
+        por_caractere, origem = custos_reais.preco_por_caractere(config_geral(), provedor="openspeaker")
+        taxa, de_onde = custos_reais.creditos_por_caractere(config_geral(), provedor="openspeaker")
+        log(f"OpenSpeaker: {numero(c['creditos'])} créditos "
+            f"({taxa:.3f} crédito por caractere narrado, {de_onde})")
+        log(f"  dá para cerca de {int(c['creditos'] / (taxa * ritmo) / 60)} horas de narração, "
+            f"a {custos.dinheiro(por_caractere * ritmo)} por minuto ({origem})")
+    if not genaipro.tem_chave() and not openspeaker.tem_chave():
+        log("Nenhum narrador pago configurado: falta GENAIPRO_API ou OPENSPEAKER_API no .env.")
 
 
 VOZES_CRIADAS = RAIZ / "vozes_criadas"

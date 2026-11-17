@@ -3,12 +3,16 @@
 base: documentario.yaml
 nome: UK MARKET
 voz:
-  provedor: genaipro
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). Esta voz é
+  # PROVISÓRIA: o catálogo do OpenSpeaker não tem nenhuma das vozes antigas, então todos os canais
+  # ficaram com a mesma voz em inglês até a escolha definitiva, canal por canal.
+  # Voz antiga na GenAI Pro: auq43ws1oslv0tO4BDa7 (voz anterior do canal).
+  provedor: openspeaker
   paga_escolhida: true             # escolhida no Radar: não vira a voz local
   # 2026-10-24: de volta à voz dos vídeos anteriores. A "Adam - Radio Announcer" (wBXNqKUATyqu0RtYt25i) levava mais
   # de 1h por bloco na fila da GenAIPro; esta responde em segundos.
-  voice_id: auq43ws1oslv0tO4BDa7
-  nome_da_voz: voz anterior do canal
+  voice_id: elevenlabs_nPczCjzI2devNBz1zQrb
+  nome_da_voz: Brian - Deep, Resonant and Comforting
   idioma_da_voz: en
 
 publicacao:
@@ -30,7 +34,8 @@ publicacao:
     Nothing on this channel constitutes medical, legal or professional advice. Viewers should verify relevant information with appropriate official sources before making decisions.
 
 imagens:
-  provedor: openrouter
+  provedor: assinatura
+  provedor_reserva: openrouter
 
 # País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
 lugar:

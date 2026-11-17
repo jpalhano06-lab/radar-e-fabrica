@@ -3,15 +3,19 @@
 base: documentario.yaml
 nome: UK CartWatch
 voz:
-  provedor: genaipro
-  voice_id: wAGzRVkxKEs8La0lmdrE
-  paga_escolhida: true
-  nome_da_voz: Sully - Mature, Deep and Intriguing
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). Esta voz é
+  # PROVISÓRIA: o catálogo do OpenSpeaker não tem nenhuma das vozes antigas, então todos os canais
+  # ficaram com a mesma voz em inglês até a escolha definitiva, canal por canal.
+  # Voz antiga na GenAI Pro: wAGzRVkxKEs8La0lmdrE (Sully - Mature, Deep and Intriguing).
+  provedor: openspeaker
+  voice_id: elevenlabs_nPczCjzI2devNBz1zQrb
+  paga_escolhida: true             # escolhida no Radar: não vira a voz local
+  nome_da_voz: Brian - Deep, Resonant and Comforting
   idioma_da_voz: en
 
 imagens:
-  provedor: assinatura
   pessoas: true     # gente na tela: comprador na ação, pessoa comum falando para a câmera (2026-11-09)
+  provedor: assinatura
   provedor_reserva: openrouter
 
 # País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)

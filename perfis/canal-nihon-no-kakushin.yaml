@@ -3,13 +3,19 @@
 base: documentario.yaml
 nome: 日本の革新 (Nihon no Kakushin)
 voz:
-  provedor: genaipro
-  voice_id: aEdqPekRcUrJjvnAh1Eb
-  nome_da_voz: Koichi Takase - Clear and Measured
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). Esta voz é
+  # PROVISÓRIA: o catálogo do OpenSpeaker não tem nenhuma das vozes antigas, então todos os canais
+  # ficaram com a mesma voz em inglês até a escolha definitiva, canal por canal.
+  # Voz antiga na GenAI Pro: aEdqPekRcUrJjvnAh1Eb (Koichi Takase - Clear and Measured).
+  provedor: openspeaker
+  paga_escolhida: true             # escolhida no Radar: não vira a voz local
+  voice_id: elevenlabs_nPczCjzI2devNBz1zQrb
+  nome_da_voz: Brian - Deep, Resonant and Comforting
   idioma_da_voz: ja
 
 imagens:
-  provedor: openrouter
+  provedor: assinatura
+  provedor_reserva: openrouter
 
 # Estimativa, ainda sem medir esta voz: japonês fala bem menos letras por minuto que os 914 do português.
 # Depois da primeira narração, troque pelo número que a fábrica mostrar.

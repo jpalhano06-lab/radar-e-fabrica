@@ -37,7 +37,8 @@ def estimar(projeto) -> dict:
     # e a voz open source no próprio computador (voz_local: VoiceStudio ou voicebox) não custa nada
     gratuita = (projeto.perfil.get("voz") or {}).get("provedor", "genaipro") in (
         "edge-tts", "fish", "computador", "local", "voicestudio", "voicebox")
-    voz = 0.0 if gratuita else caracteres * custos_reais.preco_por_caractere(projeto.config)[0]
+    voz = 0.0 if gratuita else caracteres * custos_reais.preco_por_caractere(
+        projeto.config, provedor=custos_reais.provedor_da_voz(projeto))[0]
     # sem as cenas prontas, conta um efeito de 3 segundos por minuto de vídeo, antes do reaproveitamento
     if not efeitos.ativo(projeto.perfil):
         segundos_efeito = 0.0

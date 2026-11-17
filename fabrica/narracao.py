@@ -18,7 +18,7 @@ import wave
 
 import httpx
 
-from . import conferir_voz, custos_reais, fish, genaipro, voz_local
+from . import conferir_voz, custos_reais, fish, genaipro, openspeaker, voz_local
 from . import texto as tx
 from .util import duracao_audio, rodar
 
@@ -79,7 +79,8 @@ def narrar(projeto, log=print, sem_gastar=False) -> float:
         tempos.anotar_chamada(projeto, "voz", "ligar o motor de voz", comeco, modelo=preparada["motor"])
         log(f"  voz open source: {preparada['codigo']} ({voz_local.ORIGEM[preparada['motor']]})")
     if pendentes and not local and not projeto.offline and voz.get("provedor") not in ("edge-tts", "fish", "computador"):
-        lenta = genaipro.lentidao(str(voz.get("voice_id") or "").strip())
+        motor = openspeaker if voz.get("provedor") == "openspeaker" else genaipro
+        lenta = motor.lentidao(str(voz.get("voice_id") or "").strip())
         if lenta:
             log(f"  ⚠ AVISO: {lenta['aviso']} Troque a voz no perfil se precisar do vídeo hoje.")
 
@@ -101,6 +102,22 @@ def narrar(projeto, log=print, sem_gastar=False) -> float:
             if custo:
                 custos_reais.registrar(projeto, "narracao", f"bloco {i + 1}: tempo das palavras da voz da Fish Audio",
                                        custo, detalhes={"provedor": "fish", "transcricao": True})
+            return alinhamento
+        if voz.get("provedor") == "openspeaker":
+            alinhamento = _openspeaker(bloco.texto, voz, bruto, lambda *_: None, falado)
+            creditos = alinhamento.pop("_creditos", 0)
+            if creditos:
+                # o OpenSpeaker diz quanto cada tarefa cobrou (credit_cost): o bloco entra na conta na hora,
+                # sem a medida de saldo que a GenAIPro obriga (_registrar_gasto_da_narracao)
+                por_credito, origem = custos_reais.preco_por_credito(projeto.config, "openspeaker")
+                custos_reais.registrar(
+                    projeto, "narracao",
+                    f"bloco {i + 1} de {len(blocos)} narrado no OpenSpeaker: {creditos:.0f} créditos",
+                    creditos * por_credito, unidades=creditos,
+                    detalhes={"caracteres": len(bloco.texto), "creditos": round(creditos, 1),
+                              "voz": str(voz.get("voice_id") or "").strip(), "provedor": "openspeaker",
+                              "preco": origem, "medido": True,
+                              "creditos_por_caractere": round(creditos / max(len(bloco.texto), 1), 4)})
             return alinhamento
         return _genaipro(bloco.texto, voz, bruto, lambda *_: None, falado)
 
@@ -173,11 +190,14 @@ def narrar(projeto, log=print, sem_gastar=False) -> float:
 
     def cobrar(i):
         # só o que a API cobrou agora entra na conta: bloco reaproveitado do cache não paga de novo.
-        # O valor sai do saldo da GenAIPro, medido no fim (_registrar_gasto_da_narracao)
-        narrados.append(i)
+        # O valor sai do saldo da GenAIPro, medido no fim (_registrar_gasto_da_narracao). O OpenSpeaker não
+        # passa por aqui: cada tarefa dele já informou quanto cobrou, e o bloco foi registrado na hora.
+        if voz.get("provedor") != "openspeaker":
+            narrados.append(i)
 
     pago = not projeto.offline and not local and voz.get("provedor") not in ("edge-tts", "fish", "computador")
-    saldo_antes = _saldo_genaipro() if pago and pendentes else None
+    na_genaipro = pago and voz.get("provedor") != "openspeaker"
+    saldo_antes = _saldo_genaipro() if na_genaipro and pendentes else None
     com_fish = not projeto.offline and voz.get("provedor") == "fish"
     juntos_local = int(voz_local.config().get("blocos_ao_mesmo_tempo", 1)) if local else 1
     if (pago or com_fish or juntos_local > 1) and len(pendentes) > 1:
@@ -186,7 +206,8 @@ def narrar(projeto, log=print, sem_gastar=False) -> float:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         juntos = juntos_local if local else int(fish.config().get("blocos_ao_mesmo_tempo", 3)) if com_fish \
             else BLOCOS_AO_MESMO_TEMPO
-        onde = f"na voz {preparada['codigo']}" if local else "na Fish Audio" if com_fish else "na GenAIPro"
+        onde = (f"na voz {preparada['codigo']}" if local else "na Fish Audio" if com_fish
+                else "no OpenSpeaker" if voz.get("provedor") == "openspeaker" else "na GenAIPro")
         log(f"  narrando {len(pendentes)} blocos {onde}, {juntos} de cada vez")
         with ThreadPoolExecutor(max_workers=juntos) as grupo:
             tarefas = {grupo.submit(gravar, i): i for i in pendentes}
@@ -285,6 +306,13 @@ def assinatura_da_voz(projeto, voz) -> dict:
     if voz.get("provedor") == "edge-tts":
         return {"provedor": "edge-tts", "voz": (voz.get("voz_edge") or "pt-BR-AntonioNeural").strip(),
                 "velocidade": voz.get("velocidade_edge", "+0%"), "tom": voz.get("tom_edge", "+0Hz")}
+    if voz.get("provedor") == "openspeaker":
+        try:
+            corpo = openspeaker.corpo_da_tarefa("", voz)
+        except Exception:
+            return {"provedor": "openspeaker", "voice_id": str(voz.get("voice_id") or "").strip()}
+        corpo.pop("text", None)
+        return {"provedor": "openspeaker", **corpo}
     try:
         corpo = genaipro.corpo_da_tarefa("", voz)
     except Exception:
@@ -473,9 +501,10 @@ def _descontar(t, cortes):
     return t - removido
 
 
-def buscar_vozes(termo, idioma=None, quantidade=15):
-    """Procura vozes na biblioteca da GenAIPro. Qualquer uma delas serve direto no perfil, sem copiar para a conta."""
-    return genaipro.vozes(busca=termo, idioma=idioma, quantidade=quantidade)
+def buscar_vozes(termo, idioma=None, quantidade=15, provedor="genaipro"):
+    """Procura vozes na biblioteca da GenAIPro ou do OpenSpeaker. Qualquer uma serve direto no perfil."""
+    motor = openspeaker if provedor == "openspeaker" else genaipro
+    return motor.vozes(busca=termo, idioma=idioma, quantidade=quantidade)
 
 
 def _chave_elevenlabs():
@@ -573,6 +602,27 @@ def _genaipro(texto, voz, wav, log=print, falado=None):
     rodar(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3, "-ac", "1", "-ar", TAXA, "-c:a", "pcm_s16le", wav])
     palavras = _encostar_nas_pausas(palavras, _silencios(wav))
     return _alinhar_pelas_palavras(texto, palavras, duracao_audio(wav))
+
+
+def _openspeaker(texto, voz, wav, log=print, falado=None):
+    """Grava o texto no OpenSpeaker e devolve o tempo de cada letra, com os créditos cobrados em "_creditos".
+
+    O tempo das palavras vem da transcrição que a própria tarefa devolve (with_transcript). Sem ela, o tempo é
+    estimado pelas pausas do áudio, como na Fish: a legenda fica menos precisa, mas o vídeo não para."""
+    mp3 = wav.with_name(wav.name.replace("_bruto.wav", ".mp3")) if wav.name.endswith("_bruto.wav") else wav.with_suffix(".mp3")
+    palavras, creditos = openspeaker.narrar(falado or texto, voz, mp3, log)
+    rodar(["ffmpeg", "-y", "-loglevel", "error", "-i", mp3, "-ac", "1", "-ar", TAXA, "-c:a", "pcm_s16le", wav])
+    duracao = duracao_audio(wav)
+    if palavras:
+        palavras = _encostar_nas_pausas(palavras, _silencios(wav))
+        como = "medido pela transcrição do OpenSpeaker"
+    else:
+        palavras, como = _palavras_estimadas(texto, duracao, wav), "estimado pelas pausas"
+        log("    o OpenSpeaker não devolveu a transcrição: tempo das palavras estimado pelas pausas do áudio")
+    alinhamento = _alinhar_pelas_palavras(texto, palavras, duracao)
+    alinhamento["tempo_das_palavras"] = como
+    alinhamento["_creditos"] = creditos
+    return alinhamento
 
 
 def _fish(texto, voz, wav, log=print, falado=None):

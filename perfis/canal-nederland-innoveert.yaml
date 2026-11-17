@@ -3,17 +3,21 @@
 base: documentario.yaml
 nome: Nederland Innoveert
 voz:
-  provedor: genaipro
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). Esta voz é
+  # PROVISÓRIA: o catálogo do OpenSpeaker não tem nenhuma das vozes antigas, então todos os canais
+  # ficaram com a mesma voz em inglês até a escolha definitiva, canal por canal.
+  # Voz antiga na GenAI Pro: rN2gFSK0c2RP1mgdpt69 (Tom - Warm Natural Dutch).
+  provedor: openspeaker
   paga_escolhida: true             # escolhida no Radar: não vira a voz local
-  voice_id: rN2gFSK0c2RP1mgdpt69
-  nome_da_voz: Tom - Warm Natural Dutch
+  voice_id: elevenlabs_nPczCjzI2devNBz1zQrb
+  nome_da_voz: Brian - Deep, Resonant and Comforting
   idioma_da_voz: nl
 
 imagens:
-  provedor: assinatura
-  provedor_reserva: openrouter
   # reserva_api: false saiu em 2026-11-08 a pedido do usuário ("sempre que acabar o crédito de um vai pro outro"):
   # sem o ChatGPT, as imagens saem pelo OpenRouter, e sem crédito no OpenRouter, pelo ChatGPT
+  provedor: assinatura
+  provedor_reserva: openrouter
 
 # País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
 lugar:

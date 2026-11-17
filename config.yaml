@@ -2,6 +2,7 @@
 
 precos:                                # usados só para estimar o gasto, atualize quando mudarem
   genaipro_por_mil_caracteres: 0.022   # narração na GenAIPro, US$ 22 por 1 milhão de créditos (1 crédito por caractere)
+  openspeaker_por_mil_creditos: 0.00476  # OpenSpeaker (ai33.pro) avulso: US$ 10 por 2,1 milhões de créditos
   imagem: 0.067                        # Nano Banana 2 direto no Google em 1K (2K custa 0.101)
   imagem_lote: 0.034                   # a mesma imagem pelo modo lote do Google, metade do preço
   imagem_kie: 0.02                     # Grok Imagine 2.0 via Kie.ai
@@ -26,6 +27,16 @@ assinaturas:
     plano: GenAIPro 1 milhão          # só para aparecer no relatório
     preco_mensal: 22.00                # US$ pagos pelo pacote
     incluido_no_mes: 1000000           # créditos do pacote (US$ 0,000022 por crédito)
+  openspeaker:
+    # Pacote comprado em ai33.pro/app/buy-credits. O preço cai conforme o tamanho: US$ 5 = 1M, US$ 10 = 2,1M,
+    # US$ 50 = 14,5M créditos; a validade multiplica (1 mês = base, 3 meses x1,25, 9 meses x1,55, vitalício x1,75).
+    # O OpenSpeaker cobra 1,29 crédito por caractere de roteiro (1,12 da fala + a transcrição), então 2,1M
+    # créditos narram uns 1,63M caracteres.
+    # Comprado em 2026-11-17: 4 unidades com validade de 3 meses, US$ 25 de tabela, R$ 165 pagos
+    # (a diferença é spread e IOF, que o relatório em dólar não enxerga). Os créditos vencem em 2026-02-17.
+    plano: OpenSpeaker 4,6 milhões (3 meses)
+    preco_mensal: 25.00                # US$ pagos pelo pacote
+    incluido_no_mes: 4603333           # créditos do pacote (US$ 0,00000543 por crédito)
 
 # Vozes open source do VoiceStudio e do voicebox, rodando na própria fábrica (fabrica/voz_local.py e
 # motores_voz/), no lugar das narrações pagas, canceladas em 2026-10-28. Sem instalar os apps: os motores (OmniVoice,
