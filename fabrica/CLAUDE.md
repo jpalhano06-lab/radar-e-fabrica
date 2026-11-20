@@ -1,0 +1,1529 @@
+# Instruções para o Claude
+
+Este projeto é uma fábrica de vídeos. O usuário entrega um roteiro em texto e a fábrica devolve um MP4 narrado, com fotos e vídeos reais misturados com imagens de IA, animações (HyperFrames) e legenda queimada.
+
+Quem chegou aqui provavelmente recebeu esta pasta de um amigo e nunca usou o sistema. Trate a pessoa como alguém que não programa. Fale em português simples, sem jargão.
+
+## Primeira conversa, nesta ordem
+
+Faça um passo de cada vez e confirme antes de seguir.
+
+1. **Instalação.** Confira se `uv` e `ffmpeg` existem com `uv --version` e `ffmpeg -version`. Se faltar, instale com `brew install uv ffmpeg`. Depois rode `uv sync` na pasta do projeto. Para as animações (diagramas, textos na tela, linhas do tempo e mapas), confira também o Node.js 22 ou mais com `node --version` (`brew install node`). Ele é opcional: sem ele essas cenas ficam com foto.
+2. **Chaves.** Confira se existe um `.env`. Se não existir, crie a partir do `.env.exemplo` e peça para a pessoa colar as chaves **no arquivo, nunca no chat**. As obrigatórias são `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `PEXELS_API_KEY` e `PIXABAY_API_KEY`. Teste cada uma com uma chamada barata antes de seguir. A narração depende do computador (passo 6): com as vozes open source instaladas ela não precisa de chave; sem elas, quem narra é a GenAIPro, com `GENAIPRO_API` no `.env`. `GENAIPRO_API` e `ELEVENLABS_API_KEY` não são mais usadas para narrar (assinaturas canceladas em 2026-10-28); a da ElevenLabs só serve para efeitos sonoros, se alguém ainda tiver.
+3. **Contato do Wikimedia.** Troque `SEU_EMAIL_AQUI` no `config.yaml` pelo e-mail da pessoa. Sem isso o Wikimedia recusa as buscas.
+4. **Claude da fábrica (só em alguns perfis).** A divisão em cenas é do agente de roteiro, pela cadeia de modelos do OpenRouter e do Groq, sem o Claude. O Claude da assinatura (`claude -p`) só entra nos perfis com personagem ou efeitos sonoros e na abertura sem fala. Se o perfil da pessoa usar uma dessas partes, confirme que o terminal está logado; se não estiver, peça para rodar `claude` e digitar `/login`.
+5. **Teste sem custo.** Rode o exemplo em modo offline, que usa a voz do computador (a do Mac; no Windows, a do sistema ou, sem ela, um tom baixo no lugar da fala) e imagens de teste. Só depois disso fale em gastar dinheiro.
+6. **Voz.** Hoje o `config.yaml` está com `voz_local.no_lugar_das_pagas: false` (desde 2026-10-29: OmniVoice não instalado nesta máquina, GenAIPro de volta para todos), então o perfil com `voz.provedor: genaipro` narra na GenAIPro, que é paga: avise o custo antes. Para narrar de graça, a fábrica tem as vozes open source do VoiceStudio e do voicebox, rodando dentro dela (sem instalar os apps), com `voz.provedor: local`. Prepare os motores uma vez com `uv sync --project motores_voz/omnivoice` e `uv sync --project motores_voz/qwen` (uns 9 GB, na mesma pasta do projeto; os modelos baixam na primeira fala). Ajude a escolher a voz pela lista do editor (`GET /api/vozes/local`, com prévia) e ponha o código dela em `voz.voz_local` no perfil (`kokoro:pm_alex`, `qwen:Ryan`, `omnivoice:community_pt_br_lucas`, `omnivoice:female, middle-aged, low pitch`).
+7. **Perfil do canal.** Copie um perfil de `perfis/` com outro nome e ajuste voz, estilo das imagens, proporção de material real e diretrizes. Explique que o perfil é a identidade do canal.
+
+## Regras que valem sempre
+
+- **Nunca peça nem escreva chaves de API no chat.** Elas ficam só no `.env`.
+- **Nunca gaste sem avisar.** Toda etapa paga mostra a estimativa e pede confirmação. Não use `--sim` sem a pessoa ter concordado com o valor.
+- Use os comandos que já existem. Não escreva scripts paralelos para fazer o que o `fabrica` já faz.
+- Cada etapa salva o resultado. Se algo falhar no meio, rodar o mesmo comando continua de onde parou, sem pagar de novo.
+- O modo `--offline` existe para testar qualquer mudança sem custo. Use antes de propor gasto.
+
+## Comandos
+
+```bash
+uv run fabrica novo NOME --roteiro caminho.txt --perfil perfis/canal.yaml   # cria o projeto
+uv run fabrica tudo NOME          # narração, cenas, material real, imagens e render
+uv run fabrica mapa NOME          # o agente de roteiro lê o roteiro inteiro (roteiro_mapa.json)
+uv run fabrica narrar NOME        # só a narração
+uv run fabrica cenas NOME         # o Claude divide em cenas
+uv run fabrica midia NOME         # busca fotos e vídeos reais
+uv run fabrica imagens NOME       # gera as imagens de IA que faltam
+uv run fabrica animacoes NOME     # anima diagramas, frases de destaque, linhas do tempo e mapas (grátis)
+uv run fabrica motion NOME        # o Jev diz onde um clipe de motion explica a fala melhor (--aplicar faz os clipes)
+uv run fabrica trilha NOME        # o modelo compõe a trilha e o código toca (grátis)
+uv run fabrica render NOME        # monta o vídeo
+uv run fabrica render NOME --vertical   # versão em pé (9:16) para Reels e Shorts, em final_vertical.mp4
+uv run fabrica checar-video NOME  # o FFmpeg aponta imagem parada, tela preta e falta de som (grátis; roda sozinho no tudo)
+uv run fabrica revisar-video NOME # o modelo olha o vídeo pronto e aponta problemas (grátis)
+uv run fabrica conferir-voz NOME  # ouve a narração e aponta palavra comida, repetida ou mal pronunciada (grátis)
+uv run fabrica publicacao NOME    # título, descrição com capítulos, tags e legenda para o YouTube (grátis)
+uv run fabrica thumbs NOME        # 3 thumbnails e a prancha do celular (grátis); --escolher N troca a capa
+uv run fabrica shorts NOME        # até 3 shorts cortados do vídeo pronto, com legenda palavra por palavra (grátis)
+uv run fabrica publicar NOME --simular   # o que subiria para o YouTube; sem --simular, publica (pede confirmação)
+uv run fabrica consumo            # planilha do consumo no OpenRouter (relatorios/), refeita a cada consumo
+uv run fabrica tempos NOME        # onde foi o tempo da produção: etapas, cada IA, esperas e trocas de modelo (grátis)
+uv run fabrica animation-ai NOME  # onde a fala tem lista, datas ou comparação, cena animada no lugar da foto (grátis)
+uv run fabrica revisar NOME       # abre a página com todas as cenas
+uv run fabrica refazer NOME 12 31 # troca o que aparece nessas cenas
+uv run fabrica custo NOME         # estimativa e consumo do Claude
+uv run fabrica status NOME        # o que já está pronto
+uv run fabrica restaurar NOME     # volta um projeto excluído no editor (lixeira, 7 dias), sem pagar nada de novo
+uv run fabrica estimar roteiro.txt --perfil perfis/canal.yaml   # duração, sem gastar
+```
+
+Há também `corrigir` (confere e troca a mídia que não combina), `diretor`, `direcao`, `pago`, `pacote`, `importar`, `entregar`, `personagem`, `vozes`, `creditos` (saldo da GenAIPro, grátis), `voz-desenhar` e `voz-salvar` (ElevenLabs direta, opcionais), `musica-gerar` (ElevenLabs Music, opcional), `avatar-partes`, `avatar`, `meditacao`, `servidor` (a API do editor), `maquina` (produz para a fila de um Radar em outro computador) e `painel` e `robo` (Robô PALHANO, pasta `palhano/`). Rode `uv run fabrica --help` para a lista completa.
+
+## Estado de hoje (2026-11-10): o que o código tem e o resto deste arquivo ainda não contava
+
+Conferido no código e no `config.yaml` em 2026-11-10. **Onde esta seção e outra parte do arquivo discordarem, vale esta
+seção, e acima das duas vale o `config.yaml`.** A maior parte veio de 2026-11-05 a 11-09, da comparação com o Robô do
+Dotti (pedido do usuário: entregar mais rápido).
+
+**Valores que mudaram**
+
+| O quê | Hoje | Antes |
+|---|---|---|
+| Duração das cenas (`cenas.segundos_minimo`, `segundos_maximo`) | 4 a 6 s | 3 a 5 s |
+| Teto de imagem de IA (`ia.teto`) | 75% | 35% (e 25%) |
+| Buscas novas por cena reprovada (`corrigir.rodadas`) | 1 | 3 |
+| Vídeo no material real | pelo menos 25%, espalhado | 100% nos primeiros 40 s |
+| Agente de roteiro (`roteirista.modelos`) | DeepSeek V4 Flash pago | Nemotron Ultra grátis na frente |
+| Espera pelo gratuito antes do pago (`openrouter.espera_pelo_gratis`) | 5 s | 60 s |
+| Prazo de um modelo gratuito (`openrouter.prazo_gratis`) | 150 s | sem prazo |
+| Espera pela rota rápida no limite do minuto (`openrouter.espera_pela_rapida`) | 8 s | 30 s |
+| Cenas buscando ao mesmo tempo (`midia.processos`) | 12 | 8 |
+| Julgamentos do Jev ao mesmo tempo (`jev.processos`) | 12 | 6 |
+| Alvo de volume de cada faixa (`render.LOUDNESS_ALVO`) | -14 LUFS | -16 LUFS |
+| Narração (`voz_local.no_lugar_das_pagas`) | `false`: a GenAIPro narra | as pagas viravam voz local |
+| Lote de imagens do Google (`imagens.lote`) | `false` | `true` |
+
+**Ordem da criação pelo site hoje** (`api._esteira`): mapa do roteiro; narração junto com o JSON de cenas; divisão de
+cenas; busca de acervo, com as imagens de IA das cenas que já nasceram para a IA saindo ao mesmo tempo
+(`imagens.adiantar`); conferência, com as imagens de IA das cenas que ela reprova saindo a cada 15 s
+(`imagens.ao_fundo`); imagens de IA; completar cenas (até 3 rodadas); nenhuma repetida; conferência das completadas
+(também com `ao_fundo`); garantia; motion e cenas animadas; e, ao mesmo tempo, animações em camada, trilha e os clipes
+do render adiantados. O render vem depois.
+
+**Imagens de IA**
+
+- **Começam junto com a busca** (`imagens.adiantar`, `imagens.adiantar: true`, 2026-11-06): só as cenas que o agente
+  já marcou para a IA, sem personagem e dentro de uma folga do teto (`FOLGA_DO_TETO`, 70% das vagas). Essa linha não
+  escreve no `cenas.json`.
+- **Saem durante as conferências** (`imagens.ao_fundo`, 2026-11-09): no 25-cavalos a Conferência levou 24 min sem
+  nenhuma imagem sendo feita, e só depois vieram 27 min de imagens. Ficam para o `imagens.gerar` de depois a cena de
+  personagem e a de trecho de IA seguido (o `prompts_em_sequencia` reescreve o `cenas.json`, que a conferência também
+  grava). `imagens.ao_fundo: false` desliga.
+- **Pela assinatura do ChatGPT** (`fabrica/chatgpt_assinatura.py`, `imagens.provedor: assinatura`, pedido do usuário
+  em 2026-11-01): sem chave e sem custo por imagem, pelo Codex logado deste computador (`~/.codex-fabrica/auth.json`,
+  gravado pelo Radar). **Não é API pública da OpenAI e pode mudar sem aviso**, então nada depende dela. A ordem é: a
+  conta ligada, as outras contas da gaveta do Radar (`contas-radar`), e só então a chave de API; a chave sem crédito
+  também cai para a assinatura. A conta que para vai para a gaveta com o motivo (recusada ou `limite_ate`). Com as
+  duas fontes paradas, a mensagem diz o motivo de cada uma. O limite usado fica em `chatgpt_limites.json`.
+- **Banco de imagens da casa** (`fabrica/banco_proprio.py`, `banco_imagens` no `config.yaml`, 2026-11-06): toda imagem
+  de IA fica guardada, e a cena parecida de outro canal usa ela sem gerar (`semelhanca_minima` 0,8). Nunca duas vezes
+  no mesmo canal nem no mesmo vídeo, no máximo `usos_max` (3) usos no total, só imagem sem personagem e sem texto
+  pedido, e só do estilo atual. O Jev confere depois, como qualquer imagem de IA.
+- **Estilo claro e documental** (`perfis/base-documentario.yaml`, 2026-11-05): "foto de reportagem tirada no celular",
+  mostrando a loja, a marca e o preço que a fala cita. Antes pedia luz dramática e proibia texto e logotipos.
+- **Parte de IA escolhida por vídeo** (`ia.fracao`, `cenas._aplicar_fracao_da_ia`, pela Nova produção do Radar): leva
+  o vídeo até a parte de IA pedida, espalhada, deixando por último as cenas de nome exato, época ou arquivo.
+- **Concorrência aprendida** (`imagens.concorrencia`, `imagens_concorrencia.json`): `imagens.processos` (16) é o teto, e
+  cada provedor desce dele quando recusa por limite.
+- **Vídeo de IA** (`fabrica/video_ia.py`, `video_ia.fracao`, desligado por padrão): uma parte das cenas de imagem de IA
+  ganha movimento pela Kie, com a imagem aprovada como primeiro quadro. É pago à parte e custa bem mais que a imagem:
+  avise antes de ligar. Clipe que falha deixa a cena com a imagem parada.
+
+**Material real**
+
+- **Garimpo no YouTube** (`fabrica/garimpo.py`, 2026-11-05; ligado em `perfis/documentario.yaml` em 2026-11-07 com
+  `alvo: 0.15` e `teto: 0.20`): trechos curtos de vídeos reais, sem o som original, nas cenas que os bancos não cobrem.
+  Entra como um banco a mais (`youtube` em `fontes_video`). **Só vídeos com licença Creative Commons**
+  (`so_creative_commons` fica em `true`; em `false` o trecho é obra de terceiro e pode render reivindicação de
+  direitos: não mudar sem a pessoa pedir). Antes do download só a miniatura é julgada; depois, um quadro do trecho é
+  descrito e julgado de novo (`midia._conferir_o_trecho`), e nota baixa ou texto de outro editor derrubam o trecho.
+  Tem cota por vídeo e crédito automático.
+- **Foto gigante é reduzida logo depois do download** (acima de 7680 px, 2026-11-05).
+- **O Jev julga os candidatos do lote ao mesmo tempo** (`midia._adiantar_notas`, 2026-11-06): antes a escolha andava
+  cena a cena, cada julgamento esperando o anterior.
+
+**Render**
+
+- **Escada de codificadores** (`render.ESCADA_DE_PLACA`): NVIDIA (nvenc), Intel (qsv) e, só quando pedido
+  (`render.codificador: amf`), AMD. Medido nesta placa AMD em 2026-11-05: a CPU (libx264) fez a montagem em 34 s e o
+  AMF em 41 s, porque os filtros correm na CPU de qualquer jeito. Aqui a montagem final é na CPU.
+- **Parte da máquina** (`render._parte_da_maquina`): o Radar deixa até 8 vídeos ao mesmo tempo, e cada render reparte
+  os núcleos com os outros que estão correndo.
+- **Uma de cada vez** (`fabrica/vez.py`, seção `vez` do `config.yaml`, medido nos 74 vídeos de 17/10 a 07/11):
+  juntar e mixar o render (1,24 s por cena sozinho, 3,47 com outro junto) e a conferência das completadas (1,43 e
+  4,12) esperam a vez. As outras etapas seguem em paralelo. A espera vai para o `tempos.json` ("Esperando a vez").
+- **Transições e partículas** (opcionais, pelo perfil): `transicao` (`preto`, `branco`, `brasa`, `flash`; sem ela é
+  corte seco e os clipes prontos não mudam de nome) e camadas de brasas ou poeira (`fabrica/camadas.py`, desenhadas
+  pelo código).
+- **Animações em camada com 12 temas** (`animacoes.TEMAS`, em `animacoes.estilo.tema`: noticiario, dossie, cinema,
+  jornal, caderno, planilha, hacker, terror, colagem, cinetico, arquivo, reaberto) e som sintetizado.
+- **O HyperFrames aparece no tempo** (`tempos.parte`, "hyperframes: render/check/snapshot", 2026-11-07): na
+  conferência do 20-fake-foods foram 41 min com uns 17 de IA medidos, e nas animações 23 min com menos de 1 de IA.
+
+**Entrega e máquina**
+
+- **Entrega no computador** (`fabrica/entrega_pc.py`): uma pasta por vídeo em Downloads, com o MP4 no nome do título;
+  com `so_o_video: true`, só o vídeo e a `descricao.txt`. Os metadados do YouTube vão dentro do MP4
+  (`fabrica/metadados.py`).
+- **Google Drive** (`fabrica/drive.py`, opcional, escopo `drive.file`) e **faxina de disco** (`fabrica/faxina.py`:
+  depois de cada entrega, só com menos de 60 GB livres, tira o `render/` de projetos entregues há mais de 7 dias;
+  nunca toca no que custou dinheiro).
+- **O computador não dorme no meio do vídeo** (`fabrica/acordado.py`).
+- **Robô de máquina** (`fabrica maquina`, `fabrica/robo.py`, `ROBO.ps1`): esta fábrica pega vídeos da fila de um Radar
+  em outro computador e manda a prova da entrega. As chaves e o gasto são desta máquina.
+- **Retomar acorda a criação** que espera a próxima tentativa (rota `/retomar`, 2026-11-08).
+- **Checagem técnica do vídeo pronto** (`fabrica/checagem_video.py`, `fabrica checar-video`): o FFmpeg aponta imagem
+  parada, tela preta e silêncio, de graça.
+- **Sem prova real ainda** (dito no commit de 2026-11-05): Drive, clipe de vídeo de IA, conta de verdade no garimpo e
+  o robô em outro computador.
+
+## Regras fixas do corte de cenas (valem para qualquer perfil e roteiro)
+
+O roteiro manda: o que a narração cita tem que aparecer, na hora em que é falado. Estas regras estão no código (`fabrica/cenas.py`), não nos perfis, e não devem ser desligadas.
+
+- Cenas de **4 a 6 segundos**, alvo de 5 (`cenas.segundos_minimo` e `segundos_maximo` no `config.yaml`, desde 2026-11-05, perto do ritmo do Robô do Dotti: mediana dele 4,7 s, a nossa era 3,3 s; menos cenas também é menos busca, menos imagem e menos tempo). Sem esses dois valores, vale o padrão do código, 3 a 5 com alvo de 4 (`cenas.ESTILO_*`). Onde este arquivo fala em "3 a 5 segundos" ou em mínimo de 3, leia o mínimo e o máximo do `config.yaml`. O corte respeita o tempo de cada palavra falada.
+- Frases curtas que se repetem no final ("X está nessa lista. Y está nessa lista.") viram uma cena por frase (`_frases_paralelas`).
+- Listas com vírgulas ou "e" viram uma cena por item (`_itens_enumerados`).
+- Cena que cita duas ou mais coisas visuais diferentes: o Groq (ou o MiMo de reserva) devolve `citacoes`, e o código corta a cena onde cada uma é falada, com a busca e o prompt da própria coisa.
+- Cenas de citação e de enumeração têm mínimo de 1 segundo em vez de 3. **Item curto nunca engole o seguinte** ("alces" dura 0,6 s antes de "cavalos-de-przewalski"): o corte do próximo item é empurrado só o necessário (`_dividir_enumeracoes`), e na fase de cenas curtas o item empresta tempo da vizinha em vez de se fundir a ela. Cada citação do agente traz a própria `descricao`, `exato` e `animal`, e a fatia leva `item_citado`: o Jev julga se a imagem mostra AQUELE item, não os outros da frase. **Item citado no fim da cena adianta o corte** (tirando tempo do item anterior, os dois com o mínimo), em vez de ser jogado fora: "outras pela velocidade" é dita a 0,92 s do fim da frase, e o guepardo que o agente pediu sumia. **Cena comum curta nunca funde nem divide tempo com a fatia de um item citado** (`livre` em `_garantir_limites_estritos`): a frase do mosquito (2,6 s) era fundida com a fatia do guepardo, e ele sumia de novo; ela busca o tempo do outro lado. **Lista falada depressa não desloca os pedidos** (`_itens_por_fatia`): cada fatia mostra o item que começa a ser falado nela. Em "chocolate, caramelo e flores" (2 s) não cabiam três fatias de 1 s, e a fatia que fala "e flores" ficava com o caramelo (mcp-cafe-5min); agora sai o item espremido no meio.
+- **Foto e vídeo, regra de hoje** (`cenas.ESTILO_MINIMO_FOTOS` 0,70 e `ESTILO_MINIMO_VIDEO` 0,25): do material real, pelo menos 70% é foto e **pelo menos 25% é vídeo, espalhado pelo vídeo inteiro** (pedido do usuário em 2026-11-07, pela retenção: sem regra, o 25-cavalos saiu com 505 fotos e nenhum vídeo de banco). O agente pode pedir `video_real`, e a cena que não acha vídeo do assunto cai para foto na busca. **A regra do começo saiu em 2026-11-06** (`ESTILO_VIDEO_NO_INICIO = ()`, pedido do usuário): o começo segue a mesma regra do resto. O que continua valendo do texto antigo abaixo: época, arquivo e enumeração seguem foto, e nos primeiros 40 s não entra cena animada nem animação em camada. **Texto antigo, que não vale mais na parte do vídeo no começo:** do material real, pelo menos 70% é foto, mas o começo é de vídeo: **todo o material real dos primeiros 40 s é vídeo** (o gancho, pedido do usuário em 2026-10-25: "os primeiros 40s são os mais importantes"; época, arquivo e enumeração seguem foto) e 70% vídeo e 30% foto até os 5 minutos (`_balancear_foto_e_video`, `ESTILO_VIDEO_NO_INICIO`; pedido do usuário em 2026-10-12, para o vídeo não ficar chato). Nos primeiros 40 s não entra cena animada nem animação em camada (`animation_ai.inicio_sem_animacao`, `animacoes.elegivel`), e a cena errada ganha uma busca a mais antes da IA (`corrigir._rodadas`, `gancho`): no everything-you-need-to-answer 6 das 11 cenas do começo foram para a imagem de IA depois de uma busca só. O começo não entra no teto de 30% de vídeo do total: o que ele usar é descontado, e o resto do vídeo fica com o que sobrar.
+- **Precisão literal (direção de arte).** O agente (`roteirista.PROMPT_CENAS`, "Diretor de Arte Sênior") e o Jev (`corrigir.PERGUNTAS_JEV`) seguem as mesmas 6 regras: sujeito exato sem substituições, cenário fiel, nada de B-roll desconexo ou metáfora, ação e característica exatas, placas e telas do contexto certo, nada de reaproveitar entre blocos sem relação. Só o que existe apenas como tipo genérico (o gráfico de um estudo, uma pessoa anônima) aceita uma representação direta do mesmo tipo. **Animal tem ainda a regra de código abaixo**: se a fala cita o pangolim, aparece um pangolim — nunca um gato, um tatu, outro lêmure ou "um animal parecido". Vale para o agente (busca pelo nome da espécie, nome científico na alternativa), para o Jev (`corrigir.PERGUNTAS_JEV`) e para o código: em cena de animal (`midia.animal_da_cena`) só entra candidato cujas tags citam a espécie ou o tipo do bicho ("snake" para uma cobra, porque os bancos descrevem assim; a espécie exata quem confere é o julgamento), a Wikimedia vem primeiro e o tapa-buraco nunca põe outro bicho. **Nunca encher cenas repetindo a mesma foto do animal**: isso já foi feito e ficou pior (cenas 4 a 7 com a mesma cobra).
+- **Doze bancos de imagem** (com o Openverse, que entrou em 2026-11-05 entre os de acervo e pede `filter_dead=false`; o NARA foi testado e saiu, porque sem chave não responde dados) (`midia.Buscador._das_fontes`, `fontes_foto` do perfil base), consultados ao mesmo tempo e com os resultados intercalados (antes a lista era cortada na ordem dos bancos). Wikimedia, Pexels, Pixabay e Unsplash entram em toda busca de foto. O iNaturalist entra primeiro em cena de animal e a NASA só em cena de espaço. **Os bancos de acervo (Harvard, Europeana, Smithsonian, NYPL e Te Papa, `bancos.ACERVO`) só entram em cena de acervo** (`midia._e_de_acervo`): o agente mandou buscar na Wikimedia, ou a cena fala de história, arte, artefato ou ano antes de 1950; em cena de animal, só com fóssil, esqueleto, espécime ou espécie extinta. Antes eles entravam em tudo e só tomavam vaga: no lince2 o Harvard trouxe 4.303 candidatos, quase todos quadros, e 1 entrou no vídeo. O Biodiversity Heritage Library ficou de fora porque devolve livros, não imagens. O Unsplash da chave atual é do plano de demonstração (50 buscas por hora) e acaba cedo; a fábrica segue com os outros. Vídeo vem do Pexels, do Pixabay e da **Coverr** (`bancos.coverr`, 2026-10-12, para os 70% de vídeo do começo): só vídeo deitado, só com `COVERR_API_KEY` no `.env` (a chave se pede por e-mail a team@coverr.co; sem ela o banco se desliga sozinho) e só nos perfis que a listam em `fontes_video` (o `base-documentario` lista). A Coverr exige avisar cada download (`avisar_download`, chamado em `midia._baixar_midia`). **Licença:** o uso grátis da API e dos vídeos não vale para "serviço de edição de vídeo" nem para revenda; vídeos feitos para vender (TipLabs) podem estar fora disso, confirmar com a Coverr antes de ligar a chave no servidor de clientes. 12 candidatos por cena (`midia.candidatos`).
+- **A busca digitada pela pessoa manda** (botão "Pesquisar novo material de acervo" e `fabrica refazer --busca`, em `imagens._a_busca_da_pessoa_manda`): o termo vira o assunto da cena (`busca`, `sujeito` e `mostrar`), o `exato` e o `animal` saem, e o pedido do agente fica guardado em `pedido_original`. Sem tirar o `animal`, o filtro de espécie continuava com o bicho do agente: a cena marcada "impala" voltava três impalas seguidas para a busca "leão". Termo em português é traduzido pelo modelo principal (`midia.busca_em_ingles`) e as duas versões são buscadas. Antes só a busca mudava: na cena 15 do ouro-da-serra-gaucha a pessoa pediu "frosted plant", o sujeito antigo "campos com geada" pôs Campo Mourão e Campos dos Goytacazes na frente das fotos de geada, e o pedido "campos de uva da Serra Gaúcha" fez a planta ser recusada.
+- **O assunto que ordena, filtra e busca é sempre em inglês** (`midia.sujeito_da_busca`): os bancos descrevem as fotos em inglês, e o agente escreve o `sujeito` em português em boa parte das cenas (62 de 217 no ouro-da-serra-gaucha). Sujeito com cara de português cede lugar à `busca`. Antes, na cena 106, "fogo de chão" marcou as 6 fotos de fogueira como fora do assunto e, buscado na Wikimedia, "fogo" trouxe a ilha vulcânica do Fogo (Cabo Verde), que ficou no vídeo.
+- **Na escolha do acervo, o sujeito é obrigatório e a ação e o cenário só ordenam** (`midia.INSTRUCOES_ESCOLHA`, `VERSAO_ESCOLHA` na assinatura do cache da escolha). No natureza-nos-ensina o modelo que escolhe recusou 11 fotos boas de crocodilo-do-nilo porque nenhuma era "só olhos e narinas na água", e 22 cenas foram para a IA sem ninguém julgar: 48 imagens de IA em 92 cenas de um vídeo de animais da África. Quando ele recusa todos, os candidatos que citam o assunto nas tags entram mesmo assim (`midia._do_assunto_quando_recusou`), como suspeitos, e a conferência do Jev julga. Na captura, o Jev segue a regra da conferência: sujeito certo (60 ou mais) com nota baixa é cena genérica e fica (`_escolher_conferindo`); antes as leoas andando, para "caçam em grupo, cercando a presa", iam para a IA.
+- **Cena de vídeo de animal procura foto quando nenhum vídeo é da espécie** (`midia.Buscador.candidatos`): vale a própria espécie (`_cabeca_do_animal`, "mamba"), não o tipo do bicho. "snake" nas tags de vídeos de píton e de cobra-do-milho passava por mamba-negra, a foto nunca era procurada e as 6 cenas da mamba do natureza-nos-ensina foram para a IA. A foto vem do iNaturalist em cena de animal (antes só da Wikimedia), e quem cita a espécie vai na frente de quem cita só o tipo do bicho no corte dos 12 candidatos.
+- **Segunda leva de candidatos** (`midia._segunda_leva`): a mesma busca traz 24 candidatos por cena (o dobro de `midia.candidatos`, sem pedido a mais aos bancos); o modelo vê os 12 primeiros e, se ele ou o Jev recusarem todos, vê os 12 seguintes. Só depois valem as tags (`_do_assunto_quando_recusou`, sobre os 24) e, por último, a IA. A imagem de candidatos e a escolha da segunda leva ficam em `midia/escolha/cena_NNNN_2.*`. Antes os outros 28 a 37 resultados de cada banco eram jogados fora sem ninguém olhar.
+- Captura de material real: a busca vai do mais exato para o mais amplo (a busca da cena, a `busca_alternativa` do agente e o sujeito em duas palavras). O filtro `_so_do_assunto` tira candidatos cujas tags não citam o assunto, mas se tirar todos, devolve todos para o modelo de visão decidir.
+- **O que o Jev lê sobre cada imagem** (`midia.CAMPOS_DO_QUE_SE_VE`, na captura e na conferência): o modelo que vê a imagem responde campo a campo (o que é e com que certeza, detalhes que identificam, cenário, ação, tipo de imagem, texto visível) e **confere com o que a cena pede** (sim, parcial ou não, e por quê). O Jev só lê texto: uma frase solta não dizia se era a espécie certa nem se era foto ou desenho. Descrição antiga, em frase curta, é refeita.
+- Conferência na captura (`midia.conferir_na_captura`, ligada por padrão): o modelo que escolhe (o modelo principal) escreve uma frase do que vê em cada candidato e o Jev julga antes do download. Abaixo de `nota_minima_captura` (30) o candidato cai e o próximo é testado, até `candidatos_conferidos`. Se nenhum passar, fica o de maior nota e a cena ganha `captura.suspeita`. No passo `conferir`, abaixo de `corrigir.nota_para_trocar` (20) a fábrica troca sozinha, e entre isso e `nota_minima` (40) só aponta.
+- **Foto com pessoa nunca perde o rosto** (`fabrica/rostos.py`). O OpenCV acha os rostos com o YuNet (modelo de 230 KB, licença MIT, em `recursos/rostos`; no próprio computador, grátis), guardados em `.rostos.json` na pasta da foto. Foto que preenche a tela era recortada pelo meio: quando isso cortaria um rosto, `render._foto_na_tela` recorta pelos rostos (centro deles a 40% da altura); na versão em pé, o recorte lateral também segue o rosto. A prévia do editor (`render.quadro_da_foto`) é montada igual ao vídeo, com a moldura do retrato e o recorte pelo rosto: antes ela era a foto esticada pelo meio, e o retrato do jogador da cena 16 do virou-filme-em-1996 aparecia só com o tronco. Só os clipes dessas fotos mudam de nome (`_enquadramento`); os outros não renderizam de novo. O detector clássico (Haar) foi testado e descartado: errou 10 de 12 fotos (folha, abutre, mapa, manuscrito). OpenCV fica na versão 4 (a 5 tirou o detector clássico e o projeto fixa `<5`).
+- **JAMAIS repetir imagem, conferido na imagem em si.** Toda foto baixada ganha uma impressão digital visual (`midia._impressao`, dHash de 64 pontos) e é recusada (`ImagemRepetida`) se for igual ou quase igual a outra do vídeo, mesmo vinda de outro banco ou com outro número; a mesma foto do mesmo banco também é recusada. No fim da conferência e no fim da criação, `midia.tirar_repetidas` varre o vídeo e troca qualquer repetida por imagem nova. A checagem antiga, por nome de arquivo, deixou passar a mesma foto nas cenas 75 e 77 do lince2.
+- **JAMAIS material de edição no vídeo** (`midia.FundoDeChroma`, 2026-10-09): fundo verde de chroma key, botão de
+  inscrição animado, terço inferior, overlay. No leite, a cena "se inscreve, e nos vemos no próximo vídeo" pegou do
+  Pexels a "subscribe animation on green background" e o vídeo pronto mostrou 4 s de tela verde com um botão
+  SUBSCRIBED. Barrado em três lugares: pelo nome e pelas tags no banco (`midia.de_edicao`; azul só pelo nome, porque
+  céu limpo também é azul liso), pela imagem baixada (`midia.fundo_de_chroma`: um quarto ou mais da imagem num verde
+  puro e LISO, variação de brilho abaixo de 7 e de tom abaixo de 1,5; na capa e num quadro do meio do vídeo) e na
+  varredura do fim (`soltar_repetidas` solta também `cenas_de_chroma`). Medido em 1.522 fotos dos projetos: o chroma
+  tem 94% a 96% de verde liso (brilho variando 0,3 a 3,6); a foto real mais verde, cobra na grama, 67% mas com o brilho
+  variando 19 a 29. Nenhum falso positivo em 7 projetos.
+- **A chamada do canal mostra o assunto do vídeo** (`cenas._chamada_mostra_o_assunto`, no fim de `planejar` e de
+  `atualizar_tempos`, e regra no pedido do agente): fala de like, inscrição, sininho, comentários ou próximo vídeo
+  cujo pedido é de interface (YouTube, botão, ícone, celular com rede social) passa a pedir a âncora do bloco no
+  mapa, com a âncora do tema do vídeo como segunda busca, `exato` VAZIO (sem o campo, a busca deduz um nome próprio
+  da âncora, "Ontario", e recusa todos os candidatos) e sem a marca `sem_midia_real` do pedido antigo. O pedido do
+  agente fica em `pedido_chamada`; a escolha da pessoa fica. No leite, as três chamadas (logo do YouTube num celular,
+  botão em chroma) viraram vídeos de compra de leite no mercado.
+- **Nenhuma cena fica vazia, buraco se completa COM O ASSUNTO, e NUNCA se repete imagem.** Com `ia.ativa: false`, a cena que o acervo não resolveu recebe, nesta ordem (`_preencher_vazias` em `fabrica/midia.py`): um candidato da própria cena cujas tags citam o assunto; uma busca maior por todos os nomes do mesmo assunto (busca, alternativa, animal, sujeito, contexto e âncora do bloco); por último, uma imagem NOVA pelo assunto do bloco e do vídeo. Cena que terminou a conferência mostrando outra coisa (`corrigir._tirar_outra_coisa`) busca imagem nova, com a reprovada em `rejeitadas`. **Nunca copiar a imagem de outra cena**: isso já foi feito e encheu o lince2 de repetição (19 imagens repetidas). O agente não reaproveita cena (`reusar_cena` sempre 0) e fatia de IA não copia a imagem da vizinha. Toda cena preenchida ganha `captura.suspeita` e `captura.preenchida`.
+- **Tapa-buraco com filtro de verdade** (`midia._preencher_vazias`, regras de 2026-10-03, do virou-filme-em-1996, onde 118 de 130 cenas vieram do tapa-buraco e quase todas mostravam outra coisa):
+  - **O bicho é o substantivo, não o lugar** (`_cabeca_do_animal`): em "maneless Tsavo lion" vale "lion". Antes valia a primeira palavra e qualquer uma bastava: zebra, elefante, girafa e galinha "de Tsavo" passaram por leão. Em cena de animal o bicho é obrigatório (`exigido_da_cena`), e o nome do lugar no `exato` não conta.
+  - **`exato` com um nome e uma coisa exige os dois** (`_identificador`: "Tsavo railway workers camp" pede Tsavo E camp). `exato` em português é ignorado (as tags são em inglês).
+  - **Candidato que o modelo descreveu como "confere: nao" nunca entra** (`_disse_que_nao`): o elefante da cena 3 foi recusado por ele e posto pelo tapa-buraco.
+  - **Assunto de três palavras ou mais precisa de duas nas tags** (`_cita_bastante`): uma só aceitou Mustang, latas de spray e a vista de uma cidade.
+  - **Cena que não é de animal nunca recebe foto de bicho que ela não cita** (`_mostra_outro_bicho`, lista `_BICHOS`).
+  - **O assunto do vídeo nunca é nome de pessoa** (`assunto_do_video` tira as `pessoas_reais` do mapa) **e é conferido pela palavra inteira** (`_cita_o_nome`): "Patterson" pelas 4 primeiras letras trouxe a cidade de Patterson, uma ginasta e uma estação de trem para 20 cenas. O último recurso não usa mais o primeiro resultado às cegas.
+  - Sujeito em português sem acento ("tranca quebrada") cede lugar à busca quando não divide nenhuma palavra com os campos em inglês (`sujeito_da_busca`); "quebrada" trouxe o cânion Quebrada de las Conchas.
+  - Preferível uma cena vazia para revisão a uma imagem de outra coisa: o render avisa quais faltam.
+  - **Com a IA ligada, a repetida que não acha foto nova vai para a imagem de IA** (no fim da criação, `api` depois de `tirar_repetidas`, e em `cli.completar_depois_da_narracao`): antes a criação parava pedindo uma foto (cena 79 do nunca-deve-ter-dentro-de-casa-parte-2, o petauro-do-açúcar, com `ia.ativa: true`).
+- **Cena de motion é julgada como fundo** (`corrigir._julgar_com_jev`): a imagem vai escurecida embaixo da camada de animação, então o Jev julga "imagem de fundo do assunto", não "um diagrama mostra...".
+- **Quem descreve não tira nome do pedido** (`midia.INSTRUCOES_DO_QUE_SE_VE`): uma cidade no litoral virou "Lago Vitória" com nota 81. O Jev só aceita nome que aparece no texto visível ou no título do arquivo, e recebe `pessoa_citada` (campo `quem_e` do mapa: anos de vida e o que fez) para separar homônimos (o John Henry Patterson de Dayton, Ohio, entrou no lugar do caçador de 1898). O descritor também diz a `epoca_aparente` da imagem.
+- **Cenas de época** (vídeos históricos; campo `epoca` de cada cena, um ano antes de 1950, e `epoca` de cada bloco no mapa): o agente pede material de arquivo (foto da época, gravura, ilustração de livro ou jornal, objeto de museu), nunca reconstituição com ação e hora que ninguém fotografou. A cena nunca vira vídeo (`cenas._balancear_foto_e_video`), busca só na Wikimedia e nos bancos de acervo (`midia._e_de_acervo` devolve "epoca", `Buscador._das_fontes`), e o Jev reprova foto atual. Cena sem `epoca` (bicho, paisagem, hoje) segue igual. No Tsavo de 1898, Pexels e Pixabay puseram obras modernas e uma estação de trem atual.
+- **O Jev responde três perguntas numa chamada só** (`corrigir._perguntas`): combina (a nota), **sujeito** (a imagem mostra AQUILO e não outra coisa, mesmo que genérica) e, em cena de época, **época**. Recebe também o assunto do bloco do mapa, o `exato` e o **`aceitavel`** (o mínimo para a cena estar certa, escrito pelo agente; o ideal fica no `mostrar`). Sujeito certo com nota baixa é cena genérica e **fica**: três leões sem juba tiravam 4% contra "dois leões entre tendas à noite" e seriam trocados à toa.
+- **Quem descreve no Corrigir não vê o pedido** (`corrigir._descrever_lote`, `midia.INSTRUCOES_SEM_PEDIDO`): vendo, ele escrevia o nome que estava nele. Descrição antiga feita com o pedido ("confere com o pedido") é refeita. Com uma cena por chamada, a resposta única é daquela cena, seja qual for o número que o modelo escreveu: o Qwen do Groq devolveu outro número e as imagens de IA ficaram sem descrição, sem a conferência do Jev.
+- **O Corrigir nunca termina com imagem sem conferência** (`corrigir._conferir_sem_nota`): a troca por repetida e as buscas do fim são julgadas antes de acabar. No virou-filme sobraram 77 sem ninguém olhar.
+- **A criação também não** (`corrigir.conferir_completadas`, 2026-10-11): o "Completar cenas" roda depois da conferência, e a 3ª rodada dele (`permissivo`) e a última busca da esteira aceitam o que a busca achou. No brasil-selvagem 7 cenas entraram assim, sem ninguém olhar, e a cena 51 ("quando uma árvore de ninho é derrubada") ficou com uma foto de castanhas. Agora, depois do Completar (site e `cli.completar_depois_da_narracao`), toda cena sem conferência e sem aprovação na captura vai ao Jev; a errada busca de novo e, com a IA ligada, vira imagem de IA.
+- **Nome comum com nome científico exige o substantivo** (`midia._identificador`): no `exato` "Brazil nut tree Bertholletia excelsa", a foto cita Brazil, Bertholletia E "tree". Só com os dois nomes, as castanhas (tags "brazil nut, bertholletia excelsa, snack") passavam por árvore.
+- **Nome genérico com complemento mostra o complemento** (regra no pedido do agente, `roteirista.PROMPT_CENAS`): "árvore de ninho" é a árvore com o ninho da harpia, nunca a castanheira que a frase anterior citou como exemplo.
+- **A imagem de IA é conferida pelo Jev** (`corrigir.conferir_ia`, chamada por `imagens.gerar`; vale para toda cena com
+  imagem gerada, `corrigir.imagem_de_ia`, inclusive a cena de foto que nenhum banco resolveu: no ouro-serra-1min a
+  cena 15, uma `foto_real` sem material, ganhou imagem de IA e ficou sem conferência, porque só o tipo "ia" contava): mostrando outra coisa, é feita de novo uma vez com o motivo no pedido, **pelo pedido que o Jev escreveu pela fala**
+  (`prompt_novo`), não pelo pedido antigo, que é o que estava errado: na cena 9 do teste-animacao-1min a fala era da
+  água-viva, o pedido herdado era o do peixe-leão, e a imagem refeita pelo mesmo pedido saiu outro peixe-leão (nota 3).
+  A correção da fábrica não fica como escolha da pessoa (`prompt_manual`; marca `CORRECAO_IA`): antes ela travava a
+  correção seguinte no pedido errado. Refazer com o prompt da pessoa (`refazer`) não confere. Em cena de época a imagem sai no estilo de foto antiga (`imagens.prompt_final`).
+- **Nota mínima única** (`midia.NOTA_MINIMA_FIXA`, 40): a captura nunca aceita menos do que a conferência. Na criação (site e `tudo`) a conferência olha toda cena abaixo de 40 ou suspeita e troca sozinha, no acervo, sem deixar para o botão Corrigir Mídia. O `config.yaml` pode subir a nota, nunca baixar.
+- **O agente diz o que a foto obrigatoriamente mostra** (campo `exato` de cada cena: "Pripyat", "Geiger counter", "New Safe Confinement", "Eurasian lynx", ou vazio quando qualquer representação direta serve). Com `exato`, a Wikimedia vem primeiro e só entra foto cujas tags citem o nome (nome composto: todas as palavras, senão "Chernobyl Elephant's Foot" aceitaria um elefante). **O `exato` também é o primeiro termo de busca**, na busca da cena e no tapa-buraco: antes ele era só filtro, e a cena 11 do aparte2-2min-v2 exigia "Instituto Butantan", buscava "antivenom vials corridor" e descartava todos os candidatos (0 de 12 citavam o nome; com o `exato` na busca, 7 de 12). É a correção de raiz: antes cada etapa adivinhava o essencial pela busca, e toda adivinhação tinha furo. **O `exato` dentro da busca também é buscado sozinho**, e palavra que as tags perdem (`_SO_ESTILO`, como "stock") nunca é exigida: a cena 35 do mcp-cafe-5min buscava "New York stock exchange screen", o "New York Stock Exchange" sozinho nunca era buscado e o filtro exigia "stock", que nenhuma tag tinha; entrou um túnel de trem. Sem o campo (projeto antigo), `midia.exigido_da_cena` deduz o animal ou o nome próprio do roteiro.
+- **Busca com o contexto do bloco**: quando a busca fala do assunto do bloco, o `contexto` do mapa vai junto ("sugar glider" vira "sugar glider marsupial animal"). No tapa-buraco, candidato cujas tags não citam o assunto nunca entra às cegas.
+- **Texto curto com fundamento** (`textos.REGRAS_QUALIDADE`, no pedido do agente para o `overlay`, que vira o texto da animação em camada): número com o que ele mede, nome com a identificação ou a conclusão do trecho. Nunca metadados ("PARTE 2", "NÚMERO 8" sem o nome), palavra solta ou palavra que não foi falada. Na dúvida, sem texto.
+- **Voz do Edge com o tempo de cada palavra** (`boundary="WordBoundary"`): legenda e cortes seguem a fala. (O Edge saiu da fábrica em 2026-10-26; o `realinhar_edge` saiu junto.)
+- Cena de IA cortada por citação refaz o prompt de cada fatia, para não gerar a mesma imagem repetida.
+- **Frase que anuncia o assunto vai com a frase seguinte** (`cenas._abre_assunto`, no `_pre_cortar`): "Em segundo
+  lugar, a água-viva." (2 s) era juntada à frase anterior, do peixe-leão, e o agente pedia o peixe-leão para o corte
+  inteiro (cena 9 do teste-animacao-1min, 2026-10-26). Frase nova que repete um nome (5 letras ou mais) da seguinte e
+  nenhum do corte aberto fecha o corte antes dela.
+- **Cena recortada leva o pedido da frase que ela fala** (`cenas._pedido_pela_fala`, no fim de `atualizar_tempos` **e de `planejar`**, depois de `_garantir_limites_estritos`). Na primeira montagem também: juntar as curtas e dividir as longas copiava o pedido de uma cena para a outra, e no natureza-nos-ensina "e algumas cabem na ponta do seu dedo" (o agente pediu o mosquito) mostrou um elefante; eram 27 pares de cenas seguidas com o mesmo pedido. A busca vai junto (`busca`, ou `busca_reserva` em cena de IA). No recorte de outra narração, o pedaço novo herdava a descrição da cena de onde saiu: as cenas 23 a 26 do virou-filme-em-1996 falavam de quatro frases e ficaram com "um engenheiro chega a pé à obra, visto de costas". Agora a frase de cada cena é a que tem mais palavras dela, e o pedido (`mostrar`, `sujeito`, `exato`, `animal`, `epoca`, `onde_existe`, `aceitavel`, `busca_alternativa`, `prompt`) vem do `roteiro_cenas.json` para essa frase. A escolha da pessoa (busca, imagem ou prompt dela) e a fatia de citação ficam. A cena ganha `pedido_mudou`, e `corrigir.depois_da_narracao` julga a foto dela de novo.
+- **Cenas de IA seguidas têm prompts escritos juntos** (`imagens.prompts_em_sequencia`, no começo de `_gerar`, grátis, modelo principal): todo trecho de 2 ou mais cenas de IA seguidas do mesmo bloco, com imagem por fazer, é reescrito numa chamada (até 8 cenas), cada prompt no momento da própria fala, e o plano (`geral`, `medio`, `detalhe`) é obrigatoriamente diferente do da cena anterior. O código confere e devolve uma vez quando duas seguidas repetem o plano ou quase o mesmo pedido (`imagens.parecidos` >= 0,5), ou quando a de duas antes divide 0,4 ou mais (as cenas 24 e 26 do virou-filme saíram com a mesma pose: 0,41). Cena com imagem pronta ou com `prompt_manual` só entra como contexto. O prompt antigo fica em `prompt_antes_da_sequencia`. A medida de palavras sozinha não serve de gatilho: os quatro prompts repetidos do virou-filme davam 0,25 a 0,32.
+- **Cena errada recebe imagem de IA** (desde 2026-10-03, pedido do usuário; `ia.ativa: true`), **até o teto de IA do vídeo** (`ia.teto`, **75% desde 2026-11-05**; era 35% desde 2026-10-15, abaixo; onde este arquivo diz 35% ou 25%, leia o `ia.teto` do `config.yaml`). O pior erro é a cena mostrar outra coisa, e a IA é sempre melhor que isso. Material real continua primeiro, mas:
+  - o agente marca `onde_existe` em cada cena (`banco`, `arquivo` ou `nao_existe`); `nao_existe` (um momento que ninguém fotografou) nasce como IA, mas **passa por uma busca antes** (`midia.tentar_banco_nas_nao_existe`, no fim de `midia.buscar` do projeto inteiro, uma vez por cena: `banco_tentado`). A regra é estrita: só fica a foto que o Jev aprovou antes de baixar, com a nota mínima e sem suspeita; o resto volta para a IA. No natureza-nos-ensina 4 de 13 acharam foto aprovada (o elefante derrubando árvores, o búfalo escondido no capim);
+  - na conferência, cena **errada** (`corrigir.errada`: sujeito errado, época errada ou nota muito baixa sem sujeito certo) tem **uma** busca nova e, se continuar errada, vai para a IA (`corrigir.resolver_com_ia`; `corrigir.rodadas: 1` no `config.yaml` desde 2026-11-05). Três rodadas de busca quando o banco não tem a coisa só trouxeram mais lixo. **Garantia no fim da criação** (`corrigir.garantir`, `corrigir.garantir: true`, 2026-11-07): uma passada só, em que a foto de banco que ainda está abaixo da nota vira imagem de IA, mesmo acima do teto; a imagem de IA ruim não é refeita (uns US$ 0,0046 por imagem);
+  - **só a cena errada vai para a IA, também no fim do `corrigir`**: a devolução da melhor imagem punha na lista da IA toda cena abaixo da nota mínima, e no natureza-nos-ensina hipopótamo (94% de sujeito certo), crocodilo (91%) e búfalo (88%) foram para a IA. Antes de `resolver_com_ia`, quem não é `errada` sai da lista e vai para revisão;
+  - a foto que a cena tinha fica em `ia_reserva` e volta se a imagem de IA sair pior (`conferir_ia`) **ou não sair**
+    (`corrigir._devolver_sem_imagem`): no nunca-deve-ter-dentro-de-casa-parte-2 o filtro recusou as cenas 65 e 66, a
+    imagem antiga ficou em `antigas/` e o render parou com "Faltam imagens de 2 cenas";
+  - **pedido recusado pelo filtro de segurança do provedor** ("rejected by the safety system") é reescrito uma vez pelo
+    modelo principal, sem o detalhe gráfico (`imagens._prompt_sem_recusa`), em vez de repetir o mesmo pedido três vezes;
+  - **o teto de 15% saiu** (`ESTILO_TETO_IA` não existe mais): ele transformava em foto de banco as cenas que o agente marcou como IA, e o virou-filme-em-1996 saiu com 86 cenas de outra coisa;
+  - **teto de 35% de volta, com outro destino** (`ia.teto` no config.yaml, `imagens._teto_da_ia`, no começo de `_gerar`, por onde passa toda imagem de IA; pedido do usuário em 2026-10-15: o everything-you-need-to-answer saiu com 54% de IA, 183 de 340 cenas, gastando crédito do OpenRouter). Conta as cenas que já mostram imagem de IA (sem mídia e com `imagens/NNNN.png`, a regra do render) e dá as vagas por prioridade (`_prioridade_da_ia`): escolha da pessoa, personagem e **foto reprovada pelo Jev** (`ia_motivo`, `ia_reserva`) vão para a IA **sempre, mesmo acima do teto** (pedido do usuário em 2026-10-15: "o vídeo jamais deve ter cenas vazias"; mandar a reprovada de volta ao banco punha uma foto do assunto sem julgamento no lugar); depois "não existe" e época. As que sobram ganham `teto_ia`, viram `foto_real` com a busca da cena (ou a `busca_reserva`) e o `exato` **vazio** (o antigo em `exato_original`; vazio, não apagado, senão `exigido_da_cena` deduz um nome próprio e volta a exigir ele: no everything o `exato` era a busca inteira, "Lidl UK roast chicken hot counter", e 87 cenas não tiveram nenhum candidato julgado). Diferente do teto antigo: a busca segue com o Jev na captura, e o que ela não resolver é preenchido pela **foto do assunto do bloco** (`midia._preencher_vazias`, o tapa-buraco com todos os filtros, agora também com a IA ligada para as cenas `teto_ia`), nunca outra coisa nem repetida. Depois o Jev julga essas fotos (site: `conferir_completadas` depois do Completar; terminal: no fim de `etapa_imagens`); a que mostrar outra coisa vai para a IA. Cena que nem assim achou foto vai para a IA, mesmo acima do teto (cena vazia trava o render). **Cada cena passa pelo teto uma vez só** (`teto_ia` = prioridade 0): senão ela iria e voltaria entre o banco e a IA. O pedido do agente ganha a regra do teto nas instruções (fora da marca dos lotes guardados): `nao_existe` só para o que ninguém fotografou, e o `exato` é só o nome essencial;
+  - a estimativa da criação mostra o custo das imagens (total e por minuto); ela informa, não corta cena. Com `ia.ativa: false`, nenhuma IA e o tapa-buraco preenche.
+- Ao refazer cenas, o `--forcar` apaga o cache dos lotes e guarda `imagens` e `midia` em pastas `_antigas_`.
+- **Trocar a voz troca a voz, e as cenas ficam.** Cada bloco de narração guarda a assinatura da voz que o gravou (`narracao.assinatura_da_voz`: voz, modelo, estabilidade, similaridade, estilo, velocidade; ritmo e pausa ficam fora porque são ajustes grátis depois). Bloco com o mesmo texto mas outra voz é gravado de novo; bloco antigo sem assinatura tem a voz lida do custos_reais.json. Antes só o texto contava, e trocar Nelton por Leo Antonio no editor reaproveitava os blocos com a voz antiga. Ao narrar, o tempo de cada palavra da narração anterior fica em `alinhamento_anterior.json`, e `cenas.atualizar_tempos` leva cada corte de cena para o mesmo ponto da fala (`_mapa_de_tempo`); antes ele recalculava pelo começo da frase e regerar sem mudar nada levava 252 cenas a 260. As cenas só mudam se a fala desequilibrar (`_desequilibrou`, com folga de 0,5 s: abaixo de 2,5 s ou acima de 5,5 s): voz até 10% mais rápida ou mais lenta não mexe em nenhuma cena. O endereço da narração leve do editor leva a data, para o navegador não tocar a gravação antiga.
+- **Trocar a narração nunca entrega vídeo com cena faltando.** Depois de narrar de novo (`POST /narracao` e `fabrica narrar`), a fábrica continua sozinha: `corrigir.depois_da_narracao` aponta as cenas sem imagem, as que ficaram com a foto antiga mas outra fala e as repetidas; no site, `api._completar_depois_da_narracao` solta as cópias repetidas e põe a esteira da criação para andar a partir da busca (feitas = mapa, narração e cenas), com a conferência do Jev só nessas cenas (`conferir_cenas`; as de outra fala são julgadas mesmo aprovadas na captura, `conferir_forcadas`), imagens de IA se ligada, completar, nenhuma repetida, animações e trilha. O editor mostra "Em produção" e o render fica travado até terminar; trocar a narração durante a esteira é recusado. No terminal, `cli.completar_depois_da_narracao` faz a mesma sequência (no `tudo` as etapas seguintes já fazem).
+- **A imagem acompanha a fala quando a narração muda** (`cenas._levar_imagens_numeradas`, chamada em `atualizar_tempos`). A imagem de IA e a foto que a pessoa sobe do computador ficam em `imagens/NNNN.png`, pelo número da cena. Narrar de novo (outra voz, outro ritmo) divide, junta e renumera as cenas. Antes, as imagens ficavam com o número velho: a cena dona ficava sem arquivo e outra mostrava a imagem errada (no zz_teste_animacoes, 9 cenas sem arquivo e a foto da faca artesanal na cena errada). Agora cada cena antiga é achada pelas primeiras palavras dela no tempo novo (`_trechos_pela_fala`), e a imagem vai para a cena nova sem material real que cobre ao menos 35% dessa fala. A foto da pessoa (marca `imagem_da_pessoa`, que o upload grava; sem IA ligada, toda imagem numerada conta como dela) vence o acervo se não houver cena livre. Uma imagem por cena, nunca repetida: o pedaço novo de uma cena dividida (imagem numerada OU foto e vídeo de acervo, `cenas._sem_a_imagem_da_original`) fica sem arquivo, com a foto da original em `rejeitadas`, até o "Continuar carregamento" (antes ele levava uma cópia do material, e o zz_teste_animacoes narrado três vezes chegou a 68 cenas repetindo a vizinha). O material baixado leva o número da cena no nome; depois de renumerar, `midia.nome_livre` escolhe `NNNN_2.jpg` quando outra cena já usa `NNNN.jpg`, senão a foto nova apagaria a de outra cena. A estimativa do "Continuar carregamento" com a IA desligada é só o Jev (uns US$ 0,00005 por chamada, até 4 por cena). Na junção de duas cenas, o material real acompanha a busca que ficou (antes o tipo "ia" de uma vinha com o material da outra, e o editor marcava "sem arquivo" uma cena com foto de banco; o editor agora segue a regra do render: sem imagem de IA, mostra o material real). O que não tiver cena vai para `imagens/_sem_cena`, sem ser apagado.
+
+## Animações (HyperFrames)
+
+`fabrica/animacoes.py` e `fabrica/animacoes_modelos.py`, ligadas por `animacoes.ativo` no `config.yaml`. As cenas que o agente marca como `diagrama`, `texto_tela`, `linha_do_tempo` ou `mapa` (39 de 217 no ouro-da-serra-gaucha) não existem em banco de imagens e antes viravam a foto mais próxima (a iguana no "diagrama de rede clandestina"). Agora ganham uma animação, com cada elemento entrando no tempo exato da palavra falada.
+
+- **A animação é uma CAMADA POR CIMA DAS CENAS, não uma cena** (desde 2026-10-03, pedido do usuário). Antes cada animação era um clipe da cena com a foto dela escurecida no fundo: trocar a imagem, dividir, juntar ou renumerar a cena deixava a animação "desatualizada" e a foto voltava. Agora cada animação fica em `animacoes/motion.json`, **presa às palavras do roteiro** (a posição `c` de cada palavra no `alinhamento.json`, que não muda quando a voz muda), e é desenhada num **MOV transparente (ProRes 4444)** com o véu escuro dentro. **Não amarrar a animação ao número, ao corte ou à imagem da cena de novo.**
+  - Cenas de animação seguidas, do mesmo bloco, viram **uma** animação de até `animacoes.duracao_maxima` segundos (8), que segue por cima enquanto as imagens trocam embaixo (`_trechos`).
+  - **A duração vem do que está escrito, não da cena** (`duracao_do_conteudo`, desde 2026-10-04, pedido do usuário): de 3 a 8 s, o tempo de ler todas as palavras (0,3 s cada) e de o último elemento ficar 1,5 s na tela. Ela começa na palavra e pode seguir por cima das cenas seguintes, mas nunca cobre o começo da próxima animação (`limite` em `gerar`, e `validas` corta se a voz mudou). Fica em `duracao` no `motion.json`; `_ancorar(..., pela_fala=True)` dá o fim da fala, usado nos tempos dos elementos e para achar as cenas livres. Antes a animação durava só a fala das cenas dela.
+  - O render põe em dia as animações desatualizadas antes de montar (`por_em_dia`, sem animar cena nova e sem perguntar ao modelo quando dá): antes uma animação desatualizada sumia do vídeo sem aviso.
+  - **Trocar a imagem ou mexer nas cenas não mexe na animação.** Trocar a voz reposiciona a animação na fala nova (`_ancorar`) e leva cada elemento para a mesma palavra (`_remapear`), desenhando de novo **sem perguntar ao modelo**. Roteiro editado antes do trecho: acha as mesmas palavras pela sequência. A fala do trecho mudou: a animação sai e a criação faz outra pelas cenas.
+  - Em dia (`animacoes.validas`): o MOV existe e a assinatura (modelo, dados, tempos das palavras, tamanho, estilo, `animacoes_modelos.VERSAO`, `VERSAO_CAMADA`) bate. As cenas por baixo não entram na assinatura.
+- **Quem faz:** o modelo principal (gratuito) escolhe um dos 8 modelos prontos (`frase`, `numero`, `contraste`, `radial`, `lista`, `fluxo`, `linha_do_tempo`, `mapa`) e preenche os textos curtos e o segundo de cada um. O design é da fábrica (`animacoes_modelos.py`). **Não deixar o modelo escrever o HTML livre:** isso foi testado e saiu ruim (elemento aparecendo antes de ser falado, elemento esquecido, layout embolado). (A exceção é o Motion IA, abaixo, por decisão do usuário, com esqueleto fixo e conferência.) O código (`conferir_dados`) encosta cada tempo na palavra falada mais próxima e corta texto comprido.
+- **Conferência:** o `hyperframes check --json` reprova texto sobreposto, saindo da tela e regras de animação quebradas (o contraste fica de fora: com fundo transparente ele mede contra o nada); os erros voltam para o modelo, até `animacoes.tentativas`. Reprovada, as cenas ficam com a foto e o texto na tela.
+- **Render:** as cenas são montadas como sempre e a camada entra por cima no `_mixar`, no segundo da fala (mais a abertura), antes do avatar e da legenda. Versão em pé: sem a camada.
+- **Editor:** a animação tem **faixa própria (Motion), acima das Cenas**, e toca inteira por cima delas: `GET /cenas` devolve a lista `motion` (começo, fim, modelo, texto e a prévia) e o player toca a prévia `_previas/motion/ID_ASSINATURA.webm` (VP9 com transparência, `animacoes.previa_da_camada`, rota `/arquivos_previas/NOME/motion/ID.webm`) num vídeo próprio por cima das cenas. A cena mostra a imagem dela; `animada` diz que alguma animação passa por cima. **Não voltar à montagem por cena** (`composicao_da_cena`, removida): na troca de cena a animação reiniciava ou sumia, embora no vídeo final seguisse inteira. O WebM transparente toca no Chrome, Edge, Brave e Firefox; o Safari não mostra a transparência.
+- **Onde roda:** último passo da criação pelo site, etapa `animacoes` no `tudo` (antes do render), comando `fabrica animacoes NOME [--cenas N...] [--forcar] [--remover]` e o cartão Animação no inspetor do editor (`POST /api/projetos/NOME/cenas/N/animacao`). "Voltar para a foto" marca a animação por cima da cena como `desligada` (ou grava um marcador desligado no tempo dela) e a criação não anima de novo sozinha.
+- **Excluir animação pelo editor:** cada bloco da faixa Motion tem um ×, e o cabeçalho da faixa tem "× todas" (`DELETE /api/projetos/NOME/motion/ID`, ou `todos`; `animacoes.remover_item`). A animação fica `desligada` no `motion.json` (a criação não anima de novo aquele trecho) e o vídeo pronto muda no próximo render. Excluir uma só vira aprendizado do canal, como "Voltar para a foto".
+- **Projetos de antes da camada:** a animação nova de uma cena só reaproveita o modelo e os dados de `animacoes/NNNN/partes.json`, sem perguntar ao modelo.
+- **O Corrigir julga e troca a imagem embaixo da animação normalmente** (o Jev julga como "imagem de fundo do assunto"), porque a troca não estraga mais a animação.
+- **Nunca para o vídeo:** sem Node, com a etapa desligada, offline ou com erro, a cena segue com a foto de sempre.
+- **Fontes:** Inter e Playfair Display (licença OFL) em `fabrica/recursos/fontes`. Não usar fontes do Windows, que não podem ir para os amigos.
+
+## Motion IA (cena abstrata reprovada vira clipe de motion)
+
+**FORA DA PRODUÇÃO desde 2026-10-09** (pedido do usuário: "vamos tirar da produção o motion ai até ajustar ele, vamos
+adicionar o animation ai no lugar dele"; o clipe de "o castelo foi demolido entre 2016 e 2017" virou uma curva
+inventada caindo até "demolição"). `motion_ia.pausado: true` no config.yaml, lido em `motion_ia.pausado()` e conferido
+dentro de `ligado()`: vale por cima do perfil (motion-ai e motion-vox ligam o motion no perfil), então nenhuma entrada
+automática faz clipe: antes da imagem de IA, nota baixa no Corrigir, onde ajuda o roteiro (passo 6b) e vídeo todo em
+motion (passo 2b). **O animation-ai faz todos os caminhos dele** (pedido do usuário: "todos os passos, inclusive os
+passos que o motion ia fazia"): (1) a cena que iria para a imagem de IA (`imagens._motion_antes_da_ia` chama
+`animation_ai.nas_uteis(numeros=..., como_motion=True)`: sem o filtro de estrutura, sem o teto de 12% e o intervalo
+de 20 s, com o catálogo inteiro, `COMO_MOTION`; nota de 70 para cima entra, o resto segue para a IA); (2) a nota baixa
+no Corrigir (`_motion_com_nota_baixa` devolve as de nota baixa sem perguntar ao Jev do motion, elas viram `motion_so` e
+o animation-ai decide antes da imagem de IA; a que ele não fizer volta para a foto, sem pagar); (3) onde ajuda o
+roteiro (passo 6b, com o ritmo de complemento, como já fazia); (4) os perfis motion-ai e motion-vox
+(`motion_ia.tudo_pedido` lê o pedido do perfil mesmo pausado, e `animation_ai.video_todo` anima todas as cenas antes da
+busca de fotos). O visual é o do Motion IA (tema `apple`). `fabrica motion NOME --mesmo-pausado` roda o motion para
+testar o ajuste. Ao tirar a pausa, tudo volta como está descrito abaixo.
+
+`fabrica/motion_ia.py`, do `PRD-MOTION.txt`, ligado por `motion_ia.ativo` no `config.yaml` (no `.env`,
+`JEV_MOTION_FALLBACK_ENABLED` e `JEV_MIN_SCORE_THRESHOLD`, de 0 a 10, valem por cima). Decisões do usuário em
+2026-10-04: **HTML livre escrito pelo modelo** e o clipe **substitui a imagem da cena**; em 2026-10-05, **o Jev decide pelo
+roteiro onde o motion vale a pena** (antes, só em cena abstrata).
+
+- **Quando entra:** a cena ia para a imagem de IA (errada no Jev ou `nao_existe`) ou tirou nota abaixo de
+  `motion_ia.nota_minima` (40) mesmo com o sujeito certo, **e o Jev, lendo o roteiro, diz que o motion vale a pena**
+  (nota de 0 a 100, a partir de `motion_ia.nota_utilidade`, 70). São duas perguntas na mesma chamada, pelo mesmo preço,
+  e a nota é a média: `PERGUNTA_DADO` (a fala traz um dado de infográfico?) e `PERGUNTA_UTIL` (o clipe, com a foto no
+  card, explica melhor que só a foto?). O código acha o número com o que ele mede (`dado_na_fala`: "50 quilômetros por
+  hora", "mais de uma tonelada", "cerca de 35 pessoas") e passa ao Jev. Com uma pergunta só, a primeira rodada deu 51%
+  aos 50 km/h, 43% ao chifre de mais de um metro e 74% a "a ironia é que ele mesmo vive em perigo": a pergunta punha a
+  aparência do animal como motivo para dizer não. Mudou a pergunta, suba `VERSAO_UTIL` (a nota guardada é refeita). Ele recebe a fala, duas cenas antes e
+  duas depois (`_trecho_do_roteiro`), o assunto do bloco no mapa, o pedido do diretor de arte e o que a imagem de hoje
+  mostra, e julga se um infográfico (número com o que ele mede, comparação, causa e consequência, etapas) explica a fala
+  melhor que a imagem. A nota fica na cena (`motion_util`, `motion_util_fala`) e só é pedida de novo se a fala mudar.
+  Pedido do usuário em 2026-10-05: antes um modelo só separava "abstrata" de "concreta", e o motion caiu em "e o primeiro
+  lugar vai te surpreender", sem impacto, enquanto "pode passar dos 50 quilômetros por hora" ficava de fora por citar o
+  rinoceronte. **A foto da cena é opcional** (pedido do usuário em 2026-10-05: "pode existir motion sem animal"; o
+  velocímetro explica os 50 km/h sem o rinoceronte): cena com `animal` ou `exato` também vira motion. Quando a cena tem
+  foto com o sujeito certo (Jev 60 ou mais; `foto_da_cena` procura na mídia, na `ia_reserva` em `antigas/` e na imagem
+  de IA, e tira um quadro de vídeo), o modelo pode escolher o `foto_dado`, com ela num card ao lado do dado. O gancho é `imagens._motion_antes_da_ia`, no começo de `_gerar`, então vale para a
+  criação, a conferência, o diretor e o refazer; a nota baixa entra pelo fim do `corrigir` (`_motion_com_nota_baixa`,
+  marca `motion_so`). No terminal, `fabrica motion NOME [--cenas N...] [--aplicar] [--sim]` mostra a nota do Jev de
+  cada candidata (com o custo antes, uns US$ 0,00007 por cena) e, com `--aplicar`, faz os clipes.
+- **Também onde ajuda o roteiro, com a foto aprovada** (`motion_ia.nas_uteis`, pedido do usuário em 2026-10-07: "o
+  motion deve entrar onde ele realmente vai ser útil para o roteiro, independente se a cena foi reprovada ou não").
+  Antes a cena com foto boa nunca virava motion, e a balança com o mico, que precisa da foto boa, nunca seria usada.
+  Agora a cena cuja fala traz um dado (`pode_ajudar`: número com o que mede, quantidade de qualquer coisa, porcentagem,
+  ranking, comparação, causa e consequência; ano e código de estrada não contam) também é candidata, e o mesmo Jev
+  decide pela nota de utilidade. A frase cortada no meio ("pesa pouco mais de meio" | "quilo, tem uma juba") é lida
+  com o começo da cena seguinte, e o clipe fica na cena em que o dado começa. No 11-animais-do-brasil, 24 de 390
+  cenas foram para o Jev. Roda depois das imagens de IA e antes das animações (passo 6b da criação no site,
+  `etapa_motion` no `tudo`, e o `fabrica motion`). A foto fica em `motion_reserva`; a cena que já foi motion e a
+  pessoa trocou pela foto, ou que foi desfeita (`desfazer` marca `motion_ia_falhou`), não volta a ser motion.
+- **Quem faz:** só os modelos gratuitos (`OPENROUTER_FREE_MODELS` do `.env`, `motion_ia.modelos`, ou os `:free` e
+  `stealth/` da cadeia de principais; modelo pago numa dessas listas é ignorado), em cascata, com no máximo 15 pedidos
+  por minuto. Sem Groq (saiu da fábrica).
+- **Modelos de demonstração** (`fabrica/motion_modelos.py`, pedido do usuário em 2026-10-05: os clipes saíam todos
+  iguais, a foto num card e o número noutro, porque o modelo copiava o único exemplo do pedido). A fábrica desenha a
+  demonstração de cada tipo de dado e o modelo de linguagem só escolhe e preenche os dados da fala (`_pelo_modelo_pronto`,
+  `INSTRUCOES_MODELO`, `CATALOGO`): `velocimetro` (velocidade, o ponteiro sobe), `balanca` (peso de coisa pesada, um peso de
+  ferro cai na balança), `tipografia` (o dado em serifa, letra por letra, num recorte de papel, sem objeto; o `tom`
+  leve, pesado ou neutro muda o movimento), `regua` (tamanho, a coisa cresce na régua; `forma: cone` desenha chifre, presa ou dente), `contador`
+  (quantidade, um boneco ou ponto por unidade), `porcentagem` (anel), `comparacao` (barras), `tendencia` (queda ou
+  subida até o marcador: "à beira da extinção"), `fluxo` (causa e consequência), `ranking` (posição acesa na lista),
+  `frase` (ideia, palavra-chave em serifa sublinhada) e `foto_dado` (só com foto). O pedido diz os modelos das cenas de
+  motion vizinhas, para variar. `motion_modelos.conferir` recusa número que a fala DESTA cena não diz (o "50" da vizinha
+  fazia o "1 metro" do chifre ser recusado), palavra que nenhuma das falas diz, prefixo que não é quantificador ("passar
+  dos" repetia o topo) e `foto_dado` sem foto. O dado achado na fala indica o desenho (`motion_modelos.indicado`: km/h
+  pede o velocímetro, tonelada a balança, metro a régua, pessoas o contador, por cento o anel): com ele, `foto_dado` e
+  `frase` são recusados (na cena 11 do natureza-teste-1min o modelo escolheu a foto no lugar do velocímetro). O que reprovar volta ao modelo (`motion_ia.tentativas_modelo`, 3); se
+  nenhum modelo servir, vai o **HTML livre de reserva**: o modelo escreve css, html e js dentro do esqueleto
+  (`montar_html`). O `partes.json` guarda `modelo` e `dados`. Mudou o desenho, suba `motion_modelos.VERSAO`.
+- **Direção de arte antes do desenho** (`motion_ia.dirigir`, PRD Motion AI 2.0, pedido do usuário em 2026-10-07): o
+  desenho saía da UNIDADE do dado, e "pesa pouco mais de meio quilo" (o mico-leão-dourado) virava a balança com o peso
+  de ferro. Agora um pedido a mais por cena, só nos gratuitos, lê a fala, as vizinhas, o assunto do bloco e o que a
+  cena cita, e devolve a leitura (o que o espectador sente), o `tom`, o `desenho`, os `desenhos_proibidos` e o que
+  nunca mostrar. Fica em `motion_ia/NNNN/direcao.json` (pedida de novo só se a fala mudar; mudou as instruções, suba
+  `VERSAO_DIRECAO`) e vai no pedido do desenho, do HTML livre e da revisão visual (objeto proibido aparecendo é
+  problema de fidelidade). **A unidade é só sugestão, mas uma regra do código vale por cima do diretor**
+  (`motion_modelos.leve`): peso de coisa leve ou pequena (gramas, meio quilo, menos de 10 kg, "só", "pouco mais de")
+  indica a `tipografia` e proíbe a `balanca`. Sem resposta do diretor, vale essa direção do código (`direcao_pelo_codigo`).
+- **O bicho na balança, em colagem** (`motion_modelos.colagem_balanca`, pedido do usuário em 2026-10-07: "ele em cima
+  de uma balança mostrando 0,5 kg, estilo colagem Vox"). Peso com a foto da cena (`foto_da_cena`, sujeito 60 ou mais)
+  indica este desenho, leve ou pesado: o próprio animal recortado como figurinha de borda branca pousa numa balança de
+  cozinha, o prato afunda, o ponteiro gira e uma etiqueta presa por um fio conta o número. O tom vem do peso
+  (`motion_modelos.leve` e `pesado`): o mico de meio quilo pousa devagar, a onça de cem quilos despenca. O recorte
+  (`fabrica/recorte.py`) sai do GrabCut do OpenCV, de graça e sem modelo baixado, em três margens; **quem aprova é a
+  cadeia de visão, só gratuitos** (`motion_ia._recorte_da_cena`, guardado em `recorte.json`): nas fotos do mico do
+  11-animais-do-brasil as contas aprovaram 8 de 8 e três ficaram com o fundo em volta. Sem recorte aprovado, a foto
+  inteira entra numa moldura de papel rasgado (`moldura` nos dados), que também é colagem.
+- **Medida em caderno de campo, com a foto própria do bicho** (`motion_modelos.medida_colagem`, `fabrica/motion_figura.py`,
+  pedido do usuário em 2026-10-08, depois de 5 motions feitos à mão para a cena 191 do 11-animais-do-brasil; ele
+  escolheu o da fita métrica). Comprimento ou altura de animal: o bicho recortado como figurinha, uma fita amarela
+  desenrola da cauda ao focinho até o valor dito, o "quase / 2 metros" no alto; se a fala cita uma parte do corpo
+  ("contando a cauda achatada"), o resto apaga e ela fica em destaque com círculo à mão, seta e anotação; a função
+  ("funciona como leme") entra depois, a parte balança e entra o ícone (`ICONES`). Cada momento cai na palavra falada:
+  o modelo aponta `palavra_valor`, `palavra_parte` e `palavra_funcao`, e `motion_ia.segundos_das_palavras` acha o
+  segundo delas no `alinhamento.json`.
+  - **A foto do motion é buscada para o desenho, não herdada da cena** (pedido do usuário: "você já se limita indo
+    buscar fotos da lontra que já tem no projeto... você tem banco de imagens"). Nas 9 fotos da ariranha do projeto
+    nenhuma era de corpo inteiro de perfil. `motion_figura.figura` busca o animal nos bancos gratuitos (iNaturalist,
+    Wikimedia, Pixabay, Pexels, Unsplash; pelo nome e pelo científico), a visão gratuita escolhe a foto de corpo
+    inteiro e de perfil e diz onde o bicho está e para que lado olha, o recorte sai em várias versões (pela caixa da
+    visão, pelas margens e sem a vegetação grudada, `recorte.recortar(caixa=, sem_verde=, espelhar=)`, sempre olhando
+    para a direita) e a visão aprova uma e aponta a parte citada (sem resposta, `PARTES` dá a posição provável). Fica
+    em `motion_ia/NNNN/figura.json`; o crédito vai em `motion_foto` da cena e entra no `creditos.txt`. Vale também
+    para a `colagem_balanca`. Sem figura nem foto da cena, a medida cai na `regua`.
+  - **O clipe cobre a frase inteira** (`motion_ia.frase_da_cena`): "pode chegar a quase dois metros de comprimento,
+    contando a | a cauda achatada que funciona como leme" passa por duas cenas, e com só os 3 s da primeira a cauda
+    ficava de fora. O clipe vai da cena até o ponto final, no mesmo bloco, até `motion_ia.duracao_maxima` (8 s), sem
+    atravessar foto, imagem ou prompt da pessoa; é gravado uma vez (`NNNN_motion_frase.mp4`) e cortado num pedaço por
+    cena (`NNNN_motion.mp4`), que o render monta em sequência. As cenas ganham `motion_trecho`. O som do clipe vai
+    com a primeira cena, até o fim da frase (`midia.duracao_frase`); os pedaços seguintes não repetem o som.
+  - **Recorte limpo, conferido na conta** (`recorte.fundo_grudado`, `motion_figura.FUNDO_MAXIMO`, 4%): a visão
+    gratuita aprovou duas vezes o mico com o céu azul grudado. A fração do recorte com cor viva muito diferente da cor
+    principal do bicho mediu de 0 a 1,7% nos limpos e de 7% a 32% nos sujos; acima de 4%, o recorte nem chega à
+    visão. Sem recorte limpo, a figura é a foto inteira (`moldura`), numa moldura de papel rasgado: serve para a
+    contagem e a balança; a medida precisa do bicho recortado e cai na régua.
+  - **Desenho impossível destrava o simples** (`motion_ia.SIMPLES`): sem foto para o desenho com o bicho, o desenho
+    simples (régua, contador, balança) deixa de ser proibido pela direção de arte. Na cena 21 a contagem ficou sem
+    recorte com o contador proibido, e sobrou o HTML livre, reprovado.
+  - **O que o modelo esquece sai da fala** (`motion_ia._completar_pela_fala`): o quantificador logo antes do número
+    ("apenas cerca de duzentos micos") vira o prefixo, e a palavra do número dá o tempo em que ele entra. Número exato
+    por extenso ("duzentos") conta subindo em algarismo; `rotulo_valor` é só para o inexato ("milhares").
+- **Contagem em caderno de campo** (`motion_modelos.contagem_colagem`, 2026-10-08): quantos bichos existem ou restam.
+  O próprio animal à esquerda (a figura própria) e ele mesmo em miniatura, colorido, repetido numa grade que enche no
+  tempo do número, que conta junto; no máximo 40 na grade, cada um valendo um número redondo ("cada um = 5 micos").
+  A silhueta preta saiu: o mico sentado virou borrão e a revisão visual leu "cachorro". Gente (pessoas, vítimas) é
+  sempre o `contador`.
+- **Critério com o recorte e com a repetição** (pedido do usuário em 2026-10-08, sobre a cena 257 do
+  11-animais-do-brasil: "o motion IA deve ser extremamente criterioso, imagens assim fica basicamente estranho... e
+  também mudar a balança, que já apareceu umas 10x"):
+  - **Recorte com pontas é barrado** (`recorte.pontas`, `PONTAS_MAXIMO` 2%, junto com o fundo grudado em
+    `recorte.limpo`, nos dois caminhos: a foto própria e o recorte da foto da cena). Mede quanto do bicho some quando a
+    borda é alisada, sem a borda branca da figurinha: o pirarucu com folhas e gravetos espetados perdia 4%, os bons de
+    0,1% a 1%. A revisão visual também reprova borda serrilhada, pontas e fundo grudado (`CRITERIOS["acabamento"]`).
+  - **Cada desenho no máximo 2 vezes no vídeo** (`motion_ia.com_esgotados`, `usados_no_video`,
+    `motion_ia.repetir_no_maximo`): eram 3 balanças e 4 tipografias em 16 clipes, porque o pedido só citava as 4 cenas
+    vizinhas. Balança e bicho na balança contam juntos (`FAMILIAS`). Os esgotados entram nos proibidos e o modelo
+    recebe a contagem do vídeo.
+  - **Ficha de caderno de campo** (`motion_modelos.ficha_colagem`): dois ou três dados do mesmo bicho na mesma fala
+    ("pode passar de dois metros e meio e pesar mais de cem quilos") viram uma ficha: a foto dele e uma linha por dado,
+    com ícone de traço e o número contando no segundo em que é falado. Bicho comprido (mais de 2,2 vezes mais largo
+    que alto) fica em cima, largo, com os dados lado a lado embaixo. O pirarucu virava a terceira balança, ou a régua
+    sem o peso. A moldura usa o formato da própria foto (em 4:3 o peixe saía cortado), e o número termina de contar
+    antes do corte.
+  - **"Dois metros e meio" é 2,5 e "passar de" é "mais de"** (`motion_ia._ajustar_pela_fala`, também nos itens da
+    ficha): o modelo escreveu 2.
+  - **A revisão olha o fim do clipe parado** (o último quadro da folha é `dur - 0,12`): com o quadro a 75% ela via o
+    número ainda contando ("48 quilos") e reprovava; e o desenho pronto reprovado ganha **uma segunda opinião**
+    (`criticar`), que fica se der mais: a revisão gratuita viu "foto e texto cortados" que não existiam.
+- **A revisão visual para quando a correção sai igual** (`motion_ia._revisado`): o desenho pronto com os mesmos dados
+  dá a mesma nota; na cena 191 eram três revisões iguais, uns 4 minutos à toa.
+- O padrão do peso em `motion_modelos._INDICADO` tinha um caractere de controle no lugar do `\b` (vinha do GitHub):
+  "kg" nunca casava. Ao escrever expressão regular por script no terminal, confira se `\b` não virou o caractere 0x08.
+- **Estilo editorial Vox / SaaS** (PRD de 2026-10-05, no lugar do "Apple Event" escuro): o esqueleto dá o fundo creme
+  `#F7F6F2` com grade de pontos, as cores (`--verde`, `--azul`, `--laranja`, `--grafite`), as fontes Inter e Playfair,
+  a linha do tempo `tl` do GSAP pausada, `window.seekToFrame` e as peças prontas: `.m-card` (branco, raio 20px, sombra
+  suave, **flutua 5px sozinho** pelo `translate` do CSS, que não briga com a entrada do modelo), `.m-destaque` (serifa
+  itálica colorida), `.m-linha` (path SVG que o esqueleto deixa escondido no tamanho exato; o modelo só leva
+  `strokeDashoffset` a 0), `.m-barra` (cresce de baixo), `.m-foto` (a foto da cena) e as peças do dado: o `.m-card` já
+  centraliza o conteúdo em coluna, com `.m-num` (168 px), `.m-rot`, `.m-sub` e `.m-frase` já no tamanho. Dentro do card
+  nada de `position: absolute`: na cena 8 do natureza-teste-1min o número com `left: 1192px` contou da borda do card e
+  saiu da tela, e o card ficou vazio. O pedido traz um exemplo de foto + dado (`INSTRUCOES_HTML`); com ele as cenas 8
+  e 11, reprovadas nas 3 tentativas antes, saíram de primeira. As regras vão no pedido (`INSTRUCOES_HTML`): uma composição
+  pela fala (número sozinho vira número enorme num card, **nunca gráfico inventado**; barras só com vários valores
+  ditos; fluxo vira cards ligados por curvas; comparação, dois cards), centralizada, 60 px entre cards, entrada com
+  mola `back.out(1.7)` (palavra sem scale, senão encosta na vizinha), tamanhos mínimos para o celular e os 260 px de
+  baixo livres. A legenda é branca: uma faixa grafite suave embaixo (`#m-faixa-legenda`) deixa ela legível no fundo
+  claro. Testado em 4 cenas reais (natureza-nos-ensina 97, virou-filme-em-1996 1, 30 e 121): 30 a 95 s por clipe.
+- **Conferência:** o código recusa animação ou transição em CSS, relógio, sorteio, endereço externo, emoji, curva
+  linear, entrada sem a mola, css vazio ou sem posição e tamanho de texto (na cena 6 do natureza-teste-1min o css veio
+  vazio e tudo caiu no canto com letra de 16 px), texto abaixo de 32 px e palavra que a fala não diz (`problemas_do_codigo`,
+  `_palavras_inventadas`); o `hyperframes check` recusa texto sobreposto e, como o fundo é opaco, contraste ruim
+  (`animacoes._conferir(..., clipe=True)`). Texto fora da tela ou fora do card (`canvas_overflow`,
+  `text_box_overflow`) o HyperFrames marca só como informação, e o clipe passava com o card vazio: no clipe isso
+  reprova (`_ESTOURO_NO_CLIPE`), com uma dica para o modelo. O que reprovar volta para o modelo, até `motion_ia.tentativas`.
+- **Revisão visual antes de gravar** (`motion_ia._revisado` e `criticar`, do vídeo de motion graphics estudado a pedido
+  do usuário em 2026-10-06: "olhe os quadros, dê nota, corrija os 3 piores, só então grave"). Antes ninguém olhava o
+  clipe, só o código e o `hyperframes check`. Agora o `hyperframes snapshot --describe=false` tira uns 4 quadros numa
+  folha de contato (uns 8 s, sem gravar o MP4; sem o `--describe=false` ele mandaria os quadros ao Gemini), e a cadeia
+  de visão **só com os gratuitos** (`VISAO.perguntar(..., so_gratuitos=True)`, o Qwen 27B do Groq em uns 8 s) dá nota
+  de 1 a 10 em legibilidade no celular, composição, clareza, fidelidade à fala, movimento e acabamento (`CRITERIOS`).
+  Abaixo de `motion_ia.critica.nota` (8), os até 3 piores problemas, com a correção, voltam para quem fez o clipe
+  (o modelo pronto troca de desenho ou de dados; o HTML livre muda o código), até `critica.rodadas` (3) revisões. Sem
+  passar, fica o de melhor nota se a pior nota dele chegar a `critica.aceitavel` (5); abaixo disso a cena segue o
+  caminho de antes. Sem quadros ou sem modelo de visão gratuito, o clipe segue sem a revisão (nunca para o vídeo). As
+  notas ficam em `partes.json` (`critica` e `criticas`) e a folha da última revisão em `motion_ia/NNNN/revisao.jpg`.
+- **Som no tempo do movimento** (`motion_ia.sons_do_clipe` e `sons_na_linha`, mesmo estudo: o que mais pesa no nível
+  de um motion é o som batendo junto). Os clipes saíam mudos. Os momentos saem da linha do tempo do próprio clipe (o
+  js do `partes.json`, `eventos_de_som`): card ou texto entrando é **pop**, linha se desenhando é **risco**, número
+  contando é **contagem** (tiques juntos no começo e espaçados no fim, como a mola `power3.out`) e peso caindo
+  (`bounce`) é **baque**. Movimento contínuo (`repeat`, `yoyo`, `sine.inOut`) e saída não têm som; no máximo 6 por
+  clipe, com 0,3 s entre eles. Os sons são tocados pelo código (`trilha._efeito`, em `efeitos/gerados`) e misturados
+  num arquivo por clipe (`motion_ia/NNNN/sons-ASSINATURA.wav`, com 6 dB de folga para não estourar), que o render põe
+  no segundo da cena com qualquer perfil, em `motion_ia.volume_sons_db` (-20) depois do pico a -1 dB. Clipe já gravado
+  também ganha som, sem gravar de novo. `motion_ia.sons: false` desliga; mudou a leitura dos momentos ou a mistura,
+  suba `VERSAO_SONS`.
+- **Gravação:** o HyperFrames grava o MP4 quadro a quadro num Chrome escondido (é o pipeline do PRD, sem Playwright),
+  1920x1080, 30 quadros (`MOTION_RENDER_FPS` no `.env`), com a duração exata da cena (cena 6 do natureza-teste-1min: 3,231 s, clipe de 3,233 s).
+  Fica em `midia/NNNN_motion.mp4`, com capa, e entra como a mídia da cena (`midia.fonte: motion_ia`, tipo
+  `video_real`); o que a cena tinha fica em `motion_reserva` (`motion_ia.desfazer` volta). O pedido do modelo fica em
+  `motion_ia/NNNN/partes.json`.
+- **Nunca para o vídeo:** falhou (sem Node, modelo fora do ar, reprovado), a cena ganha `motion_ia_falhou` (não tenta
+  de novo na mesma fala) e segue o caminho de antes: a imagem de IA se estava errada, a foto que tinha se era só nota
+  baixa (`motion_so`, sem pagar imagem).
+- **Perfil `perfis/motion-ai.yaml`: vídeo todo em Motion IA** (pedido do usuário em 2026-10-08, para o TipLabs). `motion_ia.tudo: true` no perfil (a `motion_ia.config` mistura o perfil por cima do `config.yaml`) faz toda cena com fala virar clipe de motion, sem o Jev decidir (`classificar` devolve True) e **antes de qualquer busca de foto** (`motion_ia.todas_as_cenas`, passo 2b da criação no site e `etapa_motion_total` no `tudo`; a busca pula cena que já tem mídia). Cena que falhar cai no caminho de sempre (foto de banco, depois IA). O perfil desliga as animações em camada. Aparece na lista de perfis do site.
+- **Estilo "colagem Vox" e perfil `perfis/motion-vox.yaml`** (pedido do usuário em 2026-10-08, depois de estudar três
+  vídeos de referência: o dos 5 passos do @thejplabs, o do Claude Code + Gemini Omni e o "How To Create VOX STYLE Animation
+  100% FREE"). `motion_ia.estilo: colagem` (`fabrica/motion_estilo.py`) põe por cima do esqueleto, sem mexer nos desenhos:
+  jornal envelhecido (manchas, anel de café, colunas, curvas de mapa, peças de jornal rasgadas, grão de papel em
+  `multiply` e vinheta), paleta contida (preto, vermelho de tinta, azul-tinta, bege; amarelo só na fita), cards como folhas
+  de papel com fita, entradas em degraus (`back.out` vira `steps(7)`, "cortar de dois em dois quadros") e **câmera travada,
+  sem zoom** (o prompt do vídeo estudado manda `camera: static, locked off`). Os ids e classes do estilo não podem
+  repetir os dos desenhos (o `#m-papel` da tipografia já colidiu com o fundo). Trocar o ease depois de criar o movimento
+  (`tween.ease(...)`) fazia o conteúdo sumir: o estilo troca no texto do js. **Desenhos de colagem de acervo**
+  (`fabrica/motion_colagem.py`, registrados no fim de `motion_modelos.py`): `documento` (folha com linhas datilografadas e
+  carimbo vermelho que bate), `barbante` (2 a 4 notas presas com alfinete, ligadas por um barbante vermelho que se
+  desenha) e `foto_recortada` (só com a foto da cena: meio-tom, fita, etiqueta preta e carimbo ligado por barbante); mais
+  `topicos`, `contraste` e `marco` (sem número e sem foto). O diretor de arte nunca os proíbe (`SEMPRE_PERMITIDOS`). Fonte
+  datilografada fica para depois: só temos Inter e Playfair (OFL) na pasta de fontes.
+- **Onde ele não entra:** a conferência do Jev não julga o clipe (`corrigir.conferiveis`), a animação em camada não
+  vai por cima dele (`animacoes.elegivel`, e `animacoes._fora_do_motion_ia` para a camada de uma cena anterior no
+  começo do clipe: a frase da cena 5 do natureza-teste-1min, com o véu escuro, cobria o clipe da cena 6), e ele não vai para os créditos. No editor a cena mostra o selo
+  **"Motion IA"** na lista e no cartão Origem Visual, e pode ser trocada como qualquer outra.
+
+## animation-ai (cenas animadas de modelo pronto, complemento das fotos)
+
+`fabrica/animation_ai.py`, `fabrica/recursos/animation_ai/motor.js` e `motor.css`, pedido do usuário em 2026-10-09
+depois de estudar o concorrente (Pipeline Canal Dark), que monta o vídeo com 24 modelos de cena animada em HTML.
+**Reimplementado do zero** (a licença dele proíbe copiar o código; não trazer trechos de lá). **É complemento, não o
+vídeo inteiro** (correção do usuário no mesmo dia: "seria complementar como o motion ai"): entra misturado com as
+fotos, logo depois do Motion IA (`etapa_motion` no `tudo`, passo 6c da criação no site, `fabrica animation-ai NOME`).
+Não existe perfil de vídeo todo em animation-ai; não criar de novo.
+**No lugar do Motion IA** enquanto ele está fora da produção: a cena que iria para a imagem de IA vira cena animada
+se a frase dela tiver estrutura e nota alta (`imagens._motion_antes_da_ia` com `numeros`), e a imagem nem é paga.
+
+- **Candidatas** (`frases_do_video` e `estrutura`, grátis): cada frase falada (cenas do mesmo bloco até o ponto, até
+  `duracao_maxima`, 12 s) com algo que um modelo pronto mostra melhor que a foto: itens em sequência (vírgulas, a
+  `enumeracao` da cena ou a mesma palavra dita 3 vezes, "esquenta igual, engrossa igual e queima igual"), duas datas,
+  comparação, citação, definição, documento ou notícia, causa e consequência, número, ou o `visual` que o agente marcou
+  (diagrama, texto na tela, linha do tempo, mapa). Narração pura nem vai ao modelo. Motion IA, personagem, imagem ou
+  prompt da pessoa ficam de fora.
+- **Decisão e plano numa chamada** (`decidir`, grátis pela cadeia de principais): o modelo lê a fala, as vizinhas e o
+  que a foto de hoje mostra (`conferencia.legenda`), dá a nota de utilidade (0 a 100) e, se valer, escolhe um dos 19
+  tipos de conteúdo (`DE_COMPLEMENTO`: numero, lista, checklist, passos, comparar, barras, linha_do_tempo, citacao,
+  definicao, cartoes, destaques, fato, porcentagem, antes_depois, ranking, causa_efeito, proporcao, documento,
+  manchete) e escreve os textos curtos com a `palavra` da fala de cada item. **Nunca HTML.** abertura, capitulo,
+  frase, pergunta e encerramento (texto da fala sobre fundo) só existem nas cenas pedidas com `--cenas`. O código
+  confere (`conferir`): campos, tamanho, número e palavra que a fala não diz (uma de folga), travessão, item de
+  comparar igual ao título do lado; reprovado volta uma vez com os erros. Fica em `animation_ai/decisoes.json` pela
+  fala; mudou as instruções, suba `VERSAO_UTIL`.
+- **Pouca, curta e visual** (pedido do usuário em 2026-10-25: "muitos motion e muitas cenas longas", "animações nas
+  cenas sem imagens e com muitos textos, a ideia é ser visual"). Medido no everything-you-need-to-answer: 24 trechos,
+  15% do vídeo, 15 deles acima de 7 s (até 11,8 s), 5 sem nenhuma foto e 17 sem a foto de fundo, e 6 com frases
+  inteiras nos itens ("Not a case against Tesco as a business").
+  Agora: trechos de até `duracao_maxima` (7 s, alvo 5); no lugar do motion, teto de `maximo_no_lugar_do_motion` (10%)
+  com `intervalo_no_lugar_do_motion` (20 s; antes 25% e sem intervalo); nenhuma nos primeiros `inicio_sem_animacao`
+  (40 s); **cena animada sem foto não entra** (`exigir_imagem`, `tem_imagem`, `SemImagem` em `gravar`: fundo, foto de
+  item ou de lado; só no complemento, as pedidas com `--cenas` entram), e a imagem de IA da própria cena serve de fundo
+  (`_foto_da_cena`, crédito sem fonte); item de lista com no máximo `PALAVRAS_POR_ITEM` (5) palavras e 36 letras, o
+  nome da coisa, nunca uma frase (cartões e documento ficam fora da conta de palavras). `VERSAO_UTIL` 3.
+- **Cadência** (`escolher`): nota de `limiar` (70) para cima, as maiores primeiro, até `maximo_do_video` (6% da
+  duração, contando os clipes do Motion IA; eram 12%) e a `intervalo_minimo` (30 s; eram 20) de outra cena animada ou clipe de motion.
+  No leite (2,9 min), 15 frases candidatas, 3 com nota alta, 1 entrou: a lista de marcas começava colada num clipe de
+  motion e o checklist do fim passava do orçamento.
+- **Tempos** (`resolver_tempos`): o Python acha o segundo de cada palavra no `alinhamento.json` e manda pronto à
+  página, 0,12 s antes da palavra. **A tela nunca fica só com o fundo**: o elemento principal entra em até 1 s
+  (`PRIMEIRO`); com título na tela, o 1º item pode esperar 2,5 s. Os sons (pop, risco, baque, contagem) saem das mesmas
+  entradas (`sons`), num wav por trecho que o render põe (`sons_na_linha`).
+- **Desenho** (`motor.js`): `quadro(t)` é função pura do tempo (câmera que assenta e aproxima 3%, tremor curto no
+  impacto, entradas sobe/esquerda/direita/escala/impacto/risca, contagens, barras, anéis, linhas que se desenham). O
+  HyperFrames grava quadro a quadro por um relógio do GSAP de 0 a dur. Nada de animação em CSS, sorteio sem semente ou
+  relógio. Texto comprido encolhe até caber (`data-fit`), de novo quando as fontes carregam. Área livre de 150 a 1770
+  px e de 100 a 800 px; embaixo, a legenda. Decoração grande é SVG, não texto (o "?" de 1.100 px da pergunta saía da
+  tela e reprovava). Temas em `TEMAS` (noite, editorial, misterio; `cores` por cima); o nome do canal no canto vem de
+  `animation_ai.canal`. O `motor.js` entra na assinatura: mudou o desenho, os trechos são gravados de novo.
+- **Tema `impacto`, o padrão desde 2026-10-13** (pedido do usuário: as animações estavam "fraquinhas, sem sal"; queria
+  "uma animação de verdade" como os vídeos de referência; o protótipo em `teste-estilos/prototipo` foi aprovado e virou
+  modelo fixo). Motor próprio, `recursos/animation_ai/motor_impacto.js` e `.css` (`montar_html` e `assinatura` escolhem
+  pelo `_motor` do tema, `e_impacto`): fundo quase preto com a foto da cena atrás andando devagar, letra gigante em
+  Inter 900, destaque em caixa amarela `#FFD23F` (vermelho `#FF4D3D` no segundo), brilho, vinheta, grão e flash. Seis
+  receitas cobrem os tipos (`QUAL` no motor): `heroi` (número que conta subindo ao lado da foto), `frase` (palavras
+  entrando no tempo da fala), `baralho` (cartões com foto que se empilham, os de trás escurecidos por película),
+  `comparar` (dois lados com foto), `ligacao` (causas ou datas em cartões ligados por linha a um cartão de destino) e
+  `titulo`. O modelo só escolhe tipo que tem receita (`TIPOS_IMPACTO`, `tipos_do_tema`). As fotos vêm de
+  `fotos_impacto`: a foto que a cena já tinha vai para `dados["fundo"]`, e cada item ou lado ganha a foto da coisa que
+  cita (`COM_FOTO_IMPACTO`). O texto encolhe para caber (`cabe`), medido sem as transformações de entrada: medido no
+  ponto de partida (1,3 vez maior, deslocado), tudo encolhia até o mínimo. Os contadores são medidos com o valor
+  final. Todo texto leva `data-layout-allow-overlap` (fica de propósito sobre foto e película) e a conferência de
+  contraste segue valendo. `tema: apple` (ou outro) no `config.yaml` volta ao motor de antes.
+  Os sons do impacto saem de `sons_impacto` (os momentos de cada receita: o baque no soco e no flash, o risco no
+  cartão que chega). Foto de item: a foto da cena vai para o item que ela mostra (`_combina` com a legenda da visão,
+  a busca e a fala), não para o primeiro que cai nela. No impacto (`fotos_impacto`): vale a foto achada mesmo
+  sozinha (`minimo=1`; com o mínimo de 2 a foto achada se perdia e os cartões saíam vazios), vários itens na mesma
+  cena e a foto não mostra nenhum, ela não vai para cartão nenhum (`exigir_combina`), e sem foto própria em nenhum
+  item a do fundo vai só para o cartão do item que ela mostra (cena 34 do brasil-selvagem: "bichos-preguiça" saía
+  sobre o macaco-prego). Cartão sem foto é um cartão de texto desenhado (`.card.vazio`: faixa e brilho da cor de destaque, o texto
+  no meio); até 2026-10-14 levava a foto do fundo desfocada, e na tela parecia imagem quebrada ("as imagens estão
+  foscas"). O fundo dos cartões, do comparar e da ligação tem desfoque de 8 px (eram 18 a 22, e o vídeo todo
+  ficava fosco). O destino da ligação sem foto própria fica sem cartão, só a frase. Texto dentro de cartão entra
+  com o `curto` (26 px): os 70 px do `sobe` passavam da borda. O comparar aceita o nome do lado em `texto` (o modelo
+  às vezes manda assim, e os títulos sumiam; o motor.js também só lê `titulo`).
+- **Desenhos pelo material da cena: quadro, mapa e curiosidade** (`DESENHOS_DO_MATERIAL`, `material_do_trecho`,
+  `R.quadro`, `R.mapa` e `R.curiosidade` no `motor_impacto.js`; pedido do usuário em 2026-11-17, do vídeo dos "4
+  agentes": "ao invés de aparecer animações com fundo branco, apareceria uma cena/material de pinturas antigas, mapa...
+  não é substituir, é somar"). O material vem do que a visão descreveu da foto que vira o fundo (a primeira cena do
+  trecho com foto, como em `fotos_impacto`): "O que é" com pintura, gravura, litografia... é **pintura**; "O que é" com
+  mapa (e tipo "mapa ou grafico", nunca só gráfico) é **mapa**; mídia de vídeo é **video**.
+  - **O visual antigo só em trecho que fala do passado** (`trecho_antigo`, pedido do usuário no mesmo dia: "mapas e
+    ideias de animações antigas, somente para partes antigas faladas no roteiro; datas mais atuais, dados universais
+    atuais"). Antigo é a `epoca` que o agente marcou na cena (`midia.e_de_epoca`) ou um ano antes de 1950 com
+    preposição ("em 1539", "desde 1875"; "1500 metros" não conta), século até o XIX ou Idade Média dito na fala.
+    **Pela fala, nunca pela foto**: um mapa antigo num trecho sobre hoje sai com o visual de hoje.
+  - **quadro**: a pintura numa moldura dourada, na parede de um museu sob a luz, com a placa ao lado (o ano no
+    `kicker`, o texto em serifa, o número em dourado). Só em trecho antigo; pintura num trecho de hoje segue nos
+    desenhos de sempre.
+  - **mapa**: o mapa inteiro na tela, andando devagar, e os lugares ditos numa **legenda ao lado**, cada um no segundo
+    da palavra dele. **Nunca um nome num ponto do mapa**: os pontos não sabem onde fica cada lugar (no teste com o mapa
+    do Reino Unido, "Escócia" caiu sobre a Irlanda e "Irlanda" sobre a Dinamarca). Trecho antigo (`_antigo`): sépia,
+    rota decorativa em tinta vermelha sem nome, rosa dos ventos e pergaminho. Trecho de hoje: o mapa nítido, sem rota,
+    a legenda e a frase em caixas escuras com a cor de destaque. Vale para frase, número, linha do tempo, causa e
+    efeito e lista de 2 a 4 itens.
+  - **curiosidade**: a foto ou o **vídeo real** da cena na tela inteira (`fundo_video`, cortado por `_video_de_fundo`;
+    o HyperFrames toca o `<video>` quadro a quadro), o texto grande em caixa alta em cima e a palavra em destaque em
+    amarelo (`escreve(..., realce: "cor")`); o número, gigante. No impacto ele entra no rodízio da frase e do herói
+    (`desenhos_possiveis`); com o vídeo real da cena, ele vem primeiro.
+  - **Em qualquer estilo** (`gravar`): num canal de outro estilo (o `apple` dos perfis motion-ai e motion-vox, de fundo
+    claro), a cena de pintura, mapa ou vídeo real é desenhada pelo motor do impacto; as outras seguem no estilo do
+    canal. Tipo sem receita no impacto (barras, gráfico de linha) nunca vira quadro.
+  - Os três mostram só o material: a busca da foto de cada item é pulada (`fotos_impacto(itens=False)`), senão as
+    fotos iriam para os créditos sem aparecer. O material é conferido de novo na gravação (a foto pode ter mudado).
+  - **Sem material na hora de decidir, não entra**: no perfil de vídeo todo em animação (`video_todo`) as cenas ainda
+    não têm foto, então seguem com os desenhos de sempre.
+  - Conferido no `hyperframes check` em 7 casos (quadro com frase e número, mapa com frase e linha do tempo,
+    curiosidade com foto, número e vídeo) e gravado pelo caminho real numa cópia do teste-animacao-1min no estilo apple.
+- **Cenas animadas depois de renumerar** (2026-10-13, no teste do impacto no brasil-selvagem): narrar de novo
+  renumera as cenas e o `anim_trecho` fica com os números velhos (a cena 61 com o trecho 66 a 69). Pelos números, 41
+  dos 45 trechos ficavam sem regravar e sem som no render, e regravar dava o plano às cenas erradas. Agora o grupo
+  sai de quem carrega a mesma lista (`trechos_animados`, usado no `regravar`, nos sons e na direção); o plano diz de
+  quais cenas é (`partes.json`, `cenas`) e só vale para elas (`_partes_do_trecho`); a pasta do plano não apaga a de
+  outro trecho que alguma cena ainda mostra (`_pasta_para_gravar`: 0100_2); e o arquivo do clipe nunca pega o nome
+  de um que outra cena usa (`midia.nome_livre`: a cena 34 nova gravava por cima do `0034_anim.mp4` da cena 33).
+- **Tema `apple`, o padrão até 2026-10-12** (pedido do usuário em 2026-10-10: "o mesmo estilo visual de cores estilo APPLE que o
+  motion ia utilizava, para ficar elegante e com qualidade"): os valores do esqueleto do Motion IA, creme `#F7F6F2`
+  com pontos de 24 px, cards brancos de raio 20 sem borda com a sombra `0 12px 32px rgba(0,0,0,.06)`, título em Inter
+  grafite, destaque em Playfair itálica azul `#2563EB`, laranja `#EA580C` e verde `#166534`. O jeito de mexer vem do
+  tema (chaves com `_` em `TEMAS`, `E` no motor.js): cards flutuando 5 px fora de fase (pelo `translate` do CSS, que
+  não briga com a entrada), entrada em mola (sobe 40 px e cresce de 0,92 com back.out), o impacto vira mola, sem
+  tremor, e a câmera só aproxima 3%. Os outros temas (noite, editorial, misterio) seguem como eram.
+- **Quadro morto** (`animation_ai.quadros_mortos`, 2026-10-12, ideia do motionmaxxing): depois de gravar, o clipe é
+  medido quadro a quadro (96x54 em cinza, diferença média abaixo de 0,02 = o mesmo quadro). Reprova tela parada por
+  mais de 0,8 s no começo ou no meio, ou por mais de 2,5 s no fim (`MORTO_NO_MEIO`, `MORTO_NO_FIM`). **Os limites são
+  medidos, não os do concorrente** (3 quadros): nos 167 clipes reais do brasil-selvagem o maior trecho parado no meio
+  foi 0,43 s e no fim 0,73 s; com 3 quadros quase todo clipe bom reprovava. Reprovado = a cena fica com a foto, como
+  qualquer falha de gravação. A medida nunca derruba a produção.
+- **240 modelos prontos: 30 layouts x 8 estilos** (2026-10-13, pedido do usuário: "mais de 200 modelos prontos";
+  escolhido por ele: layouts x estilos, não 200 layouts soltos). **Layouts**: os 24 de antes e 6 novos, das categorias
+  de tipografia, dados, abertura e entrada de cartões do video-shotcraft (Apache-2.0; só a ideia, o código é nosso):
+  `palavra_chave` (as letras chegam girando e montam a palavra, com palavras de apoio), `medidor` (mostrador de ponteiro
+  com contagem), `grafico_linha` (a linha se desenha ponto a ponto, na palavra de cada valor), `deslizar` (régua que
+  revela o "depois"), `revelacao` (título que se materializa com um brilho que passa) e `pilha_cartoes` (cada cartão
+  cobre o anterior). `palavra_chave` e `revelacao` são só do modo de cenas pedidas (texto sobre fundo); os outros 4
+  entram no complemento. **Estilos** (`TEMAS`, `animation_ai.tema`, `--tema`): `apple`, `noite`, `editorial`, `misterio`
+  como eram (saem iguais: não definem `_fundo`, `_entradas`, `_cameras` nem `_saidas`) e 4 novos: `neon` (HUD ciano e
+  magenta, grade em perspectiva e linhas de varredura), `riso` (papel com grão e duas tintas fora de registro),
+  `blueprint` (planta azul milimetrada com marcas de registro) e `cinema` (filme quente com luz que vaza, vinheta e grão).
+  Cada estilo novo traz fundo animado em canvas, jeitos de entrar (`scan`, `glitch`, `carimbo`, `traco`, `desfoca`), de
+  mexer a câmera (`soco`, `tilt`, `derivar`, `assentar`) e de sair (`wipe`, `iris`, `flash`, `fade`). **O estilo é do canal**
+  (coerência do vídeo); dentro dele a cena escolhe entre as entradas, câmeras e saídas pelo número dela (`variante`, o
+  número da primeira cena do trecho), então as cenas não se repetem. A variante só entra na assinatura dos estilos que
+  variam. Fundo, grão e brilho são desenhados no canvas (nada por cima do texto: a conferência do HyperFrames lê uma
+  camada translúcida por cima como cobertura); camada que se cobre de propósito leva `data-layout-allow-overlap` e
+  `data-layout-allow-occlusion` (`PERMITE`). O grão e os riscos usam `hash(quadro)` e o sorteio tem semente: o quadro X
+  sai igual em toda gravação. `fabrica animation-ai NOME --catalogo --tema neon` desenha a folha de um estilo; o quadro
+  é o de 4,8 s (aos 5,8 s a cena já está saindo). Mudou o desenho, suba `VERSAO` e confira todos pelo `hyperframes check`.
+  **Conferido** (o mesmo `hyperframes check` que a gravação usa, `animacoes._conferir(clipe=True)`): os 30 layouts nos 4
+  estilos novos (variantes 0 e 1) e nos de antes, 0 reprovados no fim. O que a conferência achou e foi corrigido, para
+  não voltar: seta da régua era texto (contraste) e virou desenho; o brilho do título cobre o título (marcado como camada
+  intencional, filhos incluídos); o soco de `impacto` levava o capítulo para fora da tela (`x.smax`: o elemento cresce em
+  volta do centro, então o limite vem da folga até a borda; era erro **antigo**, também em noite e misterio); câmeras
+  `derivar` e `tilt` aproximam no máximo 3% (a linha do tempo chega a 1880 px); `riso` tinha cor rosa e sombra de tinta
+  no texto abaixo do contraste (virou `#E11D48` e a sombra de tinta ficou só nos cartões); papel claro com vermelho claro
+  (`verm-papel` no blueprint e no noite, `botao` e `botao-clicado` no blueprint); a vinheta do misterio caiu de .7 para
+  .5 (a conferência lia a camada escura como cobertura do texto, como no noite com .55); o cartão da pilha é opaco
+  (`--painel2`), senão o texto do cartão de baixo aparecia atrás.
+- **Gravação**: `hyperframes check`, MP4, um pedaço por cena (`midia/NNNN_anim.mp4`), `fonte: animation_ai`; a foto
+  fica em `anim_reserva` (`--desfazer` volta e marca `anim_falhou`, que não tenta de novo na mesma fala). Reprovou ou
+  falhou: a cena fica com a foto. Nunca para o vídeo.
+- **A cena animada sempre mostra o assunto, e sem bolinha de contagem** (pedido do usuário em 2026-11-01: "mesmo
+  sendo texto, deve ter alguma imagem para apresentar o assunto do roteiro, às vezes é só borrão sem nem texto" e
+  "essas bolinhas de contagem 1, 2, 3 ou 4, pode deletar, inútil"). Três mudanças:
+  - **Cada cartão busca a própria foto** (`fotos_dos_itens(..., buscar_todos=True)`, ligado por `fotos_impacto`):
+    cada cena empresta a foto a um item só, então o item que perdia a vez ficava num cartão de texto, sem nada do
+    assunto. Agora ele busca nos bancos (`_foto_do_banco`, com os mesmos filtros de espécie e de assunto).
+  - **Fundo do banco quando nenhuma cena do trecho tem foto** (fim de `fotos_impacto`): antes a cena animada saía
+    como texto sobre fundo liso. A busca é pelo pedido da cena, e o crédito vai para o `creditos.txt`.
+  - **Menos véu e menos desfoque sobre a foto do fundo** (`motor_impacto.js`, `.escuro` e `.escuro.forte` no
+    `motor_impacto.css`): o desfoque caiu de 8 para 5 (16 para 10 no herói) e o véu de .55 para .38, porque a foto
+    virava um borrão escuro atrás do cartão. Os títulos que ficam sobre o fundo ganharam `sombra-txt` para o
+    contraste seguir passando — os 30 layouts passam no `hyperframes check` (`--catalogo`).
+  - **Sem o selo numerado** (`simboloDe`, `numerado` e a classe `.contador` saíram): lista, passos, ranking e pilha
+    de cartões não levam mais 1, 2, 3; só a marca que diz alguma coisa (✓, ✕, ★, !). **Não trazer de volta.**
+  - **As duas regras valem nos 8 estilos, não só no impacto** (2026-11-01, no `animacoes-serra-5min`, 5:37 todo em
+    animação): a correção acima tinha mexido só no `motor_impacto.js` e em `fotos_impacto`, então nos outros estilos
+    a cena animada continuava sem foto nenhuma e com as bolinhas 1, 2, 3. A checagem do vídeo pronto achou 7 trechos
+    de tela preta (misterio e cinema, texto branco sobre nada). Agora:
+    - `animation_ai.fundo_da_cena` roda no `gravar` de todos os estilos: a foto que alguma cena do trecho tinha e,
+      sem nenhuma, uma do banco pelo pedido da cena (`_fundo_do_banco`, extraída do fim de `fotos_impacto`).
+    - o `motor.js` desenha a foto atrás de tudo (`.foto-fundo`, `FOTO`) e a cor do estilo entra por cima como véu, na
+      camada de CSS (`.fundo.com-foto`) ou no preenchimento do canvas dos estilos novos: as cores e o contraste
+      seguem os do tema. **O véu foi medido no `hyperframes check`**, que reprova o que não passa: no misterio o
+      destaque da cena 46 deu 1,7 de contraste com 0,68 e 2,5 com 0,78, e passa com **0,86**. Estilo de fundo claro
+      (apple, riso, editorial; decidido pela luminância de `--fundo`, acima de 140) precisa de **0,93 mais a foto
+      clareada** (`.foto-fundo.clara img`, `saturate(.55) brightness(1.5) contrast(.62)`): o texto é escuro e um
+      trecho escuro da foto derruba o contraste mesmo aparecendo só 7% ("Soja" do riso, 2,68 com 0,86 e 2,93 com
+      0,93 sem o clareamento). **Efeito colateral aceito:** nesses três estilos a foto do fundo fica quase invisível,
+      e o assunto aparece pelas fotos dos cartões. Para mostrá-la ali, o caminho é um painel claro atrás do texto.
+    - o `motor.js` perdeu os números de `lista` (o `.selo`), de `passos` (o `.num`, a seta já diz a ordem) e de
+      `ranking` (o "1º", a ordem das faixas já diz).
+  - **Desfazer animação nunca deixa a cena vazia** (`animation_ai._ficaria_vazia`, no `_planos_conferidos`): o plano
+    guardado que não passa mais na conferência é pedido de novo e, sem plano novo que passe, a animação era desfeita
+    e a cena voltava ao que tinha antes. Em cena que nunca teve foto (vídeo todo em animação) não há nada para
+    voltar: as cenas 55 e 56 do animacoes-serra-5min ficaram vazias e o render parou com "Faltam imagens ou vídeos de
+    2 cenas". Agora, quando desfazer deixaria a cena sem nada (sem arquivo em `anim_reserva` e sem imagem numerada),
+    **o clipe que já está no vídeo fica**. O código só anotava quais ficariam vazias e seguia.
+  - **O `--regravar` respeita o `--tema`** (`cli.cmd_animation_ai`): o estilo não vem do plano guardado, vem da linha
+    de comando, e ele era aplicado depois do bloco do regravar. Gravar de novo as cenas do misterio as devolvia em
+    apple, sem ninguém pedir.
+- **Quatro defeitos achados vendo o vídeo pronto** (2026-11-02, de uma análise quadro a quadro do
+  `animacoes-serra-5min` que o usuário trouxe; todos do motor, nenhum do modelo):
+  - **Valor sem número saía duplicado** (`_partes_do_numero`): sem nenhum algarismo, ela devolvia o texto inteiro no
+    SUFIXO, e o `valor` ficava com o mesmo texto; o motor desenha prefixo+valor+sufixo e a tela mostrou
+    "centavoscentavos" e "uma fortunauma fortuna" (cenas 31 e 32). Sem número, o sufixo vem vazio.
+  - **A unidade acompanha o número que conta** (`_singular`, `sufixo_um`, `span.unidade` no `motor.js`): contando até
+    "2 anos" a tela mostrava "1 anos" (cena 85). "meses" -> "mês", "milhões" -> "milhão"; "%" e "km" ficam como estão.
+  - **O ✕ vermelho era o PADRÃO do `destaques`** (`motor.js`, `s.marca || "errado"`): o modelo não pede marca em
+    quase nenhuma cena, então "Fogo", "Carne", "Ferramenta" e "Cultivado com paciência" saíam marcados como erro
+    (cenas 36 e 105). O padrão virou a estrela; o ✕ só quando o modelo pede de propósito.
+  - **A abertura do vídeo era reprovada por não ser a abertura** (`_planos_conferidos`): o `--regravar` conferia todo
+    plano guardado com `posicao=1`, e a regra "'abertura' só no primeiro trecho" derrubava justamente a abertura
+    verdadeira; a cena 1 perdia o plano certo a cada regravação. A posição real vem de `trechos_animados`.
+  - Junto: **unidade comprida ganha linha própria** (`longa` no `numero` do `motor.js`), porque "milhões de
+    toneladas" não cabia ao lado do número nem encolhendo até o mínimo e reprovava no `text_box_overflow`.
+  - **O que ficou de fora:** foto que CONTRADIZ a fala ("nunca em pé" com facas em pé, "cachaça de alambique" com
+    uma garrafa de whisky). A foto das animações é escolhida pela cadeia de visão, mas ninguém julga se ela nega o
+    texto. Barrar por palavra-chave erraria muito; o caminho é o Jev julgar a foto da animação como julga a de cena.
+- **Foto em cada item** (`fotos_dos_itens`, pedido do usuário em 2026-10-11: "mostrar cenas do banco de imagens
+  junto com esses motion, para as palavras não ficarem soltas"; a lista do ninho, da castanheira e da sumaúma era só
+  texto). Em lista, checklist e destaques, a foto da coisa citada entra junto com o item, numa pilha de fotos soltas à
+  direita (o texto vai para a metade da esquerda); em cartoes, a foto fica no alto de cada card. A foto é a que a cena
+  em que a palavra do item é falada já tinha (de graça, já julgada; nunca a `errada` nem a suspeita sem julgamento);
+  sem ela, busca nos bancos pelo pedido da cena (`_foto_do_banco`): bicho só com a própria espécie nas tags
+  (`_cabeca_do_animal` ou o gênero científico; com "bird" bastando, um urutau entrou como filhote de harpia), quem
+  cita a espécie inteira na frente, e a visão escolhe com o `aceitavel` da cena (nunca pessoa, luva ou zoológico que
+  o item não cita). Cada cena empresta a foto a um item; menos de 2 fotos, a lista fica só com texto. Guardado em
+  `animation_ai/NNNN/fotos.json` (`VERSAO_FOTOS`), crédito em `anim_fotos` da cena (vai para o `creditos.txt`). A
+  conferência recusa dois itens com o mesmo texto. `fabrica animation-ai NOME --regravar [--cenas N...]` grava de
+  novo as cenas animadas que existem, com o plano delas, sem perguntar ao modelo (só as cenas que ainda são animação:
+  a trocada no editor fica).
+- Tratada como o Motion IA: o Jev não julga, a camada de animação não cobre, fica fora das repetidas, selo
+  "Animation IA" no editor e na nota do vídeo. Nos créditos, só as fotos dos itens.
+- **Cenas pedidas** (`fabrica animation-ai NOME --cenas N...`, `fazer`): anima essas cenas sem perguntar se vale, com
+  os 30 tipos, em trechos de `duracao_alvo` (8 s); variedade cobrada (frase, pergunta, palavra_chave e revelacao no máximo um terço, o mesmo tipo
+  nunca 3 vezes seguidas), planos em `animation_ai/planos.json`; desenho reprovado vira a frase da fala.
+  `--catalogo` desenha um quadro de cada tipo, grátis.
+
+## direção (cenas dirigidas: câmera, tipografia cinética, formas, 3D, deitadas e em pé)
+
+`fabrica/direcao.py`, `fabrica/recursos/direcao/` (`direcao.js`, `direcao.css`, `DIRETRIZES.md`), pedido do usuário em
+2026-10-12: sair do "slide de PowerPoint" e do modelo pronto. **Não é um segundo sistema de gravação**: é uma camada
+em cima do animation-ai (mesmo HyperFrames, mesmas conferências, mesmo `_aplicar`, `regravar`, `desfazer` e som).
+`animation_ai.gravar` desvia o plano de tipo `dirigida` para `direcao.gravar`. Uma gravação com Puppeteer própria
+foi descartada de propósito: o HyperFrames já é Puppeteer + Chrome escondido + FFmpeg, quadro a quadro, e aceita
+`--fps 60` e telas deitada e em pé.
+
+- **Comando:** `fabrica direcao NOME --cenas N... [--formato horizontal|vertical|ambos] [--fps 60] [--spec arq.json]
+  [--forcar]`; `--refinar "frase"` e `--desfazer-ajuste` ajustam uma cena já dirigida. Grátis (cadeia de principais).
+  **Não entra sozinha na criação**: o complemento automático continua com os modelos prontos do animation-ai (30 layouts x 8 estilos).
+- **O modelo escreve a direção em JSON, nunca HTML** (regra do projeto, Animações): paleta (8 nomes ou cores hex), ritmo,
+  cenário (partículas, grade, pontos, ondas, raios), câmera (2 a 8 marcações, por segundo ou por palavra falada) e até 7
+  camadas (`texto`, `forma` que vira outra, `numero`, `card3d`, `linha`). As diretrizes (`DIRETRIZES.md`) vão inteiras
+  no pedido e entram na assinatura do plano guardado (`direcao/planos.json`): mexeu nelas, os planos são pedidos de novo.
+- **Conferência** (`direcao.conferir`, o que reprova volta ao modelo, até `animation_ai.tentativas`; sem acerto vai
+  `direcao_de_reserva`, que sempre passa): câmera que nunca para (zoom 0,85 a 1,7, giro até 8 graus, deslocamento até
+  15%), no máximo 3 textos (90 letras, 12 palavras), 1 `card3d`, 2 formas, texto só com palavras e números da fala, sem
+  travessão, e o jeito da cena (paleta, cenário, entrada) diferente do da anterior.
+- **Colisão e loop** (`direcao.colisoes`, `caixa_da_camada`, depois do primeiro teste real, 3 cenas do leite, 2026-10-13):
+  o diretor pôs o texto `xl` no centro e um quadrado embaixo, e "caros" saiu escrito em cima do quadrado (a conferência do
+  HyperFrames só compara texto com texto), e ligou `loop` numa cena que segue para a próxima. Agora o código estima o
+  espaço de cada camada nos DOIS formatos (mesmas âncoras e tamanhos do direcao.js) e recusa texto que passa de 8% da
+  menor camada em cima de forma, número, cartão ou outro texto; `loop` só passa com `permite_loop` (o refinamento). As
+  tabelas `ANCORAS` e `TAMANHO_DA_LETRA` do Python espelham `ANC_H`, `ANC_V` e `TAM` do JS: mudou um, mude o outro.
+  Com o Dots (Groq sem cota no dia), o diretor errou o lugar 3 vezes e caiu na direção de reserva: a qualidade da direção
+  depende do modelo; com modelo fraco a cena sai simples, não quebrada.
+- **Tipografia cinética pela fala** (`direcao._tempos_do_texto`): cada palavra do texto entra no segundo em que a fala
+  chega nela, em sequência (palavra a mais de 2,5 s da anterior, como um "de" repetido, entra logo depois da anterior). A
+  primeira camada entra em até 0,8 s. A forma que vira outra (`morph`) começa na palavra dela; sorteio só com semente.
+- **Determinismo conferido**: `quadro(t)` é função pura do tempo; o sorteio é `mulberry32(semente)`; a vinheta e o fundo
+  são desenhados no canvas, e os elementos que respiram usam voltas inteiras por cena (o fim emenda no começo).
+  Gravado duas vezes, os 420 quadros (horizontal e vertical, 60 fps) saíram idênticos (`framemd5`).
+  `tests/test_direcao.py` proíbe `Math.random`, relógio e animação em CSS no motor; com `FABRICA_TESTES_LENTOS=1` ele
+  grava duas vezes e compara os quadros.
+- **Em pé é recomposição, não corte** (`direcao.js`: `ANC_H`, `ANC_V`, `TAM`): `esq` e `dir` viram um em cima do outro,
+  as letras mudam de tamanho, `pos_v` e `de_v`/`para_v` dão outro lugar só em pé, e o texto nunca sai da área segura
+  (14% de cima e 30% de baixo em pé; encolhe com o maior zoom da câmera, senão o texto da ponta invadia o nome do canal).
+  A mesma especificação grava `NNNN_anim.mp4` e `NNNN_anim_vertical.mp4`; `render.origem_da_cena(vertical=True)` usa o
+  clipe em pé e `_entrada_video` não o corta nem o põe sobre fundo desfocado.
+- **60 quadros**: o clipe sai a `animation_ai.direcao.fps` (60). **O vídeo final só fica em 60 se `render.fps` for 60**:
+  um MP4 tem um ritmo só, então "60 só nas cenas animadas" não existe; a gravação a 60 com render a 30 desce para 30 no
+  `fps=` do render. Mudar o `render.fps` renderiza todos os clipes do projeto de novo. Medido (RTX 2060): 7 s de cena a 60
+  fps levam uns 40 s deitada e uns 40 s em pé.
+- **Quadro morto** vale também aqui (`animation_ai._reprovado_por_quadro_morto`): compara de 1/30 s em 1/30 s, para o
+  limite em segundos ser o mesmo a 30 e a 60 quadros.
+- **Refinamento em linguagem natural** (`direcao.refinar`): pedidos curtos que o código entende saem na hora e sem modelo
+  ("emenda no começo" liga `loop`, "desacelera", "mais rápido", "mais suave", "cores do tema"); o resto vai ao modelo com
+  a direção atual e a nova passa pela mesma conferência (3 tentativas). A de antes fica em `direcao/NNNN/historico`
+  (`--desfazer-ajuste`). Gravou mal, a cena fica como estava.
+- **Falta**: Three.js (o 3D de hoje é `perspective` do CSS, sem biblioteca nova); ligar na criação automática (hoje só
+  por comando); o editor ainda não tem o campo de refinamento em linguagem natural; 60 fps no vídeo final exige decidir
+  o `render.fps` do projeto inteiro.
+
+## Ajustes de animação (a página Animações do Radar)
+
+`fabrica/ajustes_animacao.py`, pedido do usuário em 2026-11-07: "uma opção de configuração onde o usuário pode alterar
+cores, tipo de letras, quais animações devem ou não devem ir para o vídeo dele". A página fica no Radar (Ferramentas >
+Animações, `animacoes()` em `radar/web/app.js`) e a fábrica é quem confere e aplica.
+
+- **O conjunto:** `ativo`, `tema`, `cores` (só `fundo`, `txt`, `acc`, `acc2`), `fontes` (`texto`, `titulo`), `fundo`
+  (`foto` ou `cor`) e `tipos_fora`. `limpar` confere e devolve sempre o conjunto inteiro: um estilo novo por cima de um
+  canal com cores próprias não herda as cores do outro.
+- **Onde vale:** por canal, em `animation_ai` no `perfis/canal-*.yaml` (`POST /api/canais/animacoes`; perfil de base é
+  recusado, porque serve a vários canais); só num vídeo, em `animation_ai_override` no `projeto.json`
+  (`POST /api/projetos/NOME/animacoes`, recusado com a criação rodando), que `Projeto` põe por cima do perfil. O
+  `config_override` não serviria: em `animation_ai.config` o perfil vence o config.
+- **Sem ajuste, nada muda:** `aplicar` devolve o tema igual, e a assinatura dos clipes já gravados continua a mesma (há
+  teste). Mudou uma cor ou uma letra, o clipe grava de novo no próximo `--regravar` ou criação.
+- **Trocar o fundo ou o texto leva junto os tons que saem deles** (`aplicar`: `txt2`, `mut`, `painel`, `painel2`,
+  `linha`, e a `tinta` pelo destaque). Sem isso, os cartões de um tema escuro ficavam escuros num fundo claro.
+- **Animações desligadas:** `tipos_do_tema` tira da lista que o modelo vê (`nas_uteis` e o caminho no lugar do motion);
+  `planejar` e a camada (`animacoes.py`, por `modelos_fora`) também respeitam. **Lista vazia não pode virar o catálogo
+  inteiro**: era `tipos or DE_COMPLEMENTO`, e agora `decidir` devolve vazio. A página só lista o que o estilo tem.
+- **Fundo só na cor:** escolha explícita, contra o padrão de 2026-11-01 (a cena animada sempre mostra o assunto). Sem
+  foto atrás e sem `exigir_imagem`; os cartões seguem com foto. O padrão continua `foto`.
+- **Letras:** só fontes OFL, com a licença em `recursos/fontes`. `FONTES` diz os pesos de cada arquivo. As famílias
+  "Texto" e "Titulo" dos motores apontam para o arquivo escolhido (`css_das_fontes`), e `copiar_fontes` leva a escolhida
+  para a pasta do clipe. Hoje: Inter, Playfair Display e Poppins. Fonte nova: o arquivo, o `OFL-NOME.txt` e a linha em
+  `FONTES` (um teste cobra a licença).
+- **Prévia** (`previa`, `GET /api/animacoes/previa`): a mesma página da gravação (`montar_html`), tocando no navegador,
+  sem gravar nem gastar, com os `EXEMPLOS` e uma paisagem desenhada no lugar da foto. Parada num quadro, para a galeria,
+  por `window.quadro`, nunca `tl.seek`: no `motor.js` o desenho vem do `onUpdate`, que o seek não dispara.
+- **Conferência** (`conferir`, `POST /api/animacoes/conferir`, grátis, uns 40 s): o mesmo `hyperframes check` da
+  gravação, em 4 animações. Serve porque, na produção, a cena reprovada volta para a foto sem ninguém ver. Medido: noite
+  com fundo #F2F2F2 reprovava por contraste; apple com Poppins e misterio só na cor passam. Roda em
+  `projetos/_conferencia_animacoes`, sem `projeto.json`, então nenhuma lista de projetos a mostra.
+- **Fica de fora de propósito:** a quantidade de animações e os 40 s sem animação no começo, regras da fábrica pedidas
+  pelo usuário. As cenas dirigidas (`direcao.py`) e o Motion IA pausado não leem estes ajustes.
+- **Estilo novo em `TEMAS` ou animação nova em `CATALOGO`:** precisa de nome em `TEMAS_INFO` e `TIPOS_INFO` e de um
+  exemplo em `EXEMPLOS`, senão a página fica sem ele (um teste reprova).
+
+## Rabisco tremido nas fotos
+
+`fabrica/efeitos_foto.py`, seção `efeitos_foto` no `config.yaml` (fora da seção `render` de propósito: os ajustes dela
+entram no nome de todo clipe). Pedido do usuário em 2026-11-17, de um vídeo de "16 efeitos que o Claude cria": um
+contorno amarelo à mão se desenha em volta da pessoa da foto e treme (o traço é redesenhado com outro tremor a cada 3
+quadros, como animação feita à mão), por cima do movimento lento de sempre.
+
+- **Só o rabisco ficou.** Seis efeitos foram feitos e testados (recuo que revela, camadas em profundidade, quebra de
+  moldura, rabisco, celular e zoom que atravessa); o usuário aprovou só o rabisco ("único que eu aprovo é o rabisco, o
+  resto pode remover"). **Não trazer os outros de volta sem ele pedir.** Escolha antiga de um efeito que saiu não
+  muda o nome do clipe (`assinatura` vazia).
+- **Só em foto com uma ou duas pessoas**, achadas por uma detecção própria e exigente (`_rostos`: YuNet com confiança
+  0,88, rosto inteiro dentro da foto e com 6% da largura ou mais; roda só nas fotos em que o `rostos.py`, com 0,7, já
+  achou alguém). Medido em 7 fotos: rostos de verdade de 0,89 a 0,92; falsos (mãos segurando uma tampa, uma taça de
+  vinho) de 0,74 a 0,82, e com 0,7 o laço saía em volta de nada. Foto de grupo e gente pequena ficam fora.
+- **Animal ficou de fora, de propósito.** Sem detector, o GrabCut pegava o fundo (na cena 9 do teste-animacao-1min, a
+  água em vez da água-viva), e nem cor nem forma do recorte separavam o certo do errado. Conferir cada recorte com a
+  visão gratuita foi testado: acertava, mas levava de 5 a 8 minutos por vídeo e parava quando os gratuitos batiam no
+  limite (o Groq recusava chaves e o OpenRouter devolvia 429). **Não pendurar o render numa IA.**
+- **O contorno**: a silhueta da pessoa quando o GrabCut (a partir do corpo abaixo do rosto e, não saindo, do meio da
+  foto) convence pelas contas e tem todo rosto dentro (`mascara`); senão, um laço à mão em volta da cabeça e dos
+  ombros (`laco`). Nos vídeos testados quase sempre sai o laço.
+- Como entra: `render._efeitos_da_linha` pede a escolha (`escolher`) e `render._clipe` grava a cena escolhida por
+  `renderizar`, quadro a quadro em numpy e OpenCV, que segue o caminho dos outros clipes (título, símbolo, visual do
+  canal). **Pouco e espaçado**: no máximo um a cada `intervalo` (30 s). Só na tela deitada, só em cena de foto inteira
+  (não cortada pelo personagem) de 2,5 s ou mais. **O nome do clipe sem rabisco não muda**: nenhum vídeo antigo
+  renderiza de novo por causa disto.
+- **Rápido**: a escolha de um vídeo de 20 min leva uns 3 s (o everything-you-need-to-answer: 5 rabiscos), e cada clipe
+  com rabisco grava em uns 7 s.
+- **Nunca para o vídeo**: falhou a escolha, ninguém ganha o rabisco; falhou o desenho, a cena sai com o movimento lento.
+
+## Texto na tela: saiu da fábrica
+
+Desde 2026-10-05, a pedido do usuário, a fábrica **não tem mais o texto na tela desenhado pelo FFmpeg** (destaque,
+lista, capítulo e rótulo, em caixas por cima da imagem). Ele ficava amador ao lado das animações do HyperFrames e caía
+por cima dos clipes de motion (na cena 11 do natureza-teste-1min, "MAIS DE 50 QUILÔMETROS POR HORA" numa caixa sobre o
+clipe dos 50 km/h). Saíram a decisão dos textos (`cenas._textos_na_tela_groq`, `refazer_textos` e o comando `fabrica
+textos`), o desenho (`textos.camadas` e os temas), o toque da trilha quando o texto entrava e a conversão do `overlay`
+do agente em texto na tela. As cenas guardam `texto_tela: None`; o de projetos antigos fica no `cenas.json`, mas o
+render não desenha e a API manda `None` ao editor. **Não trazer de volta.** O que fica: a legenda queimada, os cartões
+de título (`[TITULO]`, `textos.camadas_titulo`, com o tema e as cores de `textos_na_tela` no perfil), o símbolo do canal
+(`[SIMBOLO]`), as animações em camada e os clipes do Motion IA. `cenas._momento_falado` continua: ele põe o efeito
+sonoro no tempo da palavra.
+
+## Lixeira: excluir não joga fora o que foi pago
+
+`fabrica/lixeira.py` (pedido do usuário em 2026-10-15: "precisamos ser precisos na criação de vídeos, sem gasto à toa").
+O × do editor (`DELETE /api/projetos/NOME`) apagava a pasta inteira. No everything-you-need-to-answer o projeto
+excluído foi recriado e a produção inteira foi paga de novo: 214 imagens de IA e a escolha, a descrição e o Jev de 340
+cenas. Agora a pasta vai para `projetos/_lixeira/NOME__DATA` e volta com `fabrica restaurar NOME` (`--como OUTRO` se o
+nome já estiver em uso; sem nome, lista a lixeira). Fica 7 dias (`lixeira.DIAS`) e depois é apagada de verdade, a cada
+exclusão. A lixeira não aparece em nenhuma lista porque não tem `projeto.json`: **toda listagem de projetos tem de
+exigir o `projeto.json`**. Para refazer um vídeo do zero de propósito, restaure e use o editor.
+
+## Aprendizados do canal
+
+`fabrica/aprendizados.py`. O que a pessoa corrige no editor vira exemplo para o agente de roteiro dos próximos vídeos
+do mesmo canal (o perfil): a busca que ela digitou no lugar da do agente, a imagem que ela mesma subiu e a animação que
+ela trocou pela foto. Fica em `aprendizados/CANAL.json` (fora do Git, até 300 por canal), e as 15 mais recentes vão no
+pedido do agente como "APRENDIZADOS DO CANAL". Correção que não muda nada não entra. O texto usado num projeto fica
+congelado em `aprendizados_usados.txt`: retomar uma criação não muda o que o agente já decidiu.
+
+## Diretor (primeira ação do Corrigir Mídia)
+
+`fabrica/diretor.py`. Quando a IA está ligada, o botão Corrigir Mídia (e `fabrica diretor NOME [--aplicar]`) começa
+pelo diretor: o modelo do agente (`roteirista.modelo`, DeepSeek V4 Flash; a cadeia de principais de reserva) recebe o roteiro inteiro, o mapa e, de cada cena, a
+fala, o pedido, o aceitável, onde existe, a época, o que a imagem mostra, as notas do Jev, de onde ela veio e o que a
+revisão do vídeo pronto apontou. Ele lista só as cenas que precisam mudar: **ia** (com o prompt), **arquivo** (busca
+de época na Wikimedia) ou **busca** (nova, no banco). As buscas rodam primeiro (grátis) e são julgadas; o que continuar
+errado vai para a IA. A decisão fica em `diretor.json`. Sem frontend novo, o botão aplica sozinho e devolve no
+resultado as decisões e o que foi gerado; no terminal, sem `--aplicar` só mostra a lista e o custo.
+
+## Nota do vídeo
+
+`fabrica/qualidade.py`. Grátis (só lê as notas do Jev): porcentagem de cenas certas, cenas que mostram outra coisa,
+sem conferência, vazias, repetidas, de onde veio cada imagem (escolhida, tapa-buraco, IA, da pessoa) e por bloco. Fica
+em `qualidade.json` (com o histórico) no fim da criação, do Corrigir, do diretor e do `tudo`; aparece no `fabrica
+status` e em `GET /api/projetos/NOME/qualidade`. Serve para saber se uma mudança na fábrica melhora ou piora o vídeo.
+
+## Testes
+
+`uv run --no-sync --with pytest python -m pytest tests`: os filtros da captura e a decisão da conferência, com os casos
+reais que já deram errado (elefante de Tsavo no acampamento, zebra no leão, "Patterson" trazendo ginasta, "tranca
+quebrada" trazendo cânion). Sem rede e sem custo. Toda regra nova da captura ganha um caso aqui.
+
+## MCP: saiu da fábrica
+
+Desde 2026-11-02, a pedido do usuário ("mcp é obsoleto, pode remover"), a fábrica **não tem mais o MCP** (o servidor
+`fabrica mcp` em mcp.bbnews.cc, as contas `fabrica mcp-cliente`, a fila de tarefas respondida pelo Claude do cliente,
+o comando `/tiplabs` e a pasta `tiplabs-cliente`). Saíram `mcp_servidor.py`, `cliente.py` e `clientes_mcp.py`, os
+ganchos deles na escolha das fotos, no Jev, no roteirista, na revisão e nos custos, a seção `mcp` do config.yaml, a
+dependência `mcp` e o MCP dos scripts LIGAR, DESLIGAR e VIGIA. O "Gemini sem pensar" das rotas `gemini:` da cadeia,
+que morava na seção `mcp`, passou para `gemini.raciocinio_na_cadeia`. **Não trazer de volta.**
+
+## Pacote do projeto
+
+`fabrica/pacote.py`, pedido do usuário em 2026-10-06 (nasceu para o MCP, que saiu da fábrica em 2026-11-02): **no servidor fica só o MP4
+pronto; o projeto fica com o cliente.** `fabrica entregar NOME --cliente PASTA` escreve o pacote (`NOME.zip`) na pasta
+do cliente, guarda o vídeo em `entregas/NOME/` e apaga a pasta de trabalho (só depois de o zip ser conferido).
+`fabrica importar ARQUIVO.zip [--nome] [--substituir]` remonta a pasta para editar, e `fabrica pacote NOME [--medir]`
+exporta ou só mede.
+
+- **Vai no pacote o que custa refazer:** os textos do projeto e os caches em JSON (que evitam pagar o modelo de novo),
+  a narração paga (`.mp3` e `.json` de cada bloco; sem `.mp3`, o `_bruto.wav`), as imagens de IA e as da pessoa, e as
+  fotos e vídeos de banco **usados nas cenas** (o endereço do arquivo não é guardado, e o do Pixabay nem é permanente).
+  O perfil do canal vai junto (`perfil.yaml`, com a base aplicada) e vale quando o servidor não tem esse perfil.
+- **Fica de fora o que a fábrica refaz de graça:** os clipes do render, a narração aberta (`.wav`, sai do `.mp3`), a
+  trilha tocada (sai da partitura), os MOV das animações (saem do `motion.json`), as prévias, as versões antigas, as
+  folhas de candidatos e as fotos recusadas.
+- **Importar não gasta:** `narracao.narrar(sem_gastar=True)` remonta a narração com os blocos do pacote e para antes de
+  chamar a voz paga se o texto ou a voz mudou. O render refaz a trilha e as animações sozinho. Pacote com caminho para
+  fora da pasta é recusado, e importação que falha não deixa projeto pela metade.
+- **Medido:** o nunca-deve-ter-dentro-de-casa-parte-2 (30 min) dá um pacote de 941 MB contra 6,2 GB de projeto (643 MB
+  de fotos e vídeos de banco, 263 MB de imagens de IA, 30 MB de narração). No teste offline (`teste-pacote`), entregar,
+  importar e renderizar de novo deu o mesmo vídeo, pixel a pixel e com o mesmo áudio.
+- **Próximo passo:** baixar de novo as fotos e vídeos de banco pelo número de cada um no banco, em vez de levá-los no
+  pacote (o pacote de 30 min cairia para uns 300 MB).
+
+## Tempo de produção
+
+Pedido do usuário em 2026-10-27 ("o sistema está demorando muito para gerar um vídeo"). Medido no
+everything-you-need-to-answer (20 min, 340 cenas): umas 2h20 de fábrica, uns 7 min por minuto de vídeo. Agente de
+roteiro ~22 min, busca e conferência ~27 min, 214 imagens de IA ~30 min, render ~33 min (clipes 10, montagem final 22).
+
+- **Medição em toda criação** (`tempos.py`): o `fabrica tudo` também grava cada etapa em `tempos.json` (antes só o
+  site e o render) e diz no fim "Tempo por etapa". Cada linha leva `partes`: os segundos somados de cada banco
+  (`banco: pexels`), da espera pelo limite de um banco, do download e de cada etapa de modelo (dos `uso_*.json`).
+  Elas somam mais que a etapa quando correm juntas. Serve para achar a espera: na conferência das imagens de IA do
+  everything a janela foi de 38 min com só 4 min de modelo trabalhando.
+- **Cada chamada de IA anotada, e o relatório que acha o gargalo** (`chamadas.jsonl`, `tempos.anotar_chamada`,
+  `fabrica/relatorio_tempo.py`, pedido do usuário em 2026-10-29: um vídeo de 30 min levou 4 h e não dava para dizer
+  qual IA segurava). O `uso_*.json` só guardava a rota que respondeu. Agora `openrouter_local.perguntar` anota, por
+  chamada, cada rota tentada (segundos, "ok", "não atende" ou "falhou", com o motivo), as rotas puladas por estarem
+  fora do ar e a espera parada (pelo gratuito, pela confirmação do pago); `imagens._gerar_uma` anota cada tentativa
+  de imagem de IA; a narração local anota ligar o motor, gravar cada bloco e o tempo das palavras. Uma linha por vez
+  no fim do arquivo (milhares por vídeo; reescrever um JSON inteiro a cada chamada ficaria lento).
+  `fabrica tempos NOME [--desde] [--ate]` junta `tempos.json`, `uso_*.json` e `chamadas.jsonl` em
+  `tempo_relatorio.md`: etapas com a IA que mais ocupou cada uma, **relógio ocupado** de cada IA (a união dos
+  intervalos das chamadas, não a soma: chamadas em paralelo somam mais que o relógio), cada tarefa de IA, esperas e
+  rotas que falharam, as 15 chamadas mais lentas, os trechos de 2 min ou mais sem nenhuma IA (com a etapa aberta, ou
+  "fábrica parada") e o gargalo. Sem `--desde`, a última produção (a sequência sem pausa de 2 h). Sai sozinho no fim
+  do `tudo` e da criação pelo site. No everything-you-need-to-answer (só o fim da produção tinha medição): IA
+  trabalhando em 27% de 2 h; o Gemini 2.5 Flash-Lite pago foi o mais ocupado (escolha e descrição, 714 chamadas).
+- **Montagem final em pedaços, na placa de vídeo** (`render._mixar_em_pedacos`): o vídeo é cortado em quadros
+  inteiros (`pedacos_da_montagem`, a soma dá exatamente o total), cada pedaço ganha a legenda e as animações dele e
+  é codificado ao mesmo tempo que os outros, e no fim os pedaços são emendados sem codificar de novo, com o áudio
+  inteiro numa faixa só. Conferido no teste-animacao-1min: os 891 quadros do segundo pedaço iguais ao original
+  (framemd5) e 1.782 quadros no total, como antes. **Nunca `setpts=PTS-STARTPTS` depois de um `-ss` na entrada**: no
+  FFmpeg 8 os quadros de antes do corte passam pelo filtro, e o pedaço saiu com 357 quadros em vez de 891. **Os
+  pedaços saem em H.264 cru, sem quadros B** (`-f h264 -bf 0`), emendados byte a byte, e os tempos são dados uma vez
+  só (`-framerate`): em MP4 cada pedaço trazia os próprios tempos e o vídeo de 20 min perdeu um quadro na emenda. 3
+  pedaços de cada vez na placa (`render.pedacos_juntos`): com 5 ficou mais lento (6,7 min contra 5). O personagem no
+  canto segue o caminho antigo (um passo só).
+- **Áudio do render** (`render._trilha`): a voz e a música são normalizadas ao mesmo tempo, e cada uma é reaproveitada
+  quando as entradas não mudaram (`voz.wav.assinatura`, `musica.wav.assinatura`): 2,8 min virou 2,2 min na primeira vez
+  e 8 s nas seguintes. Medido no everything (20 min, sem clipe novo): a montagem final caiu de 15,5 min para 5,4,
+  com os 36.187 quadros. Comparado com o `render/video.mp4` (a base) nos segundos 196 a 199, o novo bate (pior quadro
+  0,982, a diferença é a legenda) e o antigo, num passo só, não (22 quadros abaixo de 0,85).
+- **Para comparar vídeos, corte pelo tempo (`-ss`), nunca pelo número do quadro (`trim=start_frame`)**: o
+  `video.mp4` emenda clipes com duas faixas de cor (yuv420p tv bt709 e yuvj420p pc bt470bg), o FFmpeg refaz os filtros
+  a cada troca e a contagem de quadros recomeça. Uniformizar a faixa de cor dos clipes fica para depois.
+- **Codificador** (`render.codec_de_video`, `render.codificador`: `auto` ou `cpu`; `render.cq_placa`, 24): a placa
+  NVIDIA (h264_nvenc) quando existir, testada uma vez por execução; se ela recusar, a CPU. Medido: cq 24 na placa dá a
+  mesma semelhança com o original que crf 18 na CPU (SSIM 0,9607 e 0,9607), em uns 60% do tempo e com o arquivo 1,8
+  vez maior. **Só a montagem final usa a placa**: os clipes seguem na CPU, porque um clipe guardado da CPU emendado
+  sem codificar a um novo da placa estragaria a emenda. Um pedaço que caia para a CPU faz todos irem pela CPU. Não
+  pôr `codificador` nem `cq_placa` na seção `render` do config.yaml sem precisar: os ajustes dela entram no nome de
+  cada clipe, e todo projeto renderizaria de novo.
+- **Clipes adiantados** (`render.adiantar_clipes`): depois da conferência e depois das imagens de IA (site e `tudo`),
+  os clipes das cenas que já têm imagem são montados em segundo plano, com metade dos processos do render, enquanto
+  a criação segue. O nome do clipe diz a imagem, a duração e o movimento: a cena que mudar depois ganha outro nome e
+  o render faz de novo. O render espera os adiantados antes de começar. `_tarefas_da_linha` é a única que dá nome aos
+  clipes (o render e o adiantamento usam a mesma): mudou o nome, todo projeto renderiza de novo.
+- **16 imagens de IA ao mesmo tempo** (`imagens.processos`; eram 6). O preço é o mesmo.
+- **FFmpeg** atualizado em 2026-10-27 para o N-128100 (BtbN, 26/10/2026), em `C:\Users\Admin\.cargo\bin`; o de
+  08/08/2026 ficou em `ffmpeg_backup_20260808` na mesma pasta.
+- **O vigia reiniciava a fábrica no meio do vídeo** (2026-10-27): ele conferia na `/api/projetos`, que lê o
+  cenas.json e o perfil de todo projeto (uns 4 s parada) e passava dos 20 s com a criação ocupada. No
+  tescos-60-billion foram 4 reinícios, e a esteira refez o fim da criação a cada um (uns 25 min). Agora o LIGAR e o
+  VIGIA conferem na `/api/saude` (async, não lê nada), e o vigia só reinicia depois de 3 minutos sem resposta.
+  **Nunca voltar o vigia para uma rota que lê os projetos.**
+- **Gemini lento na descrição sai da frente** (`descricao.limite_segundos`, 15; `gemini_local.perguntar(limite=)`):
+  no tescos-60-billion ele levou de 20 a 80 s por imagem (36 min somados) com o Google sobrecarregado. Passou do
+  limite, ou deu 429 do minuto ou 5xx, o modelo fica 3 min de lado (`_de_lado`) e a cadeia de visão descreve. O
+  Google recusa prazo abaixo de 10 s (400), então o limite nunca é menor que isso.
+- **Lotes do agente de roteiro soltos** (`roteirista.lotes_por_trecho: 1`, `paralelo: 20`): com 3 lotes em fila por
+  parte, uns 4 min cada, o JSON de cenas do tescos-60-billion levou 11 min.
+- **Narração com 8 blocos ao mesmo tempo não acelera** (`narracao.BLOCOS_AO_MESMO_TEMPO` fica 4). Medido em
+  2026-10-27, 8 frases curtas na voz do canal UK Market: 8 juntas terminaram em 112 s (cada uma de 45 a 112 s), 4 de
+  cada vez em 83 s (cada uma de 12 a 48 s); uma sozinha, 24 s. A GenAIPro aceita os 8 pedidos, mas reparte a
+  velocidade. O que pesa na narração é a fila da voz (`genaipro.lentidao`: há vozes com 400 s por bloco). Frase curta
+  custa perto de 1 crédito por letra (os dois testes, 513 e 453 créditos), não os 0,064 dos blocos grandes.
+- **Este computador tem placa AMD (RX 570), não NVIDIA**: a montagem na placa (`h264_nvenc`) não roda aqui e cai na
+  CPU. O `h264_amf` funciona (mesma qualidade, SSIM 0,987), mas a velocidade ainda não foi medida com a máquina livre.
+- **Entregas rápidas** (pedido do usuário em 2026-10-27, medido no 12-animais-que-evoluiram e no tescos-60-billion):
+  o agente de cenas é o caminho crítico (Nemotron grátis, 280 s por lote em média, contra 74 s do DeepSeek; na época o
+  usuário preferiu NÃO pôr o DeepSeek pago na frente; **em 2026-11-05 o Nemotron saiu** e o agente é o DeepSeek V4
+  Flash pago, uns US$ 0,22 a 0,85 por vídeo). Mudou: `midia.escolhas_ao_mesmo_tempo` 8 (eram 4), `ia.teto` 0.25
+  (eram 0.35; voltou a 0.35 em 2026-11-03; **0.75 desde 2026-11-05**, pedido do usuário para entregar rápido como o
+  Robô do Dotti: com 25% a cena reprovada não podia ir para a IA e voltava a buscar foto, uns 35 dos 96 min do
+  asdas-80-billion), e no `tudo` as animações e a trilha rodam ao mesmo tempo. A legenda por clipe foi descartada: a camada
+  de animação fica entre a imagem e a legenda, então a montagem final codifica de novo de qualquer jeito.
+- **Falta** (proposto ao usuário, com as falhas conhecidas): a esteira por trecho, com cada trecho de ~2 min indo da
+  busca aos clipes sozinho e uma passada geral no fim (teto de IA, foto e vídeo, frequência das animações). Antes dela
+  vêm as travas: cota de IA por trecho, um escritor só do `cenas.json`, trava na lista de imagens usadas e cortes na
+  linha do tempo do vídeo inteiro.
+
+## Revisão do vídeo pronto
+
+`fabrica/revisao_video.py`, ligada por `revisao_video.ativo`. Depois do render (no `tudo` e no site, em segundo plano),
+o modelo principal recebe um quadro de cada cena do `final.mp4` (a 60% da cena, com o atraso da abertura de
+`render/linha.json`), 8 por pedido, e aponta tela preta, imagem que não combina, texto cortado, sobreposto ou errado,
+imagem repetida, marca-d'água e baixa qualidade. **Só aponta, não troca nada.** O resultado (`revisao_video.json`) só
+vale para o `final.mp4` de agora; no editor vira o selo "⚠ revisar" na cena e o cartão Revisão no inspetor. Nunca
+derruba o render.
+
+## Conferência da narração
+
+`fabrica/conferir_voz.py`, ligada por `conferencia_voz.ativo` (pedido do usuário em 2026-10-09, da análise do
+concorrente). Cada bloco gravado é ouvido pelo **Whisper do Groq** (`whisper-large-v3-turbo`, grátis, revezando as
+`GROQ_API_KEY`, uns 2 s por bloco) e conferido com o roteiro **pelo trecho**, não pela nota do bloco inteiro (um bloco
+nosso tem umas 400 palavras e uma palavra comida mal mexe na semelhança): **comeu** (3 ou mais palavras do roteiro não
+ouvidas), **repetiu** (4 ou mais palavras ouvidas a mais, que são do roteiro ali perto; palavra a mais que não é do
+roteiro é invenção do Whisper, como "Amara.org", e não conta), **pronúncia** (termo do glossário não reconhecido) e
+**diferente** (menos de 60% de semelhança). Número escrito e falado por extenso nunca conta.
+
+- Com problema, o bloco é gravado de novo (`regravar`, 2 nas vozes grátis; `regravar_paga`, 1 na GenAIPro, uns
+  US$ 0,004 por bloco) e **fica a melhor gravação** (`gravidade`), não a última.
+- **Glossário de pronúncia**: `pronuncia.json` na raiz e `voz.pronuncia` no perfil (o do perfil vence). `reconhecer`
+  é a expressão procurada na transcrição (minúsculas, sem acento) e `grafias` as escritas mandadas à voz, em ordem: o
+  termo não reconhecido vai com a grafia seguinte. A legenda e as cenas ficam com o termo do roteiro, porque o tempo
+  das palavras é casado com o roteiro e a palavra trocada só é interpolada. O termo vale também dentro de palavra com
+  hífen ("cavalo-de-Przewalski").
+- O resultado fica em `conferencia` no json de cada bloco e em `narracao/conferencia.json`. Bloco reaproveitado do
+  cache não é conferido de novo. `fabrica conferir-voz NOME` confere a narração pronta sem gravar nada.
+- **Nunca para o vídeo**: sem Groq, offline ou com a voz do computador, a narração segue sem a conferência.
+- Primeiro achado real: no virou-filme-em-1996, bloco 2, a voz da Fish trocou "E aqui vem um detalhe que deixa a
+  história ainda mais assustadora: os leões pareciam aprender" por "Mis trabalhadores reagiram como da farira", e o
+  vídeo saiu assim. Em 37 blocos de 5 projetos, nenhum alarme falso.
+
+## Kit de publicação
+
+`fabrica/publicacao.py` (pedido do usuário em 2026-10-09). Depois de cada render deitado (`etapa_render` no terminal,
+`api.iniciar_publicacao` no site, em segundo plano) e em `fabrica publicacao NOME [--forcar]`, grátis:
+`publicacao.json` e `PUBLICACAO.md` com título (até 60 letras), 2 alternativas, a descrição (resumo, **capítulos nos
+tempos reais do final.mp4**, os créditos, o aviso de voz sintética e as hashtags), tags (até 480 letras), comentário
+fixado, `sintetico` (o vídeo tem imagem de IA: declarar no YouTube Studio) e a legenda `legendas_final.srt`.
+`GET /api/projetos/NOME/publicacao` devolve o kit para a janela de publicar no YouTube, e `POST` refaz.
+
+- **Capítulos**: pelos `[TITULO]` do roteiro (2 ou mais); senão pelos blocos do `roteiro_mapa.json` (`inicio_c`
+  vira tempo pelo `alinhamento.json`), mais a abertura (`render/linha.json`). Regras do YouTube: o primeiro em 0:00
+  (fala antes do primeiro título vira "Abertura"), 10 s ou mais cada, pelo menos 3, senão sem capítulos.
+- **Os textos são do modelo, pela cadeia de principais** (`modelo=openrouter_local.principal(projeto)`, Groq
+  primeiro). Sem dizer o modelo, a chamada ia para o `openrouter.modelo` (o Jev) e caiu no DeepSeek pago sem
+  perguntar. O modelo só é chamado de novo se o roteiro ou os capítulos mudarem (`assinatura`). Sem modelo, sai com
+  o título do mapa e os nomes dos blocos.
+
+## Thumbnails
+
+`fabrica/thumbnail.py` (pedido do usuário em 2026-10-09, da análise do concorrente). Depois de cada render (junto com o
+kit, `etapa_capas_e_shorts` no terminal, `api.iniciar_publicacao` no site) e em `fabrica thumbs NOME [--escolher N]`,
+grátis: `thumb_1.jpg` a `thumb_3.jpg`, `thumbnail.jpg` (a escolhida, opção 1 até a pessoa trocar),
+`thumbs_prancha.jpg` (as três grandes e cada uma em 256x144, o tamanho no celular) e `thumbs.json`.
+
+- **Fotos**: as imagens do próprio vídeo de nota maior no Jev (nunca clipe de motion nem cena animada, nada menor que
+  640x360), até 12 numa folha; a cadeia de visão **só nos gratuitos** escolhe as 3 que fazem a melhor capa para o
+  título (sem resposta, as de nota maior).
+- **Texto**: o campo `thumbs` do kit de publicação (3 opções de l1 e l2, até 4 palavras por linha, que completam o
+  título sem repetir, com *destaque*). Kit de antes das thumbnails é pedido de novo.
+- **Desenho** (Pillow, Inter Black da pasta de fontes): `foto_texto`, `painel` e `impacto`, um por opção; recorte pelos
+  rostos (`rostos.recorte`), texto longe do canto de baixo à direita (a duração do YouTube) e do rosto. 1280x720,
+  menos de 2 MB. `GET /api/projetos/NOME/thumbs` e `POST .../thumbs/escolher {"opcao": N}`.
+
+## Shorts cortados do vídeo pronto
+
+`fabrica/shorts.py` (pedido do usuário em 2026-10-09). Depois de cada render e em `fabrica shorts NOME [--forcar]`,
+grátis, sem renderizar as cenas de novo: corta `render/video.mp4` (as cenas montadas, sem a legenda queimada) e
+`render/trilha.wav` (o áudio final), na linha do tempo do `final.mp4`, com a camada de animação que passa ali.
+
+- **Trechos** (`escolher`): as frases (unidades do `alinhamento.json` juntas até o ponto) com tempo e bloco do mapa.
+  O modelo principal (gratuitos primeiro) escolhe até `shorts.quantidade` (3) trechos de 20 a 58 s que se entendem
+  sozinhos, com gancho, sem misturar blocos, e escreve o título-gancho e o título do post. O código confere
+  (`conferir`): duração, bloco, sobreposição, título até 60 letras e com no máximo uma palavra que a fala não diz (o
+  modelo escreveu "O *secreto* do leite"). Sem modelo, a regra (`_por_regra`). Guardado em `shorts/escolha.json` pela
+  assinatura do roteiro.
+- **Imagem**: 1080x1920; o vídeo deitado no meio (y 620) sobre uma cópia dele desfocada e escura; o título-gancho em
+  cima (PNG do Pillow, *destaque* em amarelo); a legenda grande embaixo, 3 palavras por vez com a falada em amarelo
+  (ASS com o tempo de cada palavra, fonte Inter da pasta de fontes); longe da faixa de baixo e da direita, que o app
+  cobre. Saem `shorts/S01.mp4`... e `shorts/shorts.json`. `GET /api/projetos/NOME/shorts`.
+- Diferente do `--vertical` (o vídeo inteiro em pé, renderizado de novo): o short é um corte do deitado.
+
+## Publicar no YouTube
+
+`fabrica/youtube_publicar.py`. A conta é uma só, conectada pelo editor (OAuth do Google, `GOOGLE_CLIENT_ID` e
+`GOOGLE_CLIENT_SECRET` no `.env`). Desde 2026-10-09 (pedido do usuário, da análise do concorrente):
+
+- **Agendar é do próprio YouTube** (`status.publishAt`): o vídeo sobe privado com a data, e o YouTube publica sozinho,
+  mesmo com o computador desligado. O checador em segundo plano ficou só para os agendamentos antigos (sem
+  `pelo_youtube`). Hora na hora do canal (`youtube.fuso_horas`, -3; sem base de fusos no Windows, o deslocamento é
+  fixo), pelo menos 10 min no futuro.
+- **`publicar_projeto`** sobe o pacote: o vídeo com o kit (título, descrição com capítulos, tags, idioma,
+  `containsSyntheticMedia` quando há imagem de IA), a thumbnail escolhida (`thumbnails.set`; o canal precisa estar
+  verificado por telefone), a legenda `legendas_final.srt` (`captions.insert`, escopo youtube.force-ssl: **conta
+  conectada antes de 2026-10-09 precisa reconectar** para a legenda) e, com `com_shorts`, os shorts, cada um
+  `youtube.shorts_intervalo_horas` (24) depois do anterior. O que falhar depois do vídeo vira aviso no youtube.json.
+- **Auditoria do Google**: vídeo enviado pela API por projeto do Google Cloud sem a auditoria da API do YouTube fica
+  travado como privado. Depois de um envio público a fábrica confere a visibilidade e avisa.
+- **Simulação**: `fabrica publicar NOME [--quando "2026-10-12 18:00"] [--privacidade] [--com-shorts] --simular` e
+  `simular: true` no `POST /api/projetos/NOME/youtube/publicar` mostram o que subiria, sem enviar. Sem `--simular` o
+  terminal pede confirmação (`--sim` pula). O comentário fixado a API não faz: o texto vai no youtube.json para o
+  Studio. **Nunca publicar sem a pessoa pedir.**
+
+## Versão em pé (Reels e Shorts)
+
+`fabrica render NOME --vertical`, `fabrica tudo NOME --vertical` (monta as duas) ou o campo "Formato" na janela de
+renderizar do editor (`vertical: true` no `POST /render`). Sai em `final_vertical.mp4`, com tudo em `render_vertical/`:
+a limpeza dos clipes velhos de uma versão nunca apaga os da outra, e **o vídeo deitado não muda**.
+
+- Tela 1080x1920 pela seção `vertical` do `config.yaml`, que fica **fora** da seção `render` de propósito: os ajustes
+  do render entram no nome de cada clipe, e mexer neles faria a versão deitada de todo projeto renderizar de novo.
+- Foto ou vídeo deitado perde as laterais só até ficar quadrado (`vertical.recorte`) e fica sobre uma cópia dele
+  mesmo, desfocada (`render._encaixe` e `_preparar_foto`). Cortar para 9:16 jogaria fora dois terços da imagem.
+- Cartões de título são desenhados para a tela deitada e levados para a faixa do meio da tela em pé
+  (`textos.para_vertical`), longe da legenda e dos botões do app. A legenda sobe (`ESTILO_LEGENDA_VERTICAL`).
+- Sem animações (foram desenhadas para a tela deitada: a cena volta à foto) e sem o quadro do
+  personagem. A revisão do vídeo pronto olha só o deitado.
+
+## Trilha e efeitos gerados
+
+`fabrica/trilha.py`, ligada por `trilha.ativo`. **Todo vídeo sai com trilha**, sem custo e sem arquivo de música.
+
+- **Partitura:** o modelo principal lê os blocos do roteiro (o campo `bloco` das cenas; projeto sem blocos é cortado
+  em trechos de uns 90 s) e escolhe, por bloco, clima, tom, modo, andamento, sequência de acordes, intensidade, pulso
+  grave e o efeito de entrada. O código confere e completa pelo clima (`CLIMAS`); sem modelo (offline ou fora do ar)
+  a partitura sai só pelas regras. Fica em `trilha/partitura.json`, com assinatura dos blocos.
+- **Som:** o código toca a partitura com numpy (colchão de acordes com as vozes andando pouco, baixo, arpejo de sino e
+  pulso grave), com fusão de 2 s na troca de bloco e ambiente pelo FFmpeg, em `trilha/trilha.wav`. Mudou o jeito de
+  tocar, sobe `trilha.VERSAO`. Um vídeo de 11 min toca em uns 45 s.
+- **Quando entra:** no render, quando o perfil não aponta músicas ou a pasta está vazia (as músicas do canal não vêm
+  no pacote); com `trilha.substituir: true`, sempre. Volume em `trilha.volume_db` (-16), abaixo do
+  `volume_musica_db` do perfil. Medido com o alvo antigo: voz em -16 LUFS e trilha em -32 LUFS. Desde 2026-11-05 o alvo de cada faixa é **-14 LUFS** com teto de -1 dBFS (`render.LOUDNESS_ALVO`), o nível para o qual o YouTube normaliza; ainda sem medida num vídeo de verdade.
+- **Efeitos:** passagem de ar, impacto e subida na troca de bloco (o que a partitura pediu), impacto no cartão de
+  título. No máximo um a cada 6 s. São tocados
+  pelo código uma vez e guardados em `efeitos/gerados/`. Perfil com os efeitos da ElevenLabs ligados segue com os dele.
+- **Onde roda:** etapa `trilha` no `tudo` (antes do render), último passo da criação pelo site, `fabrica trilha NOME
+  [--forcar] [--efeitos]` e, se nada disso rodou, o próprio render. **Nunca para o vídeo:** se falhar, sai só com a voz.
+
+## Agente de roteiro (principal do passo de cenas)
+
+`fabrica/roteirista.py`, ligado por `roteirista.ativo` no `config.yaml`. Ele não entra em modo offline nem em perfil com personagem ou efeitos, que seguem pelo caminho antigo.
+
+1. **Mapa** (`fabrica mapa NOME`, e sozinho no início de `cenas`). Lê o roteiro inteiro e grava `roteiro_mapa.json` com os blocos de assunto (cada um com a âncora visual e a posição no roteiro), as armadilhas de busca, as pessoas reais, o que é proibido e as imagens recorrentes. Só depende do texto, então roda antes da narração. Quem responde é o `roteirista.modelo` (`roteirista.provedor: openrouter`; hoje o `deepseek/deepseek-v4-flash`, com raciocínio `low`), com a cadeia de principais de reserva se ele falhar. **O Claude da assinatura não serve para a fábrica** (decisão do usuário, 2026-10-03; o código `_PeloClaude` ficou, desligado). Medido no roteiro de Tsavo (8,5 min): uns US$ 0,22 por vídeo, cerca de US$ 0,01 por lote, bem acima do preço de tabela por causa do raciocínio; com o raciocínio alto ele levava 30 min e estourava o limite pensando. Comparado ao Claude, o DeepSeek escreve o JSON limpo e o aceitável em todas as cenas, mas acha menos armadilhas de busca (3 contra 16) e manda mais cenas para a IA (68 contra 48). O mapa traz também `quem_e` (anos de vida e o que cada pessoa real fez, contra homônimos) e a `epoca` de cada bloco. Na criação pelo editor, o mapa aparece na janela de progresso e fica em `GET /api/projetos/NOME/mapa`.
+2. **JSON de cenas** (`roteiro_cenas.json`, também no `fabrica mapa`). Feito só com o texto, antes ou junto da narração: o corte (`_pre_cortar`) usa o tempo previsto de cada frase pelo `ritmo.caracteres_por_minuto` do perfil, e para cada bloco, em lotes de `roteirista.cenas_por_lote` e com `roteirista.paralelo` blocos ao mesmo tempo, o agente decide tipo, descrição, busca, prompt, texto curto da animação (`overlay`), `onde_existe`, `aceitavel` e `epoca`. **Antes de aceitar, o código confere cada lote** (`roteirista.problemas_do_lote`): palavra grudada ou lixo ("exércitoBritish"), a mesma descrição em cenas seguidas com falas diferentes e `exato` em português pedem a resposta de novo, uma vez; o que sobrar é limpo (`_limpar_resposta`). O que ele deixar sem resposta cai no caminho antigo. No `tudo` e no editor ele roda em paralelo com a narração.
+3. **Passo de cenas = encaixe.** Os números das frases saem só do texto, então o JSON se encaixa nas frases da narração sem nenhum modelo: o passo de cenas aplica as regras fixas de tempo. Se a narração tiver outro número de frases (roteiro mudou), o agente decide sobre os cortes reais.
+
+O que o agente decide segue adiante: `mostrar` (a descrição) vai para a escolha do acervo, para o Jev e para a busca nova das reprovadas; `overlay` vira o texto da animação em camada; as armadilhas corrigem por código a busca que for só o nome ambíguo. Tipos de animação (`texto_tela`, `linha_do_tempo`, `mapa`, `diagrama`) ficam guardados em `visual` e viram animação (seção Animações, acima). As regras fixas acima continuam valendo depois dele.
+
+## Como o sistema funciona por dentro
+
+Cada projeto vive em `projetos/NOME`. As etapas são estas.
+
+1. **Narração.** A voz do perfil: a GenAIPro (paga, a que está valendo hoje nos canais) ou as vozes open source que rodam dentro da fábrica (`fabrica/voz_local.py`, seção "Narração open source"). O tempo de cada palavra vem do Whisper do Groq, e o fim de cada palavra é encostado no silêncio real do áudio (`narracao._encostar_nas_pausas`). Isso sustenta a legenda e os cortes. O áudio bruto de cada bloco fica guardado, então mudar ritmo ou pausa não custa nada. Os blocos antigos gravados na GenAIPro continuam valendo.
+2. **Cenas.** O agente de roteiro (`fabrica/roteirista.py`) faz o mapa e o JSON das cenas, e o passo de cenas encaixa o JSON na narração com as regras fixas de tempo. Cada cena diz se é foto real, vídeo real ou imagem de IA, com os termos de busca e o prompt.
+3. **Material real.** Busca nos bancos de imagem, a cadeia de visão escolhe pelas miniaturas, o Jev confere, e o sistema grava `creditos.txt`, que vai na descrição do vídeo.
+4. **Imagens.** O **GPT-5.4 Image 2 em qualidade baixa** pelo OpenRouter gera as que faltam (`imagens.provedor: openrouter`, `modelo: openai/gpt-5.4-image-2`, `qualidade: low`; padrão desde 2026-10-04, pedido do usuário depois do teste no natureza-teste-1min: uns US$ 0,005 por imagem medidos, em 16:9, na chave do OpenRouter que a fábrica já usa). O Grok Imagine 2 pelo OpenRouter (`x-ai/grok-imagine-image-2.0`, US$ 0,04) continua valendo para quem o tem no perfil ou no projeto. A Kie (o mesmo modelo, US$ 0,02, saldo à parte) e o Google (Nano Banana 2, com modo lote) continuam como opção no perfil e no editor. **GPT Image da OpenAI pelo OpenRouter** (`imagens.modelo: openai/gpt-image-1` com `provedor: openrouter`): ele não responde pelo chat e sim pela interface de imagens (`POST /api/v1/images`, `imagens._imagem_openrouter_images`, `PREFIXO_IMAGES_API`); não aparece na lista principal de modelos do OpenRouter, mas existe. Aceita só 1:1, 3:2 e 2:3 (a fábrica pede 3:2, 1536x1024, e o render corta para 16:9) e `imagens.qualidade` low, medium ou high (padrão low). Medido no natureza-teste-1min em qualidade baixa: US$ 0,0165 a 0,0174 por imagem (o OpenRouter informa o custo, que é o registrado; sem ele vale `PRECO_GPT_IMAGE`). **O GPT-5.4 Image 2** (`imagens.modelo: openai/gpt-5.4-image-2`) vai pela mesma interface de imagens (é o pedido do playground do OpenRouter, com `quality` e `aspect_ratio`), e aceita **16:9** (1536x864, sem corte). Medido no natureza-teste-1min em qualidade baixa: **US$ 0,0044 a 0,0059 por imagem**, quase 10 vezes mais barato que o Grok (US$ 0,04), e o usuário achou a qualidade boa; a do gpt-image-1 em qualidade baixa ele achou péssima.
+5. **Render.** O FFmpeg monta tudo com movimento lento nas fotos, as animações por cima, música e legenda.
+
+Arquivos importantes de um projeto: `alinhamento.json` com o tempo de cada frase, `cenas.json` com o plano de cena, `revisao.html` para revisar e `final.mp4`.
+
+## Marcações que o roteiro aceita
+
+- `[SIMBOLO]` mostra na tela o símbolo definido no perfil, sem narrar nada.
+- `[TITULO] Nome da parte` mostra um cartão com o título, sem narrar.
+- `[AVATAR] ... [/AVATAR]` marca o trecho em que o personagem aparece falando.
+- `[INSERTO nome]` encaixa um clipe fixo do personagem.
+
+As duas últimas dependem de vídeos gerados no HeyGen, que não vieram no pacote.
+
+## Erros comuns
+
+| Sintoma | Causa e solução |
+|---|---|
+| Wikimedia devolve 403 | falta o e-mail em `midia.contato` no `config.yaml` |
+| Google recusa com 429 e fala em cota | falta ativar o faturamento no Google AI Studio, ou o crédito acabou |
+| GenAIPro recusa a chave (401 ou 403) | chave errada em `GENAIPRO_API` no `.env`. Confira com `uv run fabrica creditos` |
+| GenAIPro diz `invalid_voice_id` | a voz não está na biblioteca pública. Escolha outra com `uv run fabrica vozes TERMO` |
+| GenAIPro diz que a velocidade é inválida | `voz.velocidade` só vai de 0,7 a 1,2 (a fábrica já limita) |
+| Claude Code diz que não está logado | rodar `claude` no terminal e digitar `/login` |
+| Lote do Google demora demais | é normal, pode levar horas. O mesmo comando retoma o lote sem pagar de novo |
+| Pexels ou Pixabay atingem o limite | a fábrica espera sozinha e continua |
+| Um banco cai ("Server disconnected", tempo esgotado, erro 5xx) | a busca tenta de novo em 2 e 5 s (`midia.ESPERAS_QUEDA`); caindo 3 buscas seguidas, o banco fica 3 min de fora e volta sozinho (`Buscador._caiu`). Antes desistia na hora |
+| `'charmap' codec can't encode characters` derruba a esteira | o backend no Windows gravava o fabrica.log na codificação antiga e caía com um pedaço em chinês do modelo. `cli.main` força UTF-8 na saída desde 2026-10-03; se voltar, confira se alguém tirou isso |
+| Criação pelo site parada nos 15% ("Esperando o agente terminar o JSON das cenas") | o agente de roteiro ainda decide as cenas, lote a lote (383 cenas no nunca-deve-ter-dentro-de-casa-parte-2 levaram quase uma hora). Desde 2026-10-05 a barra anda de 15% a 35% com os lotes decididos (`roteirista.PROGRESSO`), e o modelo que estoura o limite pensando tenta uma vez só, já no teto (`openrouter.max_tokens_teto`), e passa para o seguinte da cadeia (antes subia em dois degraus, minutos cada). Cada lote guardado é achado pelo trecho do roteiro, sem o resumo das cenas anteriores (`roteirista.arquivo_do_lote`): com o resumo na marca, um reinício refazia e pagava de novo lotes prontos. Para ver se anda: os arquivos novos em `cenas_lotes/` e o fim de `criacao.json` |
+| Render parado na mesma porcentagem, mas o FFmpeg segue montando clipes | um clipe falhou e o executor montava todos os outros calado antes de mostrar o erro. Desde 2026-10-06 o render para na hora e diz a cena (`render.renderizar`). A causa, no nunca-deve-ter-dentro-de-casa-parte-2, foi o Corrigir Mídia rodando junto: a cena 166 virou foto do Pexels e o FFmpeg não achou `imagens/0166.png`. Agora render, Corrigir, Continuar e Limpeza se recusam no mesmo projeto enquanto outro roda (`api._recusar_se_ocupado`) |
+| Completar cenas depois de trocar a narração demora | a escolha das fotos roda `midia.escolhas_ao_mesmo_tempo` lotes de 6 cenas juntos (4; antes 2, uma cena por minuto). O ritmo depende também do limite de buscas do Pixabay e do Unsplash |
+
+## Narração open source dentro da fábrica (sem assinatura paga e sem instalar os apps)
+
+`fabrica/voz_local.py` e `motores_voz/`. Pedidos do usuário em 2026-10-28: "vamos cancelar assinaturas de narração
+pagas e utilizar as opensource" e, depois de recusar instalar os apps, "quero ter todas as vozes dos dois github
+disponíveis na nossa fábrica". Os apps (VoiceStudio, debpalash/VoiceStudio; voicebox, jamiepine/voicebox) são só a
+casca: a fábrica roda os mesmos motores abertos que eles usam, na placa de vídeo, sem chave e sem custo. **Nenhum
+código dos dois apps foi copiado** (o VoiceStudio é AGPL); só os nomes das vozes e o vocabulário dos motores.
+
+- **As vozes** (`voz_local.catalogo`, 588 hoje; `GET /api/vozes/local` com filtros de idioma, gênero, origem, tipo e
+  busca, e `GET /api/vozes/local/previa?voz=CÓDIGO` toca um trecho, gerado uma vez e guardado em
+  `motores_voz/vozes/previas`):
+  - **VoiceStudio, motor OmniVoice** (k2-fsa/OmniVoice, Apache-2.0; fala qualquer língua): as vozes com nome da galeria
+    dele (manifest da omnivoice-gallery, lido do jsDelivr e guardado em `motores_voz/vozes/galeria.json`), as gravadas
+    da comunidade (`omnivoice:community_pt_br_lucas` e `..._thalia`, pt-BR, CC-BY-4.0: clonadas da gravação, baixada
+    uma vez e conferida pelo SHA-256; `voz_local.credito` dá o crédito do autor) e toda combinação de gênero, idade,
+    tom, sotaque e sussurro (`omnivoice:male, middle-aged, low pitch`), sem as implausíveis (criança de tom grave).
+  - **voicebox**: as 54 vozes do Kokoro (`kokoro:pm_alex`, `pm_santa`, `pf_dora` em português; hexgrad/Kokoro-82M), as
+    9 do Qwen3-TTS CustomVoice (`qwen:Ryan`; falam 10 línguas) e a voz por descrição livre do Qwen VoiceDesign
+    (`qwen_design:voz masculina grave e calma`).
+- **Escolha:** `voz.provedor: local` e o código em `voz.voz_local` no perfil (ou `voz_id` ao criar pelo site, com
+  `voz_provedor: local`); sem código, `voz_local.voz` do config.yaml (a do Lucas). A assinatura do bloco é o código
+  da voz, a velocidade e a `instrucao`: trocar de voz grava de novo.
+- **Motores** (`motores_voz/servidor.py`): dois ambientes, porque pedem versões diferentes do transformers:
+  `motores_voz/omnivoice` (OmniVoice + Kokoro, transformers 5, porta 3931) e `motores_voz/qwen` (Qwen3-TTS,
+  transformers 4.57.3, porta 3932), cada um com torch 2.14 cu126. `voz_local.ligar` sobe o servidor do motor da voz
+  na primeira fala (desligando o outro: a placa tem 6 GB), e a narração o desliga no fim (`desligar_depois`), para o
+  render e as animações terem a placa. Os modelos ficam em `motores_voz/modelos` (`HF_HOME`), e cache e ambientes em
+  `motores_voz/` também: **o C: tem só 9 GB livres, nada disso pode ir para lá** (instale com
+  `UV_CACHE_DIR=motores_voz/.cache/uv`). O registro de cada servidor fica em `motores_voz/AMBIENTE.log`.
+- **Velocidade da fala:** o Kokoro fala na velocidade pedida; nos outros, o atempo do FFmpeg ajusta depois (não muda o tom).
+- **Quanto leva** (medido na RTX 2060, 6 GB, 2026-10-28): carregar o motor, 1 a 1,5 min na primeira fala. Depois,
+  num trecho de 91 s de fala: OmniVoice com 32 passos 35 s, com **16 passos 19 s** (o padrão,
+  `voz_local.passos_omnivoice`, o mesmo do VoiceStudio; os dois 100% iguais ao roteiro na transcrição), com 8 passos
+  10 s mas só 67% igual; Kokoro 2,6 s para 70 s. Um vídeo de 20 min narra em uns 4 min com o OmniVoice (a GenAIPro
+  levava uns 4 min, 14 blocos em paralelo) e em menos de 1 min com o Kokoro. Os passos entram na assinatura do
+  bloco: mudar `passos_omnivoice` grava de novo. O
+  **Qwen é lento nessa placa**: 23 s para uma frase de 5 s, umas 4 vezes o tempo da fala (um vídeo de 20 min levaria
+  perto de 1h30). A Turing não faz bfloat16 direto (simulado, eram 32 s), então o servidor usa float16 quando a placa
+  não faz bfloat16 (`_tipo_qwen`, `QWEN_TIPO` no ambiente vale por cima). Para produção, prefira OmniVoice e Kokoro.
+- **Prévia não prende a placa** (`voz_local._desligar_quando_parado`): a narração desliga o motor no fim, mas a prévia
+  (editor e Radar ouvindo vozes) não tem fim; depois de `PARADO_PARA_DESLIGAR` (5 min) sem nenhuma fala o motor sai.
+  Ligar e gravar marcam o motor em uso (`_usando`), e o vigia nunca desliga no meio de uma narração.
+- **O Radar de Canais** (`E:\Radar-de-Canais-main`, outro produto) mostra estas vozes na configuração do canal
+  (`radar/fabrica_api.vozes` e `previa`) e grava o perfil `canal-NOME.yaml` com `provedor: local`, `voz_local` e `idioma`.
+- **Desligar:** o servidor sai sozinho a pedido (`POST /desligar`); matar pelo número guardado em `AMBIENTE.pid`
+  ficou só de reserva, porque no Windows o python do `.venv` abre um segundo processo, e esse ficava vivo segurando
+  1,6 GB de memória e 4 GB da placa de vídeo.
+- **Memória virtual do Windows:** a primeira carga do OmniVoice falhou duas vezes com "The paging file is too small"
+  (`C:\pagefile.sys` num C: com 8 GB livres); a fábrica pede de novo e a segunda carga passa. Para acabar com isso,
+  mover a memória virtual para o E: (configuração do Windows, da pessoa).
+- **Tempo de cada palavra** (`voz_local.palavras_com_tempo`): Whisper do Groq com tempo por palavra (grátis,
+  revezando as chaves), senão as pausas do áudio (`narracao._palavras_estimadas`). A conferência da narração vale igual.
+- **Hoje a troca está desligada** (`voz_local.no_lugar_das_pagas: false` no `config.yaml`, desde 2026-10-29: o OmniVoice não está instalado nesta máquina e a GenAIPro voltou para todos). O que segue vale com ele em `true`. Na GenAIPro, 4 blocos gravam ao mesmo tempo (`narracao.BLOCOS_AO_MESMO_TEMPO`; com 8 e as cópias, empacou tudo em 2026-11-05, 20 min por bloco), e a tarefa presa ganha uma cópia, uma vez só (`genaipro.RESERVA_DEPOIS_DE`).
+- **As pagas viram local sozinhas** (`Projeto.sem_narracao_paga`, ao abrir o projeto e ao mudar a voz pelo editor;
+  `voz_local.no_lugar_das_pagas`): `genaipro`, `elevenlabs`, sem provedor (o padrão antigo era a GenAIPro) e os nomes
+  dos apps (`voicestudio`, `voicebox`) gravam na voz local. **O bloco já gravado e pago na GenAIPro continua valendo**
+  (`narracao._mesma_voz`, marca `pagas_trocadas`): só bloco de texto novo é gravado na voz local.
+- **A GenAI Pro escolhida de propósito fica** (pedido do usuário em 2026-11-03, ao juntar o Radar do Palhano: "as
+  duas no Radar"). A voz com `paga_escolhida: true` (gravada pela rota `/api/canais` e pelo Radar ao escolher uma voz
+  da GenAI Pro; os perfis `canal-*` do Palhano já vieram marcados) não é trocada, e num computador sem o OmniVoice
+  instalado (`voz_local.instalado`; o do Palhano) nada é trocado. A `/api/canais` aceita também `provedor: local`
+  com o código em `voz_local`. Precisa da `GENAIPRO_API` ativa no computador que narra esses canais.
+- A Fish (OpenRouter, grátis) segue valendo para quem escolher `provedor: fish`.
+- Testes em `tests/test_voz_local.py` (catálogo, resolução de cada motor, voz inexistente, troca das pagas).
+
+## Quem responde cada etapa
+
+**Desde 2026-10-10 o pago entra sozinho** (`openrouter.confirmar_pago: false`, pedido do usuário: "deve ser aprovado o
+consumo automaticamente"): com a cota do Groq cheia, o brasil-selvagem-os-animais-mais-incr-veis-do-brasil (20 min)
+ficou quase 2 h na escolha das fotos esperando o clique no editor, com a barra parada em 65%. Continua só depois de
+TODOS os gratuitos da cadeia, e o consumo vai para a planilha (`fabrica consumo`). O mecanismo abaixo vale de novo com
+`confirmar_pago: true`.
+
+**A produção jamais para, exceto com consumo alto** (pedido do usuário em 2026-10-10):
+- **Teto de gasto por vídeo** (`pago.consumo_alto`, `openrouter.teto_pago_por_minuto` 0,06 vezes a duração do vídeo,
+  no mínimo `teto_pago_minimo` 0,50): o gasto do vídeo em modelo de texto e visão pago (`uso_openrouter.json`) acima
+  do teto faz a cadeia pausar, sem gastar, e pedir a confirmação no editor ("consumo alto: US$ X acima do teto de
+  US$ Y"); enquanto espera, segue com os gratuitos que voltarem. Liberado, vale até o fim do dia. Jev, narração e
+  imagens de IA ficam fora da conta. Um vídeo normal gasta US$ 0,02 a 0,04 por minuto com os gratuitos esgotados; o
+  Qwen pago pensando de 05/10 gastou US$ 0,09.
+- **Etapa da esteira nunca desiste** (`api._etapa`): 6 tentativas rápidas (5 a 60 s) e depois de 5 em 5 min
+  (`ESPERA_LONGA`), sem limite. Antes, uma queda de uns 2 min de um serviço derrubava a criação. Só param o erro que
+  esperar não resolve (`_ERRO_PERMANENTE`: chave, crédito) e o projeto apagado pelo × do editor.
+- **Quanto cada etapa leva** (`tempos.py`, pedido do usuário em 2026-10-13: medir antes de acelerar a criação). Cada
+  fase da esteira (`api._etapa`, com as novas tentativas, e as que rodam fora dele: motion, animation-ai, animações,
+  trilha, a espera pelo JSON de cenas do agente) e o render (total, clipes, juntar e mixar) gravam uma linha em
+  `projetos/NOME/tempos.json`; no fim da criação o registro diz "Tempo por etapa: ...", da mais demorada para a
+  menos. Cada chamada de modelo guarda os `segundos` que a fábrica esperou por ela, com as novas tentativas, no
+  `uso_*.json` (a do Claude Code vem do `duration_ms` dele). Não use a data dos arquivos para medir: ela mistura
+  produção com edição, regravação e a fábrica desligada (a "noite inteira" do nunca-deve-ter-dentro-de-casa-parte-2
+  foi a fábrica desligada).
+- **Bloco grande do roteiro em partes** (`roteirista.planejar_grupos`, `roteirista.lotes_por_trecho`, 2026-10-14):
+  os lotes de um bloco saem em fila (cada um vê as 3 últimas cenas do anterior), e só blocos diferentes rodam juntos.
+  No everything-you-need-to-answer o mapa pôs 65% do roteiro no bloco 10, que andou sozinho por 1h20 dos 1h35 que a
+  criação esperou pelo agente (o tempos.json mediu). Agora cada bloco vira partes de até 3 lotes, que rodam ao mesmo
+  tempo (as maiores primeiro); o primeiro lote de uma parte no meio do bloco vê a fala logo antes dele no lugar das
+  cenas decididas. As fronteiras dos lotes não mudaram, então os lotes guardados em `cenas_lotes` continuam valendo.
+- **Desenhos variados no impacto** (`animation_ai.escolher_desenhos`, `DESENHOS`, motor `R.grade`, `R.faixas`,
+  `R.telacheia`, `R.versus`, 2026-10-14): 15 dos 19 trechos animados do everything-you-need-to-answer saíram como o
+  mesmo baralho de cartões (sete tipos caem na mesma receita, e a IA escolhe "lista" quase sempre). Os tipos de itens
+  ganharam a grade (lado a lado), as faixas (placar com miniatura) e a tela cheia (cada item na tela inteira, em
+  cortes; só com 1,2 s ou mais por item), e o comparar ganhou o versus (diagonal com o selo VS). Antes de gravar, em
+  ordem de tempo e junto com as cenas animadas que já estão no vídeo, cada trecho ganha, entre os desenhos em que cabe
+  (`desenhos_possiveis`), um diferente do anterior e o menos usado; vai em `dados._layout` (o de sempre da receita
+  não vai, e a assinatura não muda). `RECEITA_IMPACTO` repete o `QUAL` do motor, e um teste confere os dois. O
+  `regravar` passa os planos guardados de novo pela conferência e pede de novo o que reprovar (`_planos_conferidos`).
+- **Tudo que aparece na tela vai na língua do roteiro** (`idioma.py`, pedido do usuário em 2026-10-14, "fix this
+  now"): um vídeo para americanos saiu com "10 SUPERMERCADOS • 3 SEMANAS • DEZENAS DE FRANGOS" na tela. A regra global
+  do `openrouter_local` (REGRA_DO_ALFABETO) mandava toda resposta em português; ela segue para os textos internos
+  (descrições, motivos, notas do Jev), mas `regra_do_idioma(projeto)` acrescenta, em roteiro de outra língua, que o
+  que aparece na tela ou para o público vai na língua dele. `idioma.lingua(projeto)` lê o roteiro inteiro (pt, en, es);
+  `idioma.regra_da_tela` vai nos pedidos de texto de tela: o overlay do roteirista (nas instruções, fora da marca dos
+  lotes guardados), as animações de diagrama e texto na tela (`animacoes.py`), a publicação e os shorts. Última
+  barreira: `animacoes._lingua_da_tela` recusa o plano com texto em outra língua (o antigo é feito de novo) e não
+  manda o overlay de outra língua nem como sugestão; o animation-ai já conferia. Os números das animações saem no
+  formato da língua (`<html lang>` e `toLocaleString` pela página: 1,500 em inglês).
+- **Texto de tela na língua da fala** (animation-ai, 2026-10-14): as instruções mandavam "Português do Brasil", e no
+  everything-you-need-to-answer (roteiro em inglês) a conferência recusou, com razão, 10 frases de nota 85 a 95 por
+  "palavras que a fala não diz"; recusa guardada nunca era pedida de novo. Agora as instruções pedem a língua da fala
+  (`IDIOMA_DA_TELA`); a recusa guardada antes de `VERSAO_RECUSA` é pedida de novo (`_vale`); a conferência recusa
+  tela com palavras curtas da outra língua que a fala não diz (`_outra_lingua`: "As que se destacaram" passava, porque
+  só palavras de 4 letras ou mais eram olhadas, com uma de tolerância); e todo plano guardado passa de novo pela
+  conferência antes de ser usado (`decidir`). Pedidas de novo, as notas mudam (o modelo da cadeia pode ser outro): das
+  13 frases, 2 viraram cena animada e 10 ficaram com nota baixa.
+- **Esquema no modo estrito do Groq** (`groq_local._formato_do_esquema`, 2026-10-14): o gpt-oss exige
+  `additionalProperties: false` e todos os campos obrigatórios em todo objeto; sem isso recusava "invalid JSON
+  schema" e a chamada perdia a rota ("prompts de IA em sequência", "animation-ai: onde ajuda"). O esquema que cabe
+  ganha o `additionalProperties` na hora; o que não cabe (o `dados` livre, campo opcional) vai sem o modo estrito, e
+  um "invalid JSON schema" que ainda vier tenta sem o estrito antes do JSON simples (antes só "json_schema", com
+  sublinhado, ligava essa volta).
+
+**Modelo de texto pago só com a confirmação da pessoa, e só depois de TODOS os gratuitos** (`fabrica/pago.py`,
+`openrouter.confirmar_pago`, pedido do usuário em 2026-10-06: o saldo do OpenRouter caiu de US$ 6,10 para US$ 1,97 em
+dois dias, US$ 2,59 deles no Qwen Flash pago escolhendo as fotos do nunca-deve-ter-dentro-de-casa-parte-2, sem ninguém
+saber). `openrouter_local.perguntar` põe todos os gratuitos da cadeia na frente dos pagos (na do agente, o DeepSeek
+vinha antes do Groq) e, antes do primeiro pago, chama `pago.autorizar`: no servidor a tarefa **espera sem gastar** e o
+editor mostra "APIs gratuitas esgotadas" (`js/pago.js` do frontend, pelo `pago_pendente` de `GET /status` e por
+`GET /api/projetos/NOME/pago`), com "Usar a API paga" (`POST /pago`, vale para o projeto até o fim do dia, em
+`pago_liberado.json`) ou "Esperar os gratuitos" (a tarefa tenta os gratuitos de novo quando o primeiro volta, ou de
+minuto em minuto, e o aviso some quando um atende). No terminal pergunta [s/N]; sem terminal para com `GratisEsgotado`
+(BaseException, para os `except Exception` não mandarem a cena para o tapa-buraco ou para a IA paga) e
+`uv run fabrica pago NOME` libera. Cadeia sem nenhum gratuito (o Jev, escolhido de propósito) segue sem perguntar; as
+imagens de IA seguem com a estimativa de sempre.
+
+**O máximo de API gratuita** (pedido do usuário em 2026-10-05, que trouxe o Groq de volta): toda cadeia começa pelos
+gratuitos e só termina no pago. **Groq** entra como rota `groq:MODELO` (`openrouter_local.uma_rota`, `groq_local.perguntar`
+com `na_cadeia=True`), revezando as `GROQ_API_KEY` do `.env` (11 hoje); cada chave tem 1.000 pedidos por dia e 8.000
+tokens por minuto por modelo. Ele tem hoje três modelos úteis: `qwen/qwen3.8-27b` (**enxerga imagem**: a folha de
+candidatos em 1,1 s), `openai/gpt-oss-120b` e `openai/gpt-oss-20b` (só texto). Rota do Groq que não atende (todas as
+chaves no limite do minuto ou do dia, fora do ar) levanta `RotaIndisponivel` e fica de lado em `_FORA_DO_AR`; resposta
+sem as chaves do esquema ou com outro alfabeto é pedida de novo uma vez. Pedido com imagem pula quem está em
+`openrouter.so_texto`. **Reserva da resposta no Groq: 3.000 tokens** (`groq.max_tokens`): o Groq conta a reserva no limite por minuto, e com 8.000 cada escolha de fotos ocupava o minuto inteiro da chave; na criação, com 4 escolhas ao mesmo tempo, as 11 chaves saturavam e a escolha caía no Qwen pago. 404 por causa de imagem (o `openrouter/free` mandou para um modelo que só lê texto) deixa a rota de lado 5 min, não 24 h. A cadeia de visão tem ainda o Gemma 4 26B e o Nemotron Nano Omni antes do pago. **Antes de pagar, espera uns segundos pelo gratuito** (`openrouter.espera_pelo_gratis`, **5 s desde 2026-10-29**, eram 60; `openrouter_local._espera_pelo_gratis`): se as rotas gratuitas estão fora só pelo limite do minuto (o Groq diz em quantos segundos a chave volta; os gratuitos do OpenRouter têm um limite por minuto da conta inteira), a cadeia espera a primeira voltar em vez de ir para o pago; o pago só entra com o gratuito fora por mais tempo (cota do dia, fora do ar). Num pico da conferência do nunca-deve-ter-dentro-de-casa-parte-2, com tudo no limite do minuto, 27 descrições foram para o Qwen pago em 1 minuto. Esperar segundos não é esperar cota: a regra de nunca ficar parado vale para minutos e horas. Testado no natureza-teste-1min, de graça: escolha das fotos em 8 s (a foto 3 em primeiro, como o
+Qwen pago e o Dots), descrição para o Jev em 4 s, trilha e buscas em 1 s. **Descrição é uma cena por chamada**
+(`corrigir.cenas_por_descricao: 1`): com três imagens numa chamada, o Qwen do Groq descreveu o rinoceronte da cena 7
+com o guepardo da cena 3. O agente de roteiro não cabe no Groq (cada lote lê uns 6.800 tokens e escreve uns 7.800) e
+ficou com o `nvidia/nemotron-3-ultra-550b-a55b:free` na frente do DeepSeek (`roteirista.modelos`, `roteirista._PelaCadeia`) **até 2026-11-05, quando o Nemotron saiu da lista para acelerar a entrega e ficou só o DeepSeek**. Comparados com o mesmo pedido em 3 lotes do nunca-deve-ter-dentro-de-casa-parte-2, ele foi igual ou melhor (acertou a Naja kaouthia do caso do DF, pediu a colagem dos 10 animais do vídeo anterior e os frascos de vacina antirrábica onde o DeepSeek repetia o quati na cozinha; uma vez inventou uma raposa-do-deserto que a fala não cita), de 1,5 a 4 min por lote, sem estourar o limite pensando. O DeepSeek custava US$ 0,28 num vídeo de 30 min. Cadeia de principais (`openrouter.principais`), em ordem:
+`groq:qwen/qwen3.8-27b`, `groq:openai/gpt-oss-120b`, os gratuitos do OpenRouter (Gemma 4 31B, Dots 3 Note, Nemotron
+Super) e, por último, o `google/gemini-2.5-flash-lite`, **pago** (US$ 0,10 e 0,40 por milhão de tokens, sem pensar, uns 3 s), que só entra quando os gratuitos acabam: o limite de 1.000 chamadas por dia vale para a conta inteira, e um vídeo usa de 1.200 a 2.300. **Desde 2026-10-20 (pedido do usuário) a cadeia de principais não tem o `openrouter/free` nem o Qwen 3.8 Flash**: no 10-animais-que-voce-vai-agradecer-por-es os prompts de IA em sequência pararam a fábrica 15 min em chamadas de 137 a 273 s cada, de modelos que pensavam até o limite (o `openrouter/free` sorteou MiniMax M3.1, Nemotron 3.5 Lightning e Cohere North; o Qwen 3.8 Flash pago pensou 14 mil tokens por chamada). Não pôr de volta na cadeia de principais um modelo que pensa sem limite nem um roteador que sorteia o modelo. A cadeia também aceita rota pela
+AIMLAPI (`aimlapi:` na frente do modelo, chave `aimlapi_api` no `.env`), tirada em 2026-10-03 a pedido do usuário. Quando um não atende (sem saldo, limite do dia dos
+gratuitos, retirado do ar, servidor cheio), `openrouter_local.perguntar` passa na hora para o seguinte e deixa o que
+caiu de lado um tempo (`_FORA_DO_AR`): nunca esperar. O Space Bunny (`stealth/space-bunny-alpha`), que abria a cadeia,
+saiu do OpenRouter em 2026-10-05 (404) e saiu da lista e dos padrões do código. No mesmo dia o `qwen/qwen3.8-27b`
+deixou de ser gratuito (só pago, e mais caro que o Flash), e o Gemma 4 31B gratuito entrou no lugar, a pedido do
+usuário. **Teste de 2026-10-05, nas tarefas do modelo principal** (escolher fotos pela folha de candidatos, descrever
+imagens para o Jev, compor a trilha, escrever buscas em JSON): o Gemma 4 31B e o 26B gratuitos deram 429 em todas as
+chamadas ("temporarily rate-limited upstream": o Google limita o gratuito para todos, não é a conta). Na cadeia isso
+custa meio segundo por minuto: o 429 deixa o Gemma de lado por 1 minuto e a chamada passa na hora para o Qwen Flash,
+que hoje faz quase tudo (uns US$ 0,80 por vídeo). O `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` (enxerga
+imagem) descreveu as fotos no formato certo, compôs a trilha e escreveu as buscas, mas levou 575 s para escolher as
+fotos de UMA cena e escolheu um só candidato: não serve para a escolha. O `nvidia/nemotron-3-super-120b-a12b:free`
+(só texto) responde rápido e faz o Motion IA (`motion_ia.modelos`). Comparação de 2026-10-03 nos testes da fábrica (descrever foto,
+escolher entre imagens, compor a trilha, dividir o roteiro): o Qwen gratuito passou em tudo, com português mais limpo
+que o Space Bunny; Gemma gratuita vivia lotada (429), Inkling só serve em ferramenta de agente, Dots falha com imagem.
+O limite dos gratuitos na conta é de 1.000 chamadas por dia, e um vídeo usa de 1.200 a 2.300: por isso a cadeia. O
+Space Bunny da AIMLAPI vinha do mesmo espaço stealth do OpenRouter, e a AIMLAPI exige saldo até para ele.
+**Cadeia de visão** (`midia.modelos_visao` e `midia.raciocinio_visao` no `config.yaml`, `openrouter_local.VISAO`,
+pedido do usuário em 2026-10-05: "as análises e buscas de mídia eram para ser gratuitas"): quem olha as imagens (escolha
+das fotos, descrição para o Jev, revisão do vídeo pronto) vai primeiro pelos gratuitos que enxergam imagem
+(`groq:qwen/qwen3.8-27b`, `dots-studio/dots-3-note-preview:free`, `google/gemma-4-31b-it:free`, `openrouter/free`)
+e só por último pelo Qwen Flash pago, **sem raciocínio**. No nunca-deve-ter-dentro-de-casa-parte-2 (30 min, 457 cenas) a escolha caiu toda no Qwen pago, com o
+raciocínio dele: 1.351 chamadas para 594 folhas de candidatos, 2.500 tokens escritos por chamada, US$ 2,44 (o vídeo
+inteiro, US$ 2,91, uns US$ 0,10 por minuto). Medido na cena 7 do natureza-teste-1min: Dots sem raciocínio escolhe em
+25 s, de graça, na mesma ordem do Qwen (com raciocínio ele levava 99 s); Qwen sem raciocínio, uns US$ 0,001 por folha;
+Nemotron Nano Omni sem raciocínio responde em 12 s mas não escolhe nenhuma foto. A descrição que o modelo não
+escreveu na escolha **não é pedida de novo** (o `_completar_vejo` saiu em 2026-10-06, pedido do usuário: era 551 das
+1.570 chamadas da escolha no nunca-deve-ter-dentro-de-casa-parte-2, US$ 0,97 no Qwen pago); o escolhido passa sem o
+Jev antes do download e a conferência depois do download julga a cena, que não foi aprovada na captura. Os gratuitos têm 1.000 chamadas por dia na conta: um vídeo de 30 min
+usa umas 600 na escolha, então o segundo vídeo grande do dia cai no Qwen sem raciocínio.
+**O MiMo não é mais usado.** O Gemini 3.1 Flash-Lite (`gemini:`, pela GEMINI_API_KEY) é o pago de reserva da cadeia de visão desde 2026-10-09, no lugar do Qwen 3.7 Flash, que fica só para o Gemini fora do ar; o Groq voltou como rota gratuita. O Jev continua sendo o juiz.
+
+**Voz grátis: Fish Audio** (`fabrica/fish.py`, `voz.provedor: fish`), no lugar do Edge-TTS, pelo OpenRouter
+(`fish-audio/s2.1-pro-free:free`); as vozes são as da biblioteca pública da Fish (`GET /api/vozes/fish`, com amostra),
+e no editor o botão Fish Audio usa a mesma grade de vozes da GenAIPro. A Fish devolve só o áudio: o tempo de cada
+palavra vem da transcrição (`fish.palavras_com_tempo`, Whisper turbo, casando as palavras ouvidas com as do roteiro)
+e, sem saldo para ela, de `narracao._palavras_estimadas`, que casa cada ponto e vírgula do roteiro com a pausa real do
+áudio (limite de silêncio ajustado ao volume, `_pausas_da_voz`, porque a Fish tem chiado perto de -35 dB). Medido no
+áudio do Edge, que informa o tempo real: erro médio de 0,08 s por palavra. **O Edge saiu da fábrica em 2026-10-26**
+(pedido do usuário: "o edge vai ser descontinuado"; ele já recusava com erro 403 e o teste-animacao-1min travou na
+narração): os perfis `base-documentario` (e quem herda dele) e `teste-roteiro-palhano` usam a Fish com a voz "São
+Cipriano" (o `voice_id` no perfil), e o site, sem provedor escolhido, cria o projeto com a Fish e essa voz
+(antes gravava o Edge `pt-BR-AntonioNeural`). Projeto antigo com Edge continua com a narração guardada; narrar de novo
+com o Edge dá um aviso claro (`narracao`) para trocar para a Fish no editor.
+
+| Etapa | Quem responde |
+|---|---|
+| Agente de roteiro (mapa e cenas) e diretor | `roteirista.modelos`: DeepSeek V4 Flash pago (132 s por lote, uns US$ 0,012), e depois a cadeia de principais. O Nemotron Ultra gratuito saiu em 2026-11-05: 174 s de média por chamada, as 15 mais lentas da produção |
+| Contexto dos blocos | cadeia de principais (Groq primeiro) |
+| Buscas das reprovadas | cadeia de principais (Groq primeiro) |
+| Escolha das fotos e vídeos do acervo (olha as miniaturas) | **o mais rápido** (pedido do usuário em 2026-10-10, site e TipLabs; `midia.modelos_visao`): Qwen 27B do Groq grátis (4 s por folha) e, quando ele lota, **direto** o Gemini 2.5 Flash-Lite pelo OpenRouter (6 s, US$ 0,0008), sem esperar o Groq (`midia.espera_pelo_gratis: 0`); Qwen 3.7 Flash de reserva (28 s, US$ 0,0002). Os gratuitos lentos (Dots 18 s, `openrouter/free` até 153 s, Nemotron Nano Omni até 12 min) ficaram só em `midia.visao_gratuitos`, para quem não pode pagar (thumbnails, Motion IA, `so_gratuitos`): qualquer gratuito na lista vem antes dos pagos. Medido em 20 cenas pelo caminho real: escolha em 21 s, descrição em 10 s. No site, o pago ainda pede o "Usar a API paga" uma vez por projeto e dia |
+| Descrição das imagens das cenas para o Jev (site e TipLabs) | **Gemini 3.1 Flash-Lite direto** (`descricao` no `config.yaml`, `corrigir._pelo_gemini`, pedido do usuário em 2026-10-10): sem pensar, imagem em resolução baixa, miniatura de 512 px, resposta até 600 tokens. Uns 930 tokens lidos e 150 escritos, 2,4 s. **A chave está no plano grátis do Google: 500 pedidos por dia**; esgotada, `gemini_local` deixa o modelo de lado até a hora que o aviso diz (`_volta_em`) e a cadeia de visão descreve (o Gemini 2.5, 3,4 s, US$ 0,0003). 16 descrições ao mesmo tempo (`corrigir.paralelo`; eram 4, o gargalo). O 2.5 Flash-Lite o Google não libera para chave nova (404), mas o OpenRouter tem |
+| Revisão do vídeo pronto | cadeia de visão (a mesma da escolha) |
+| Julgamento (a imagem combina com a fala?) | Jev, pelo OpenRouter; se ele cair, o modelo principal julga |
+| Imagens de IA | GPT-5.4 Image 2 em qualidade baixa pelo OpenRouter (`openai/gpt-5.4-image-2`), padrão do perfil base |
+
+Cuidados com esse modelo, que já custaram erro:
+- Ele **mistura pedaços de outros alfabetos** no meio do texto ("uma composição清楚的", "esteiras스타일"). `openrouter_local.perguntar` avisa em todo pedido que a resposta é só em alfabeto latino (`REGRA_DO_ALFABETO`), pede de novo uma vez quando a resposta traz chinês, japonês, coreano, cirílico, árabe e afins, e se ainda sobrar, **traduz** cada trecho no idioma do texto em volta (`_traduzir_trechos`, uma chamada a mais) em vez de só apagar: apagado, "分布于岩石和灌木之间" (entre rochas e arbustos) sumia da descrição que o Jev lê. Comentário do modelo sobre o próprio raciocínio volta vazio. Se a tradução falhar, o que sobrar é tirado (`_sem_outro_alfabeto`). Acentos do português ficam.
+- Ele **ignora o `response_format`** e inventa os nomes das chaves. Por isso `openrouter_local.perguntar` põe o
+  esquema também no texto e **confere se as chaves obrigatórias vieram**, pedindo de novo quando não vêm.
+- Ele **pensa antes de responder**: sem `raciocinio_por_modelo: stealth/: low`, gastava todo o limite pensando e
+  não entregava a resposta.
+- É um modelo "stealth": gratuito e em teste, pode ter limite de uso, ficar fora do ar ou sumir do OpenRouter.
+  Para trocar ou reordenar, mude a lista `openrouter.principais` no `config.yaml`.
+
+## Custo real, medido
+
+Cada etapa paga grava o que foi cobrado em `projetos/NOME/custos_reais.json` na hora em que
+cobra (`fabrica/custos_reais.py`). Bloco de narração ou imagem reaproveitados do cache não
+entram, porque não geraram cobrança nova. Os modelos de texto gravam os próprios
+`uso_groq.json`, `uso_openrouter.json`, `uso_jev.json` e `uso_gemini.json`, e o resumo junta tudo.
+
+- `uv run fabrica custo NOME` mostra a estimativa e, embaixo, o gasto real por categoria, por
+  minuto de vídeo e por cena.
+- O botão **Custos** do editor mostra o mesmo.
+- **Narração em créditos, medida no saldo.** A GenAIPro cobra em créditos (US$ 22 por 1 milhão, `assinaturas.genaipro`)
+  e **não é 1 crédito por caractere**: 10.543 caracteres gastaram 676 créditos (uns 0,064 por caractere, turbo v2.5),
+  e o Custos mostrava uns 15 vezes o gasto real. A GenAIPro não informa o gasto de cada tarefa, então
+  `narracao.narrar` lê o saldo antes e depois (`_registrar_gasto_da_narracao`) e grava os créditos de verdade. A média
+  medida de cada modelo fica em `genaipro_medido.json` (fora do Git) e vale para a estimativa; sem medida, vale
+  `genaipro.creditos_por_caractere` do `config.yaml`. Registro antigo (1 crédito por caractere) é recalculado na hora
+  de mostrar. Diferença de saldo zero ou maior que os caracteres (outra narração ao mesmo tempo) vira estimativa.
+- O Groq é do plano gratuito e conta zero. OpenRouter e Jev informam o custo real de cada
+  chamada. O Gemini é calculado pelos preços por milhão de tokens do `config.yaml`.
+
+## Consumo no OpenRouter: registro central e planilha viva
+
+`fabrica/consumo.py`, pedido do usuário em 2026-10-09: "a cada consumo no OpenRouter, deve ser registrado na
+planilha". Antes o consumo só ficava nos uso_*.json de cada projeto, e projeto apagado ou entregue levava o registro
+junto: dos US$ 19,31 que a conta tinha gastado, só US$ 8,02 estavam nos projetos.
+
+- **Toda chamada vira uma linha, na hora**, em `relatorios/openrouter_consumo.csv` (fora dos projetos e do Git):
+  data, projeto, tipo (texto, imagem, transcrição, voz), etapa, modelo, gratuito, tokens e custo. Ganchos:
+  `openrouter_local._registrar` (texto e visão; as rotas da AIMLAPI ficam de fora), `jev_local._registrar`,
+  `custos_reais.registrar` (só imagem e transcrição com provedor OpenRouter; Kie e GenAIPro são outras contas) e a voz
+  grátis da Fish em `narracao`. Nunca para a fábrica.
+- **A planilha** `relatorios/consumo_openrouter.xlsx` se refaz sozinha do registro: `ATRASO` (120 s) depois da última
+  chamada e no fim de cada comando (`atexit`). Aberta no Excel, o Windows trava o arquivo: a fábrica tenta de novo
+  depois (o registro é o CSV, nada se perde). Abas: Resumo (o total oficial da conta pela GET /api/v1/key e /credits,
+  guardado em `openrouter_oficial.json`, e a conciliação), Custo diário, Custo por API, Diário por API, Por etapa, Por
+  projeto e Chamadas. As contas são fórmulas, calculadas por quem abre.
+- `uv run fabrica consumo [--importar]` refaz a planilha; `--importar` traz o histórico dos projetos sem repetir.
+- O detalhe por dia e modelo da própria OpenRouter (/api/v1/activity) pede chave de gerenciamento: a fábrica não tem.
+- **Toda chamada leva o nome da fábrica e o projeto** (`openrouter_local.cabecalhos` e `sessao`, 2026-10-15): o
+  cabeçalho `X-Title: Fabrica TipLabs` em texto, visão, Jev e imagens, e o `session_id` com o nome do projeto em todas
+  elas (aba Logs > Sessions do painel: o custo de cada vídeo; Jev e imagens desde 2026-10-20, por
+  `openrouter_local.postar_com_sessao`, que manda de novo sem o campo se a interface recusar). Antes tudo aparecia como "App: Unknown", e numa
+  semana o painel cobrou US$ 15,46 contra US$ 3,14 registrados; conferido hora a hora, a fábrica registra 100% do que
+  faz (o Jev é cobrado com alguns minutos de atraso, mas no valor informado). O que aparecer como Unknown não é a
+  fábrica: outra coisa está usando a chave.
+- **Vigia de vazamento** (`consumo.conferir_vazamento`, ligado pelo servidor na partida, a cada 15 min): compara o que a
+  chave gastou (GET /api/v1/key) com o que a fábrica registrou no CSV e anota cada janela em
+  `relatorios/vazamento.csv` (cobrado, registrado, sem registro). Acima de US$ 0,02 numa janela, o log da fábrica
+  diz "VAZAMENTO" com o horário. Diferença numa janela em que a fábrica não fez nada não é dela. `fabrica consumo`
+  mostra as janelas com diferença. Sem resposta do OpenRouter, a janela é pulada (nunca usa número velho).
+- **Processo que já estava rodando** (servidor) só registra depois de reiniciado (DESLIGAR e LIGAR).
+- **Google Planilhas que se atualiza sozinho** (pedido do usuário em 2026-10-09): a fábrica serve o registro em
+  `/consumo/openrouter.csv` e o total oficial em `/consumo/oficial.csv`, pelo túnel (`consumo.url_publica`,
+  editor.bbnews.cc, sem o desafio do Cloudflare), com uma chave **só de leitura e só para isso**
+  (`CONSUMO_PLANILHA_TOKEN` no .env, criada por `consumo.token_da_planilha`; o token do editor não abre, e esta chave
+  não abre o editor). `fabrica consumo --google` gera `relatorios/consumo_openrouter_google.xlsx`, para importar no
+  Google Planilhas (Arquivo > Importar > Substituir planilha): a aba Chamadas é um `IMPORTDATA(url, ",", "en_US")`
+  (o CSV vem com data e hora separadas e números com ponto) e as outras abas são `QUERY` sobre ela, então dia, modelo e
+  etapa novos aparecem sozinhos. O Google busca de novo mais ou menos de hora em hora. A chave vai dentro do arquivo,
+  nunca no chat. O parâmetro `desde=AAAA-MM-DD` corta o CSV se um dia ele ficar grande demais para o IMPORTDATA.
+
+## Custo real, para calibrar
+
+Um vídeo de 36 minutos com 250 cenas, 60% de material real e 94 imagens saiu por uns US$ 5,60, algo como US$ 0,16 por minuto, com a narração paga (US$ 1,91 na ElevenLabs) e imagens a US$ 0,04. Hoje a narração é open source e não custa nada, e a imagem de IA (GPT-5.4 Image 2 em qualidade baixa) sai por uns US$ 0,005. O gasto que sobra é imagem de IA e os modelos pagos de reserva, quando os gratuitos acabam no dia (uns US$ 0,02 a 0,04 por minuto).
+
+Sempre informe o custo total **e o custo por minuto** quando falar de dinheiro.

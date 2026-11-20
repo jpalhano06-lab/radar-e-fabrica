@@ -1,0 +1,162 @@
+"""Chamadas ao Jev, o modelo de decisão da TypeSafe, pelo OpenRouter.
+
+Ele não escreve texto: recebe um estado e perguntas tipadas e devolve respostas com probabilidade.
+- noul: verdadeiro ou falso, de 0 a 1.
+- score: uma nota numa escala que você descreve.
+- choice: escolher entre opções.
+
+Por isso ele é muito mais barato que um modelo de linguagem (uns US$ 0,04 por milhão de tokens lidos,
+sem cobrar a saída), mas só entende texto. Quem olha as imagens é o modelo de visão, que descreve o
+que aparece, e o Jev julga a descrição contra a narração.
+"""
+import json
+import os
+import threading
+import time
+from datetime import datetime
+
+import httpx
+
+from .openrouter_local import _chave, cabecalhos, credito_reservado, postar_com_sessao
+from .util import gravar_cache, ler_cache
+
+URL = "https://openrouter.ai/api/alpha/decisions"
+MODELO_PADRAO = "typesafe/jev-1.13"
+_trava = threading.Lock()
+
+
+# caminho do uso_jev.json -> (versão do arquivo, histórico): enquanto o arquivo não muda, a lista não é lida de novo
+_HISTORICOS = {}
+
+
+def _ler_historico(arquivo) -> list:
+    """O histórico do uso_jev.json, que continua sendo uma lista JSON (api, consumo, custos_reais e motion_ia leem assim).
+
+    Antes cada julgamento relia e reescrevia o arquivo inteiro (centenas de KB, milhares de vezes num vídeo); agora a
+    lista fica na memória enquanto o arquivo não muda, e ele é relido só se outro processo o alterou. Arquivo
+    corrompido vai para o lado (uso_jev.json.corrompido-DATA) e o registro recomeça: antes ele derrubava todo
+    julgamento do Jev, porque o registro roda dentro de decidir."""
+    try:
+        estado = arquivo.stat()
+    except OSError:
+        return []
+    guardado = _HISTORICOS.get(str(arquivo))
+    if guardado and guardado[0] == (estado.st_mtime_ns, estado.st_size):
+        return guardado[1]
+    historico = ler_cache(arquivo)
+    if isinstance(historico, list):
+        return historico
+    if arquivo.exists():
+        arquivo.replace(arquivo.with_name(f"{arquivo.name}.corrompido-{datetime.now():%Y%m%d-%H%M%S}"))
+    return []
+
+
+def _registrar(projeto, etapa, uso, modelo, segundos=None):
+    uso = uso or {}
+    linha = {"quando": datetime.now().isoformat(timespec="seconds"), "etapa": etapa, "modelo": modelo,
+             "tokens_lidos": uso.get("input_tokens", 0), "tokens_escritos": uso.get("output_tokens", 0),
+             "custo_usd": uso.get("cost", 0) or 0}
+    if segundos is not None:
+        linha["segundos"] = round(segundos, 1)  # o que a fábrica esperou, com as novas tentativas
+    with _trava:
+        arquivo = projeto.caminho("uso_jev.json")
+        historico = _ler_historico(arquivo) + [linha]
+        # inteiro ou nada: gravado pela metade, o arquivo quebrava o próximo registro e, com ele, o julgamento do Jev
+        gravar_cache(arquivo, historico)
+        estado = arquivo.stat()
+        _HISTORICOS[str(arquivo)] = ((estado.st_mtime_ns, estado.st_size), historico)
+    from . import consumo  # o Jev é chamado pelo OpenRouter: entra no registro central
+    consumo.registrar(projeto, "texto", etapa, modelo, linha["tokens_lidos"], linha["tokens_escritos"],
+                      linha["custo_usd"])
+
+
+def resumo_uso(projeto):
+    historico = ler_cache(projeto.pasta / "uso_jev.json")
+    if not isinstance(historico, list):
+        return None  # sem arquivo, ou corrompido: o resumo some, em vez de derrubar quem só queria saber o custo
+    return {"chamadas": len(historico), "lidos": sum(h["tokens_lidos"] for h in historico),
+            "escritos": sum(h["tokens_escritos"] for h in historico),
+            "custo": sum(h["custo_usd"] for h in historico)}
+
+
+def _pelo_mimo(projeto, etapa, estado, perguntas, log, motivo):
+    """O servidor do Jev caiu ou está lento: o MiMo responde as mesmas perguntas, no mesmo formato, na hora.
+
+    Parado é pior: com 456 cenas, dormir e repetir a cada 503 do Jev travava a conferência por muito tempo."""
+    from . import openrouter_local
+
+    propriedades, instrucoes = {}, []
+    for chave, p in perguntas.items():
+        tipo = p.get("type", "noul")
+        if tipo == "noul":
+            propriedades[chave] = {"type": "number"}
+            instrucoes.append(f"- {chave}: probabilidade de 0 a 1 de ser verdadeiro. {p.get('instructions', '')} "
+                              f"Verdadeiro quando: {(p.get('criteria') or {}).get('true', '')}. "
+                              f"Falso quando: {(p.get('criteria') or {}).get('false', '')}.")
+        elif tipo == "choice":
+            propriedades[chave] = {"type": "string"}
+            instrucoes.append(f"- {chave}: escolha uma das opções {p.get('options')}. {p.get('instructions', '')}")
+        else:
+            propriedades[chave] = {"type": "number"}
+            instrucoes.append(f"- {chave}: uma nota. {p.get('instructions', '')} {json.dumps(p, ensure_ascii=False)}")
+    esquema = {"type": "object", "properties": propriedades, "required": list(propriedades), "additionalProperties": False}
+    resposta = openrouter_local.pelo_mimo(
+        projeto, f"{etapa} (no lugar do Jev)", "Você julga com rigor e responde só o JSON pedido.\n" + "\n".join(instrucoes),
+        "ESTADO:\n" + json.dumps(estado, ensure_ascii=False, indent=1), esquema, log=log, temperatura=0, motivo=motivo)
+    saida = {}
+    for chave, p in perguntas.items():
+        tipo = p.get("type", "noul")
+        valor = resposta.get(chave)
+        if tipo == "noul":
+            valor = min(1.0, max(0.0, float(valor or 0)))
+        saida[chave] = {"type": tipo, tipo: valor}
+    return saida
+
+
+def decidir(projeto, etapa, estado: dict, perguntas: dict, log=print, modelo=None):
+    """Devolve as respostas do Jev para esse estado. Uma chamada responde todas as perguntas de uma vez.
+
+    Se o servidor do Jev cair (503, tempo esgotado), a mesma pergunta vai para o MiMo na hora, sem dormir.
+
+    Com jev.julgar_com: principal no config.yaml, ou FABRICA_JULGAR_COM=principal no ambiente (vale só para aquele
+    processo, sem mexer no servidor que está no ar), quem julga é o modelo principal, que hoje é gratuito."""
+    relogio = time.monotonic()
+    cfg = projeto.config.get("jev") or {}
+    if (os.environ.get("FABRICA_JULGAR_COM") or cfg.get("julgar_com") or "jev").strip().lower() == "principal":
+        try:
+            return _pelo_mimo(projeto, etapa, estado, perguntas, log, "")
+        except (Exception, SystemExit) as e:
+            raise RuntimeError(f"O modelo principal não julgou na etapa {etapa} ({e}).") from None
+    modelo = modelo or cfg.get("modelo", MODELO_PADRAO)
+    corpo = {"model": modelo, "state": estado, "questions": perguntas}
+    cabecalho = cabecalhos()  # com o nome da fábrica: o painel do OpenRouter separa o que é dela
+
+    ultimo_erro = ""
+    for tentativa in range(cfg.get("tentativas", 2)):
+        try:
+            r = postar_com_sessao(httpx.post, URL, corpo, projeto, headers=cabecalho,
+                                  timeout=cfg.get("tempo_maximo", 60))
+        except httpx.HTTPError as e:
+            ultimo_erro = f"o servidor do Jev não respondeu ({str(e)[:80] or type(e).__name__})"
+            continue
+        if r.status_code == 401:
+            raise SystemExit("A chave do OpenRouter foi recusada pelo Jev. Confira o arquivo .env.")
+        if r.status_code == 402 and not credito_reservado(r):
+            raise SystemExit("Acabou o crédito no OpenRouter. Adicione saldo em openrouter.ai/credits.")
+        if r.status_code in (429, 500, 502, 503, 504, 529):
+            ultimo_erro = f"o servidor do Jev caiu ({r.status_code})"
+            continue
+        if r.status_code != 200:
+            ultimo_erro = f"o Jev recusou o pedido ({r.status_code} {r.text[:120]})"
+            break
+        dados = r.json()
+        _registrar(projeto, etapa, dados.get("usage"), dados.get("model", modelo), time.monotonic() - relogio)
+        respostas = dados.get("answers")
+        if not respostas:
+            ultimo_erro = "o Jev respondeu sem answers"
+            continue
+        return respostas
+    try:
+        return _pelo_mimo(projeto, etapa, estado, perguntas, log, ultimo_erro)
+    except (Exception, SystemExit) as e:
+        raise RuntimeError(f"Nem o Jev nem o MiMo responderam na etapa {etapa} ({ultimo_erro}; {e}).") from None

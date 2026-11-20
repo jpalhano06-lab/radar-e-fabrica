@@ -1,0 +1,121 @@
+/* animation-ai, tema impacto (animation_ai.TEMAS["impacto"], motor_impacto.js): fundo quase preto com a foto da cena
+   atrás, letra gigante, uma cor de destaque, brilho, grão e câmera sempre andando. Vem do protótipo de 2026-10-13
+   (teste-estilos/prototipo). A faixa de baixo fica livre para a legenda queimada. Nada aqui anima sozinho: quem move
+   tudo é a linha do tempo do motor. */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--fundo, #07080A); }
+#root { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: var(--fundo, #07080A);
+        font-family: "Texto", system-ui, sans-serif; color: var(--txt, #F5F3EE); }
+#palco { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 50% 42%; }
+.bg { position: absolute; left: -80px; top: -60px; width: 2080px; height: 1200px; overflow: hidden; }
+.bg img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.bg.vazio { background: radial-gradient(900px 700px at 28% 30%, var(--brilho-a, rgba(77,163,255,.20)), transparent 62%),
+                        radial-gradient(900px 700px at 76% 72%, var(--brilho-b, rgba(255,210,63,.14)), transparent 60%),
+                        var(--fundo, #07080A); }
+.escuro { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block;
+          background: radial-gradient(ellipse at 50% 40%, rgba(7,8,10,.25), rgba(7,8,10,.80) 75%); }
+.escuro.forte { background: rgba(7,8,10,.38); }
+.escuro.lado { background: linear-gradient(to right, rgba(7,8,10,.15), rgba(7,8,10,.55) 45%, rgba(7,8,10,.9)); }
+.card { position: absolute; border-radius: 30px; overflow: hidden; background: #15171C;
+        box-shadow: 0 50px 110px rgba(0,0,0,.65), 0 0 0 2px rgba(255,255,255,.10); }
+.card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* o cartão sem foto própria é um cartão de texto desenhado: fundo limpo, a faixa e o brilho da cor de destaque.
+   Antes levava a foto da cena desfocada, e na tela parecia imagem quebrada ("as imagens estão foscas",
+   everything-you-need-to-answer, 2026-10-14) */
+.card.vazio { background: radial-gradient(90% 120% at 100% 0%, rgba(255,210,63,.22), transparent 60%),
+                          radial-gradient(70% 90% at 0% 100%, rgba(255,77,61,.12), transparent 65%),
+                          linear-gradient(135deg, #20242E, #111319);
+              box-shadow: 0 50px 110px rgba(0,0,0,.65), 0 0 0 2px rgba(255,210,63,.35), inset 14px 0 0 var(--acc, #FFD23F); }
+.card .sombra { position: absolute; left: 0; right: 0; bottom: 0; height: 62%; display: block;
+                background: linear-gradient(to bottom, transparent, rgba(0,0,0,.88)); }
+.embrulho { position: absolute; }
+.pelicula { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; background: #000; opacity: 0;
+            pointer-events: none; }
+.bloco { position: absolute; }
+.gigante { font-weight: 900; letter-spacing: -0.04em; line-height: .9; text-transform: uppercase; }
+.medio { font-weight: 800; letter-spacing: -0.02em; line-height: 1.02; text-transform: uppercase; }
+.leve { font-weight: 600; font-size: 58px; line-height: 1.15; color: var(--txt2, #D9D4CA); letter-spacing: -0.01em; }
+.serif { font-family: "Titulo", Georgia, serif; font-style: italic; font-weight: 700; text-transform: none;
+         letter-spacing: -0.01em; }
+.uma-linha { white-space: nowrap; }
+.sombra-txt { text-shadow: 0 18px 60px rgba(0,0,0,.75); }
+.p { display: inline-block; margin-right: .22em; }
+.p:last-child { margin-right: 0; }
+.caixa { position: relative; display: inline-block; isolation: isolate; padding: 0 .12em; }
+.caixa > i { position: absolute; left: 0; right: 0; top: 4%; bottom: 0; border-radius: .08em; z-index: -1; display: block;
+             background: var(--acc, #FFD23F); transform-origin: 0 50%; }
+.caixa.escura { color: #0B0B0C; }
+.caixa.vermelha > i { background: var(--acc2, #FF4D3D); }
+.caixa.vermelha { color: #FFFFFF; }
+.cor-acc { color: var(--acc, #FFD23F); }
+.cor-acc2 { color: var(--acc2, #FF4D3D); }
+.brilho { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .55; pointer-events: none; }
+.vinheta { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; pointer-events: none;
+           background: radial-gradient(ellipse at 50% 45%, transparent 52%, rgba(0,0,0,.78) 100%); }
+.faixa { position: absolute; left: 0; right: 0; bottom: 0; height: 300px; pointer-events: none;
+         background: linear-gradient(to bottom, transparent, rgba(0,0,0,.55)); }
+.grao { position: absolute; left: -200px; top: -200px; width: 2320px; height: 1480px; pointer-events: none; opacity: .09;
+        mix-blend-mode: overlay;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>"); }
+.flash { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; background: #fff; pointer-events: none; opacity: 0; }
+.selo { position: absolute; width: 110px; height: 110px; border-radius: 50%; display: flex; align-items: center;
+        justify-content: center; background: var(--acc, #FFD23F); color: #0B0B0C; font-weight: 900; font-size: 60px;
+        box-shadow: 0 16px 40px rgba(0,0,0,.55), 0 0 0 6px rgba(0,0,0,.25); }
+.etiqueta { position: absolute; padding: 6px 16px; border-radius: 10px; background: var(--acc, #FFD23F); color: #0B0B0C;
+            font-weight: 900; font-size: 34px; letter-spacing: -0.01em; }
+.pino { position: absolute; width: 44px; height: 44px; border-radius: 50%; background: var(--acc, #FFD23F);
+        box-shadow: 0 0 0 10px rgba(255,210,63,.35), 0 0 60px rgba(255,210,63,.9); }
+svg.linhas { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: visible; pointer-events: none; }
+/* os outros desenhos dos tipos de itens e do comparar (grade, faixas, telacheia, versus), 2026-10-14 */
+.faixa-item { position: absolute; border-radius: 22px; overflow: hidden; display: block;
+              background: linear-gradient(90deg, rgba(24,27,34,.94), rgba(14,16,20,.88));
+              box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 2px rgba(255,255,255,.08), inset 10px 0 0 var(--acc, #FFD23F); }
+.faixa-item .card { border-radius: 0; box-shadow: none; }
+.faixa-num { position: absolute; top: 0; width: 90px; text-align: center; font-weight: 900; font-size: 84px;
+             color: var(--acc, #FFD23F); }
+.camada { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; display: block; }
+.camada > img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.escuro.lado-baixo { background: linear-gradient(to top right, rgba(7,8,10,.92) 15%, rgba(7,8,10,.45) 55%, rgba(7,8,10,.25)); }
+.tinta { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; mix-blend-mode: multiply;
+         background: linear-gradient(135deg, rgba(255,210,63,.30), transparent 60%); }
+.tinta.vermelha { background: linear-gradient(315deg, rgba(255,77,61,.32), transparent 60%); }
+/* os desenhos pelo material da cena (quadro, mapa, curiosidade), 2026-11-17 */
+.parede { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; display: block;
+          background: radial-gradient(1200px 800px at 34% 30%, #3A2A1E, #1A120C 70%), #120C08; }
+.luz-museu { position: absolute; left: -60px; top: -260px; width: 1400px; height: 1100px; pointer-events: none;
+             background: radial-gradient(ellipse at 50% 40%, rgba(255,226,170,.30), transparent 62%); }
+.moldura { position: absolute; padding: 26px; border-radius: 4px;
+           background: linear-gradient(135deg, #F3D27A, #A8782A 22%, #F6E2A0 45%, #8A5E1E 70%, #E8C064);
+           box-shadow: 0 50px 110px rgba(0,0,0,.75), inset 0 0 0 4px rgba(60,36,8,.55), inset 0 0 0 10px rgba(255,236,170,.25); }
+.moldura .tela { position: relative; width: 100%; height: 100%; overflow: hidden; display: block;
+                 box-shadow: inset 0 0 0 6px #2A1A08, inset 0 0 40px rgba(0,0,0,.6); background: #1A120C; }
+.moldura .tela img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.placa { position: absolute; padding: 40px 40px 44px; border-radius: 6px; background: rgba(18,12,8,.82);
+         box-shadow: 0 30px 70px rgba(0,0,0,.55), inset 0 0 0 2px rgba(232,192,100,.45); }
+.placa-kicker { font-weight: 800; font-size: 34px; letter-spacing: .14em; text-transform: uppercase; color: #E8C064;
+                margin-bottom: 12px; }
+.placa-num { font-family: "Titulo", Georgia, serif; font-weight: 700; color: #F3D27A; line-height: 1; margin-bottom: 10px; }
+.placa-fio { display: block; width: 160px; height: 4px; background: #E8C064; transform-origin: 0 50%; margin: 6px 0 22px; }
+.placa-txt { color: #F7EEDC; line-height: 1.12; }
+.placa-sub { font-weight: 600; font-size: 34px; color: #CDBB98; margin-top: 18px; }
+.sepia { filter: sepia(.25) saturate(.9) contrast(1.05); }
+.escuro.mapa { background: radial-gradient(ellipse at 50% 45%, rgba(20,12,4,0), rgba(20,12,4,.45) 85%); }
+.pino-mapa { position: absolute; width: 60px; height: 60px; border-radius: 50%; border: 7px solid #B3261E;
+             background: rgba(255,240,210,.85); box-shadow: 0 0 0 6px rgba(179,38,30,.25), 0 10px 26px rgba(0,0,0,.45); }
+.rotulo-mapa { position: absolute; padding: 10px 14px; border-radius: 6px; text-align: center; background: #EFE1BF;
+               box-shadow: 0 10px 26px rgba(0,0,0,.45), inset 0 0 0 2px rgba(122,90,48,.5); }
+.rosa { position: absolute; left: 1650px; top: 40px; width: 190px; height: 190px; border-radius: 50%;
+        background: rgba(239,225,191,.88); box-shadow: 0 14px 40px rgba(0,0,0,.4); }
+.pergaminho { position: absolute; padding: 22px 34px; border-radius: 8px; background: #EFE1BF; max-width: 1170px;
+              box-shadow: 0 24px 60px rgba(0,0,0,.55), inset 0 0 0 3px rgba(122,90,48,.55), inset 0 0 50px rgba(122,90,48,.35); }
+.cor-tinta { color: #B3261E; }
+.escuro.mapa-atual { background: linear-gradient(to bottom, rgba(7,8,10,.45), rgba(7,8,10,.2) 40%, rgba(7,8,10,.5)); }
+.rotulo-mapa.atual { background: rgba(11,12,16,.86); box-shadow: 0 12px 30px rgba(0,0,0,.5), inset 0 0 0 2px var(--acc, #FFD23F); }
+.caixa-mapa { position: absolute; padding: 22px 34px; border-radius: 16px; background: rgba(11,12,16,.84); max-width: 1170px;
+              box-shadow: 0 24px 60px rgba(0,0,0,.55), inset 8px 0 0 var(--acc, #FFD23F); }
+.bg video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.escuro.topo { background: linear-gradient(to bottom, rgba(7,8,10,.82) 0%, rgba(7,8,10,.55) 42%, rgba(7,8,10,.15) 70%, rgba(7,8,10,.45)); }
+.contorno { color: #FFFFFF; text-shadow: 0 5px 0 #000, 0 0 3px #000, 0 0 34px rgba(0,0,0,.85); }
+.contorno .cor-acc, .cor-acc.contorno { color: var(--acc, #FFD23F); }
+.selo.vs { left: 875px; top: 385px; width: 170px; height: 170px; font-size: 76px; letter-spacing: -0.04em;
+           box-shadow: 0 20px 60px rgba(0,0,0,.6), 0 0 0 10px rgba(7,8,10,.85); }

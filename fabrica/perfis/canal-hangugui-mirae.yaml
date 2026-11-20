@@ -1,0 +1,25 @@
+# Canal criado no editor (2026-10-29). Herda tudo de documentario.yaml e guarda a voz do canal.
+# Para mudar estilo, diretrizes ou texto fixo da descrição, edite aqui (veja perfis/base-documentario.yaml).
+base: documentario.yaml
+nome: 한국의 미래 (Hangugui Mirae)
+voz:
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). O catálogo do OpenSpeaker
+  # não tem nenhuma das vozes antigas, então a voz foi escolhida de novo: era Yong Gyu - Calm Korean Male
+  # Narrator. Escolhida pela descrição, não de ouvido: ouça a prévia no Radar antes de publicar.
+  # Voz antiga na GenAI Pro: h5eZa8VFAq0EQ8E81dfL (Yong Gyu - Calm Korean Male Narrator).
+  provedor: openspeaker
+  paga_escolhida: true             # escolhida no Radar: não vira a voz local
+  voice_id: elevenlabs_YUNJ9TWojN8nhLDaQrOC
+  nome_da_voz: Sangwon - Natural Korean Storyteller
+  idioma_da_voz: ko
+
+imagens:
+  # reserva_api: false saiu em 2026-11-08 a pedido do usuário ("sempre que acabar o crédito de um vai pro outro"):
+  # sem o ChatGPT, as imagens saem pelo OpenRouter, e sem crédito no OpenRouter, pelo ChatGPT
+  provedor: assinatura
+  provedor_reserva: openrouter
+
+# País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
+lugar:
+  pais: South Korea
+  moeda: "₩ (Korean won)"

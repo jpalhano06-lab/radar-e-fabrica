@@ -1,0 +1,207 @@
+import re
+from types import SimpleNamespace
+
+from fabrica import animation_ai as a
+
+
+def _projeto(tema=None):
+    return SimpleNamespace(config={"animation_ai": {"tema": tema}} if tema else {}, perfil={})
+
+
+def test_impacto_e_o_padrao_e_usa_o_motor_dele():
+    p = _projeto()
+    assert a.config(p)["tema"] == "impacto"
+    assert a.e_impacto(a.tema(p))
+    html = a.montar_html("frase", {"texto": "x", "t": 0.3}, 4.0, a.tema(p))
+    assert "R.baralho" in html and "--acc:#FFD23F" in html  # o motor e as cores do impacto
+    assert "--_motor" not in html  # a chave do motor não vira variável de CSS
+    # quem escolhe outro tema continua com o motor de antes
+    assert "R.baralho" not in a.montar_html("frase", {"texto": "x", "t": 0.3}, 4.0, a.tema(_projeto("apple")))
+
+
+def test_no_impacto_o_modelo_so_escolhe_tipo_que_tem_receita():
+    tipos = a.tipos_do_tema(_projeto())
+    assert tipos and set(tipos) <= set(a.TIPOS_IMPACTO)
+    assert "barras" not in tipos
+    assert a.tipos_do_tema(_projeto("apple")) == list(a.DE_COMPLEMENTO)
+    # no lugar do motion, a mesma restrição em cima da lista dele
+    assert set(a.tipos_do_tema(_projeto(), a.COMO_MOTION)) <= set(a.COMO_MOTION) & set(a.TIPOS_IMPACTO)
+
+
+def test_todo_tipo_do_impacto_tem_receita_no_motor():
+    js = (a.RECURSOS / "motor_impacto.js").read_text(encoding="utf-8")
+    qual = js[js.index("const QUAL"):]
+    qual = qual[:qual.index("};")]
+    com_receita = set(re.findall(r"(\w+):\s*\"", qual))
+    assert set(a.TIPOS_IMPACTO) <= com_receita
+    assert set(a.TIPOS_IMPACTO) <= set(a.CATALOGO)
+    assert set(a.COM_FOTO_IMPACTO) <= set(a.TIPOS_IMPACTO)
+
+
+class _ProjetoDeFotos:
+    def __init__(self, pasta, cenas):
+        self.pasta, self._cenas, self.config, self.perfil = pasta, cenas, {}, {}
+
+    def ler_json(self, nome):
+        return {"cenas": self._cenas}
+
+    def existe(self, nome):
+        return False
+
+
+def test_a_foto_da_cena_vai_para_o_fundo(tmp_path, monkeypatch):
+    from PIL import Image
+
+    (tmp_path / "midia").mkdir()
+    Image.new("RGB", (64, 48), (40, 90, 40)).save(tmp_path / "midia" / "0012.jpg")
+    cena = {"n": 12, "ini": 0.0, "fim": 4.0, "midia": {"fonte": "animation_ai"},
+            "anim_reserva": {"midia": {"fonte": "pexels", "id": "77", "tipo": "foto", "arquivo": "midia/0012.jpg"}}}
+    monkeypatch.setattr(a, "_foto_do_banco", lambda *args, **kw: None)
+    pasta = tmp_path / "animation_ai" / "0012"
+    dados = {"valor": "150", "t": 0.4}
+    creditos = a.fotos_impacto(_ProjetoDeFotos(tmp_path, [cena]), [cena], "numero", dados, 0.0, pasta,
+                               log=lambda *x: None)
+    assert dados["fundo"] == "assets/fotos/fundo_0012.jpg" and (pasta / dados["fundo"]).exists()
+    assert dados["fundo_id"] == "pexels:77"
+    assert [c["id"] for c in creditos[12]] == ["77"]
+
+
+def test_sons_do_impacto_caem_nos_momentos_das_receitas():
+    # ligação: as causas aparecem (pop), o destino desliza (risco) e bate com o flash (baque)
+    d = {"itens": [{"texto": "a", "t": 0.5}, {"texto": "b", "t": 1.2}, {"texto": "c", "t": 1.4}]}
+    assert a.sons_impacto("causa_efeito", d, 6.0) == [(0.5, "pop"), (1.2, "pop"), (1.95, "baque")]  # o risco cai a 0,25 s do pop
+    # comparar: o segundo lado nunca chega antes de 0,8 s depois do primeiro
+    d = {"esq": {"titulo": "x", "t": 1.0}, "dir": {"titulo": "y", "t": 1.2}}
+    assert a.sons_impacto("comparar", d, 6.0) == [(0.9, "risco"), (1.8, "baque")]
+    # nada depois do fim, no máximo 8, sempre 0,25 s entre eles
+    d = {"itens": [{"texto": str(i), "t": i * 0.5} for i in range(20)]}
+    sons = a.sons_impacto("lista", d, 5.0)
+    assert len(sons) <= 8 and all(t < 5.0 for t, _ in sons)
+    assert all(b[0] - a_[0] >= 0.25 for a_, b in zip(sons, sons[1:]))
+    # todo tipo do impacto tem som, com os exemplos
+    for tipo in a.TIPOS_IMPACTO:
+        dados, _ = a.resolver_tempos(tipo, a.EXEMPLOS[tipo], [], 6.0)
+        assert a.sons_impacto(tipo, dados, 6.0), tipo
+
+
+def test_nome_da_animacao_nao_pisa_no_arquivo_de_outra_cena(tmp_path):
+    # a cena 33 (a 34 de antes de renumerar) mostra midia/0034_anim.mp4: a cena 34 nova grava com outro nome
+    from fabrica.midia import nome_livre
+
+    cenas = [{"n": 33, "midia": {"arquivo": "midia/0034_anim.mp4"}}, {"n": 34, "midia": None}]
+    p = SimpleNamespace(ler_json=lambda nome: {"cenas": cenas})
+    assert nome_livre(p, 34, ("_anim.mp4", "_anim_capa.jpg")) == "0034_2"
+    assert nome_livre(p, 35, ("_anim.mp4", "_anim_capa.jpg")) == "0035"
+
+
+def test_receitas_do_python_batem_com_as_do_motor():
+    js = (a.RECURSOS / "motor_impacto.js").read_text(encoding="utf-8")
+    qual = js[js.index("const QUAL"):]
+    qual = dict(re.findall(r"(\w+):\s*\"(\w+)\"", qual[:qual.index("};")]))
+    assert qual == a.RECEITA_IMPACTO
+    for desenhos in [*a.DESENHOS.values(), a.DESENHOS_DO_MATERIAL]:
+        for d in desenhos:
+            assert f"R.{d} = function" in js, d
+
+
+def _cena_com(legenda, tipo="foto", n=1):
+    return {"n": n, "texto": "fala", "conferencia": {"legenda": legenda, "nota": 80, "sujeito": 90},
+            "midia": {"arquivo": f"midia/{n:04d}.jpg", "fonte": "wikimedia", "id": "x", "tipo": tipo}}
+
+
+def _projeto_com_arquivos(tmp_path, cenas):
+    for c in cenas:
+        (tmp_path / c["midia"]["arquivo"]).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / c["midia"]["arquivo"]).write_bytes(b"x")
+    return SimpleNamespace(pasta=tmp_path, imagem=lambda n: tmp_path / "imagens" / f"{n:04d}.png")
+
+
+def test_material_do_trecho(tmp_path):
+    pintura = _cena_com("O que é: Uma pintura a óleo de um navio na tempestade (certeza alta). "
+                        "Tipo de imagem: ilustracao. Época aparente: antiga.")
+    mapa = _cena_com("O que é: Um mapa antigo do mar do Norte com monstros marinhos (certeza alta). "
+                     "Tipo de imagem: mapa ou grafico. Época aparente: antiga.", n=2)
+    grafico = _cena_com("O que é: Um gráfico de barras de vendas (certeza alta). Tipo de imagem: mapa ou grafico.", n=3)
+    video = _cena_com("O que é: Uma arraia na areia (certeza alta). Tipo de imagem: quadro de video.", "video", n=4)
+    foto = _cena_com("O que é: Um leão deitado na savana (certeza alta). Tipo de imagem: foto real.", n=5)
+    p = _projeto_com_arquivos(tmp_path, [pintura, mapa, grafico, video, foto])
+    assert a.material_do_trecho(p, [pintura]) == "pintura"
+    assert a.material_do_trecho(p, [mapa]) == "mapa"
+    assert a.material_do_trecho(p, [grafico]) is None  # gráfico não é mapa
+    assert a.material_do_trecho(p, [video]) == "video"
+    assert a.material_do_trecho(p, [foto]) is None
+    # vale a primeira cena com foto, a mesma que vira o fundo (fotos_impacto)
+    sem_foto = {"n": 9, "texto": "fala", "midia": None}
+    assert a.material_do_trecho(p, [sem_foto, mapa, pintura]) == "mapa"
+    # a foto reprovada pelo Jev não vira fundo, e não decide o material
+    errada = dict(pintura, conferencia={"legenda": pintura["conferencia"]["legenda"], "sujeito": 5, "nota": 2})
+    assert a.material_do_trecho(p, [errada]) is None
+
+
+def test_desenhos_do_material():
+    # pintura e mapa mandam: a cena do material sempre sai com o desenho dele
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", antigo=True) == ["quadro"]
+    assert a.desenhos_possiveis("numero", {}, 6.0, "pintura", antigo=True) == ["quadro"]
+    assert a.desenhos_possiveis("frase", {}, 6.0, "mapa") == ["mapa"]
+    assert a.desenhos_possiveis("linha_do_tempo", {}, 6.0, "mapa") == ["mapa"]
+    lugares = {"itens": [{"texto": "Islândia"}, {"texto": "Noruega"}, {"texto": "Escócia"}]}
+    assert a.desenhos_possiveis("lista", lugares, 6.0, "mapa") == ["mapa"]
+    # lista com pintura segue nos cartões (cada item tem a sua foto)
+    assert "quadro" not in a.desenhos_possiveis("lista", lugares, 6.0, "pintura")
+    # o vídeo real põe a curiosidade na frente
+    assert a.desenhos_possiveis("frase", {}, 6.0, "video")[0] == "curiosidade"
+    # fora do impacto (canal de fundo claro): só o desenho do material, ou nenhum
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", impacto=False, antigo=True) == ["quadro"]
+    assert a.desenhos_possiveis("frase", {}, 6.0, "video", impacto=False) == ["curiosidade"]
+    assert a.desenhos_possiveis("frase", {}, 6.0, None, impacto=False) == []
+    assert a.desenhos_possiveis("lista", lugares, 6.0, None, impacto=False) == []
+    # tipo sem receita no impacto (barras) nunca vira quadro: os valores sumiriam
+    assert a.desenhos_possiveis("barras", {}, 6.0, "pintura", impacto=False) == []
+
+
+def test_desenhos_possiveis():
+    itens = lambda n: {"itens": [{"texto": f"item {i}"} for i in range(n)]}
+    assert a.desenhos_possiveis("lista", itens(3), 6.0) == ["baralho", "grade", "faixas", "telacheia"]
+    # cena 338 do everything-you-need-to-answer: 4 itens em 3,5 s, a tela cheia passaria rápido demais
+    assert a.desenhos_possiveis("lista", itens(4), 3.5) == ["baralho", "grade", "faixas"]
+    assert a.desenhos_possiveis("lista", itens(6), 9.0) == ["baralho"]
+    assert a.desenhos_possiveis("comparar", {}, 6.0) == ["comparar", "versus"]
+    assert a.desenhos_possiveis("antes_depois", {}, 6.0) == ["comparar"]
+    assert a.desenhos_possiveis("frase", {}, 6.0) == ["frase", "curiosidade"]
+    assert a.desenhos_possiveis("numero", {}, 6.0) == ["heroi", "curiosidade"]
+
+
+def test_duas_cenas_animadas_seguidas_nunca_saem_iguais(tmp_path):
+    cenas = [{"n": n, "ini": n * 10.0, "fim": n * 10.0 + 6, "midia": None} for n in range(1, 9)]
+    p = SimpleNamespace(pasta=tmp_path, config={}, perfil={}, ler_json=lambda nome: {"cenas": cenas})
+    lista = {"tipo": "lista", "dados": {"itens": [{"texto": "a"}, {"texto": "b"}, {"texto": "c"}]}}
+    pares = [([c], {"tipo": lista["tipo"], "dados": dict(lista["dados"])}) for c in cenas[:6]]
+    pares.append(([cenas[6]], {"tipo": "comparar", "dados": {}}))
+    pares.append(([cenas[7]], {"tipo": "comparar", "dados": {}}))
+    a.escolher_desenhos(p, pares)
+    desenhos = [pl["desenho"] for _, pl in pares]
+    assert desenhos[:4] == ["baralho", "grade", "faixas", "telacheia"]  # os quatro antes de repetir
+    assert all(x != y for x, y in zip(desenhos, desenhos[1:]))
+    assert desenhos[6:] in (["comparar", "versus"], ["versus", "comparar"])
+    # sempre o mesmo resultado
+    pares2 = [(g, {"tipo": pl["tipo"], "dados": pl["dados"]}) for g, pl in pares]
+    a.escolher_desenhos(p, pares2)
+    assert [pl["desenho"] for _, pl in pares2] == desenhos
+
+
+def test_visual_antigo_so_no_trecho_que_fala_do_passado():
+    # pedido do usuário em 2026-11-17: "mapas e ideias de animações antigas, somente para partes antigas faladas no
+    # roteiro; datas mais atuais, dados universais atuais". Pela fala e pela época do agente, nunca pela foto
+    assert a.trecho_antigo([{"texto": "Em 1539, um mapa avisava que no mar do Norte havia monstros."}])
+    assert a.trecho_antigo([{"texto": "No século XVI, os navegadores temiam o mar."}])
+    assert a.trecho_antigo([{"texto": "Na Idade Média, ninguém atravessava esse mar."}])
+    assert a.trecho_antigo([{"texto": "o acampamento", "epoca": "1898"}])
+    assert not a.trecho_antigo([{"texto": "Em 2024, a rota mais usada passou pelo Canal de Suez."}])
+    assert not a.trecho_antigo([{"texto": "No século XXI, o comércio pelo mar dobrou."}])
+    assert not a.trecho_antigo([{"texto": "O navio leva 1500 contêineres e 1900 pessoas."}])  # número não é data
+    # a pintura só vira quadro num trecho antigo; num trecho de hoje, segue nos desenhos de sempre
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", antigo=True) == ["quadro"]
+    assert "quadro" not in a.desenhos_possiveis("frase", {}, 6.0, "pintura", antigo=False)
+    assert a.desenhos_possiveis("frase", {}, 6.0, "pintura", impacto=False, antigo=False) == []
+    # o mapa vale nos dois tempos (o motor desenha o antigo ou o de hoje pelo _antigo)
+    assert a.desenhos_possiveis("frase", {}, 6.0, "mapa", antigo=False) == ["mapa"]

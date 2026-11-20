@@ -1,0 +1,4229 @@
+"""
+API HTTP REST da Fábrica de Vídeos (FastAPI).
+Permite integrar a fábrica com qualquer frontend web para trocar cenas,
+regerar imagens de IA, buscar material de acervo, fazer upload manual e refazer áudio.
+"""
+
+import asyncio
+import contextlib
+import json
+import mimetypes
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as EsperaEsgotada
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from urllib.parse import quote
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from . import drive, faxina, garimpo, video_ia
+from . import acordado, animacoes, aprendizados, cenas, chatgpt_assinatura, corrigir, diretor, entrega_pc, fish, pago, voz_local, publicacao, qualidade, shorts, thumbnail, rostos, revisao_video, trilha, custos, custos_reais, genaipro, openspeaker, imagens, limpeza, lixeira, midia, narracao, nichos, render, roteirista, verificar
+from . import ajustes_animacao, tempos
+from . import texto as tx
+from . import youtube_publicar as ytpub
+from .config import RAIZ, carregar_perfil, config_geral
+from .projeto import PROJETOS, Projeto
+
+# -----------------------------------------------------------------------------
+# Adaptações para compatibilidade com o Projeto canônico de fabrica-para-amigo
+# -----------------------------------------------------------------------------
+
+def _definir_override(self, secao: str, ajustes: dict) -> None:
+    limpo = {k: v for k, v in ajustes.items() if v is not None}
+    if not limpo:
+        return
+    chave = f"{secao}_override"
+    self.dados[chave] = {**(self.dados.get(chave) or {}), **limpo}
+    arquivo = self.pasta / "projeto.json"
+    arquivo.write_text(json.dumps(self.dados, ensure_ascii=False, indent=2), encoding="utf-8")
+    self.perfil[secao] = {**(self.perfil.get(secao) or {}), **limpo}
+    if secao == "voz":
+        self.sem_narracao_paga()
+
+def _definir_voz_override(self, ajustes: dict) -> None:
+    self.definir_override("voz", ajustes)
+
+def _definir_imagens_override(self, ajustes: dict) -> None:
+    self.definir_override("imagens", ajustes)
+
+if not hasattr(Projeto, "definir_override"):
+    Projeto.definir_override = _definir_override
+if not hasattr(Projeto, "definir_voz_override"):
+    Projeto.definir_voz_override = _definir_voz_override
+if not hasattr(Projeto, "definir_imagens_override"):
+    Projeto.definir_imagens_override = _definir_imagens_override
+
+_orig_projeto_init = Projeto.__init__
+def _projeto_init_overrides(self, nome: str):
+    _orig_projeto_init(self, nome)
+    for secao in ("voz", "imagens"):
+        override = self.dados.get(f"{secao}_override")
+        if override:
+            self.perfil[secao] = {**(self.perfil.get(secao) or {}), **override}
+    self.sem_narracao_paga()
+Projeto.__init__ = _projeto_init_overrides
+
+IDIOMAS_VOZ = getattr(narracao, "IDIOMAS_VOZ", [
+    {"id": "pt", "nome": "Português", "bandeira": "🇧🇷"},
+    {"id": "es", "nome": "Español", "bandeira": "🇪🇸"},
+    {"id": "en", "nome": "English", "bandeira": "🇺🇸"},
+])
+
+# Os quatro modelos que a GenAIPro aceita. Todos gastam 1 crédito por caractere (medido em 30/09/2026),
+# então o que muda entre eles é só o jeito de falar.
+MODELOS_NARRACAO = [
+    {"id": "eleven_multilingual_v2", "nome": "Multilingual v2",
+     "descricao": "o mais natural e estável para narração longa", "recomendado": True},
+    {"id": "eleven_v3", "nome": "Eleven v3",
+     "descricao": "o mais expressivo e dramático, aceita tags como [whispers]; ignora a velocidade", "recomendado": False},
+    {"id": "eleven_turbo_v2_5", "nome": "Turbo v2.5",
+     "descricao": "mais rápido de gerar, quase tão natural quanto o v2", "recomendado": False},
+    {"id": "eleven_flash_v2_5", "nome": "Flash v2.5",
+     "descricao": "o mais rápido de gerar, um pouco menos natural", "recomendado": False},
+]
+
+MODELO_GOOGLE = getattr(imagens, "MODELO_GOOGLE", "gemini-3.1-flash-lite-image")
+MODELO_KIE = getattr(imagens, "MODELO_KIE", "grok-imagine-image-2-0/text-to-image")
+MODELO_OPENROUTER_IMAGEM = getattr(imagens, "MODELO_OPENROUTER", "openai/gpt-5.4-image-2")
+PROVEDORES_IMAGEM = {"google": MODELO_GOOGLE, "kie": MODELO_KIE, "openrouter": MODELO_OPENROUTER_IMAGEM,
+                     "assinatura": chatgpt_assinatura.MODELO_IMAGEM}
+
+def _frame_do_video(video: Path, saida: Path, tempo: float = 0.5):
+    cmd = ["ffmpeg", "-y", "-ss", str(tempo), "-i", str(video), "-vframes", "1", "-q:v", "2", str(saida)]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+
+app = FastAPI(
+    title="Fábrica de Vídeos API",
+    description="API HTTP para controle e edição de projetos de vídeo",
+    version="0.1.0"
+)
+
+# Habilita CORS completo para qualquer frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
+)
+
+
+CABECALHOS_DE_PROXY =("x-forwarded-for", "x-real-ip", "forwarded", "cf-connecting-ip", "cf-ray")
+
+
+def pedido_do_proprio_computador(request) -> bool:
+    """O pedido nasceu neste computador (o LIGAR e o VIGIA conferindo se a fábrica responde). Pedido que passou por
+    túnel ou proxy nunca conta, mesmo chegando por 127.0.0.1: o túnel da Cloudflare entrega tudo da internet por
+    127.0.0.1, e um "X-Forwarded-For: 127.0.0.1" escrito por quem pede abria a lista de projetos sem token
+    (2026-10-20)."""
+    cliente_ip = request.client.host if request.client else ""
+    if cliente_ip not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return False
+    return not any(request.headers.get(h) for h in CABECALHOS_DE_PROXY)
+
+
+HOSTS_LOCAIS = ("localhost", "127.0.0.1", "[::1]")
+
+
+def acesso_local_sem_token(request) -> bool:
+    """Painel aberto no próprio computador (http://localhost:PORTA) entra sem token (pedido do usuário em 2026-10-21,
+    para o Claude operar o painel no navegador do app). Pela internet (editor.bbnews.cc, túnel) o token segue
+    obrigatório: pedido com cabeçalho de túnel ou proxy nunca conta (pedido_do_proprio_computador). E só vale para o
+    próprio painel: o Host tem de ser localhost (contra DNS rebinding) e a origem, se o navegador disser, também
+    (Origin e Sec-Fetch-Site), senão qualquer site aberto no navegador poderia mandar pedidos para a fábrica."""
+    if not pedido_do_proprio_computador(request):
+        return False
+    host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
+    if host not in HOSTS_LOCAIS:
+        return False
+    origem = (request.headers.get("origin") or "").lower()
+    if origem:
+        sem_porta = origem.split("://", 1)[-1].rsplit(":", 1)[0]
+        if not origem.startswith("http://") or sem_porta not in HOSTS_LOCAIS:
+            return False
+    return request.headers.get("sec-fetch-site", "same-origin") in ("same-origin", "none")
+
+
+@app.middleware("http")
+async def exigir_token(request: Request, call_next):
+    """Tranca a API com FABRICA_TOKEN, sempre — local ou exposta na internet.
+
+    Sem isso, qualquer um que alcançasse o endereço (nem precisa ser pela
+    internet: a mesma rede Wi-Fi já bastaria) poderia apagar projetos, gastar
+    as chaves pagas e até gravar chaves novas no .env. O front-end (painel)
+    só mostra e esconde telas; quem decide se o token vale é sempre este
+    middleware, nunca o que o navegador diz que já validou.
+
+    garantir_token() já garante que FABRICA_TOKEN sempre existe no .env a
+    partir do primeiro boot da fábrica, então esperado nunca vem vazio aqui.
+
+    O token vai no cabeçalho X-Fabrica-Token. Imagem, áudio e vídeo são
+    carregados pelo próprio navegador em <img> e <video>, que não mandam
+    cabeçalho, então nesses casos ele também vale como ?token= na URL."""
+    esperado = os.environ.get("FABRICA_TOKEN", "").strip()
+    caminho = request.url.path
+    # o Google chama essa de volta depois do login, sem como mandar nosso token —
+    # quem protege essa rota é o "code" de uso único que só o Google emite, não o token
+    protegido = (caminho.startswith("/api/") or caminho.startswith("/arquivos")) and caminho != "/api/youtube/oauth/callback"
+
+    # o navegador manda a consulta de permissão (preflight) sem cabeçalho nenhum
+    if esperado and protegido and request.method != "OPTIONS":
+        recebido = (request.headers.get("x-fabrica-token") or request.query_params.get("token") or "").strip()
+        if recebido:
+            if not secrets.compare_digest(recebido, esperado):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Token inválido. Configure a conexão com a fábrica no painel."},
+                    headers={"Access-Control-Allow-Origin": request.headers.get("origin", "*")},
+                )
+        else:
+            # Sem token: permite health check local (LIGAR e VIGIA) em /api/saude, só do próprio computador
+            if acesso_local_sem_token(request) or (caminho in ("/api/projetos", "/api/saude")
+                                                   and pedido_do_proprio_computador(request)):
+                return await call_next(request)
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Token inválido ou ausente. Configure a conexão com a fábrica no painel."},
+                headers={"Access-Control-Allow-Origin": request.headers.get("origin", "*")},
+            )
+
+    return await call_next(request)
+
+# Estado em memória de tarefas de renderização e processamento
+TAREFAS: Dict[str, Dict[str, Any]] = {}
+TAREFAS_LOCK = threading.Lock()
+
+
+# -----------------------------------------------------------------------------
+# Esteira de criação: do roteiro até todas as cenas com imagem, sem parar no meio
+# -----------------------------------------------------------------------------
+# O andamento fica gravado em projetos/NOME/criacao.json. Se a fábrica reiniciar, a criação
+# volta sozinha de onde parou (cada etapa já guarda o que fez, então nada é pago de novo).
+# Nada fica esperando cota: Groq e Gemini sem cota passam a vez na hora para o MiMo (groq_local e
+# gemini_local). Uma falha que sobrar tenta de novo em segundos, e a etapa continua de onde parou.
+# Só para de verdade com erro que precisa da pessoa (chave errada, crédito acabou).
+
+ARQ_CRIACAO = "criacao.json"
+CRIACOES_ATIVAS: set = set()
+TENTATIVAS_POR_ETAPA = 6              # falha que não é de chave: tenta de novo em segundos, depois de 5 em 5 min
+RODADAS_PARA_COMPLETAR = 3
+
+# erros que esperar não resolve: a pessoa precisa mexer em chave, crédito ou configuração
+#
+# tts_reference_audio_error (2026-11-18): o OpenSpeaker devolve esse erro quando o áudio de referência da voz está
+# quebrado no lado dele. A voz continua no catálogo e a chave está certa, então nada aqui conserta sozinho: a única
+# saída é escolher outra voz no perfil do canal. Sem estar nesta lista, a etapa ficava tentando de novo a cada 5
+# minutos para sempre: o vídeo "shopping-centres-are-dying-across-the-uk" girou nove horas e 119 tentativas sem
+# gravar um bloco, e a pessoa só descobriu olhando o log. Agora a criação para e pede para trocar a voz.
+_ERRO_PERMANENTE = re.compile(
+    r"inválid|recusou a chave|foi recusada|pediu uma chave|falta a chave|falta a \w+_key|acabou o crédito|"
+    r"adicione saldo|saldo de créditos insuficiente|credits insufficient|não achei o claude|não está conectado|defina voz|está vazio|só aceita|desconhecid|herda de|"
+    r"tts_reference_audio_error",
+    re.I)
+_ESPERAS = [5, 10, 20, 30, 45, 60]   # segundos: parado é pior, então nunca espera muito
+ESPERA_LONGA = 300                    # depois das tentativas rápidas, de 5 em 5 minutos, sem desistir
+
+
+class ParadaPrecisaDeVoce(Exception):
+    """Erro que a esteira não resolve sozinha, esperando."""
+
+
+def _salvar_criacao(task_id: str) -> None:
+    with TAREFAS_LOCK:
+        t = TAREFAS.get(task_id)
+        if not t or t.get("tipo") != "criacao":
+            return
+        copia = {**t, "logs": list(t.get("logs", []))[-300:]}
+        t["_salvo_em"] = time.time()
+    pasta = PROJETOS / copia["projeto"]
+    if not pasta.exists():
+        return
+    copia.pop("_salvo_em", None)
+    try:
+        from .util import gravar_atomico
+        gravar_atomico(pasta / ARQ_CRIACAO, json.dumps(copia, ensure_ascii=False, indent=1, default=str), tentativas=8)
+    except OSError:
+        pass
+
+
+def _ler_criacao(nome: str) -> Optional[Dict[str, Any]]:
+    arq = PROJETOS / nome / ARQ_CRIACAO
+    if not arq.exists():
+        return None
+    try:
+        return json.loads(arq.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _atualizar(task_id: str, **campos) -> None:
+    with TAREFAS_LOCK:
+        if task_id in TAREFAS:
+            TAREFAS[task_id].update(campos)
+    _salvar_criacao(task_id)
+
+
+def _log_tarefa(task_id: str, msg) -> None:
+    salvar = False
+    with TAREFAS_LOCK:
+        t = TAREFAS.get(task_id)
+        if t is not None:
+            t.setdefault("logs", []).append(str(msg))
+            salvar = t.get("tipo") == "criacao" and time.time() - t.get("_salvo_em", 0) > 5
+    if salvar:
+        _salvar_criacao(task_id)
+
+
+def _etapa(task_id: str, rotulo: str, funcao):
+    """Roda uma etapa até dar certo, tentando de novo em segundos. A etapa continua de onde parou.
+
+    Nunca desiste sozinha (pedido do usuário em 2026-10-10: "a edição jamais deve parar, exceto se tiver alto consumo
+    de tokens"): depois das TENTATIVAS_POR_ETAPA rápidas, tenta de novo a cada ESPERA_LONGA. Antes, uma queda de uns 2
+    minutos de um serviço derrubava a criação. Só param o erro que esperar não resolve (chave, crédito), o projeto
+    apagado pelo × do editor e o teto de gasto (pago.py, que espera a confirmação sem derrubar a etapa)."""
+    with TAREFAS_LOCK:
+        nome = (TAREFAS.get(task_id) or {}).get("projeto")
+    # quanto a fase levou, com as novas tentativas, vai para o tempos.json (pedido do usuário em 2026-10-13: medir
+    # antes de acelerar)
+    with tempos.medir(PROJETOS / nome, rotulo, log=lambda m: _log_tarefa(task_id, m)) if nome else _sem_medida():
+        return _etapa_tentando(task_id, nome, rotulo, funcao)
+
+
+@contextlib.contextmanager
+def _sem_medida():
+    yield
+
+
+# A espera entre tentativas de cada projeto, para o botão Retomar (rota /retomar) acordar a criação na hora. Pedido do
+# usuário em 2026-11-08: o pedido 83 ficou um dia esperando 5 min entre tentativas, e depois da recarga da GenAIPro
+# não havia como fazê-lo seguir sem esperar a próxima volta
+ACORDAR: Dict[str, threading.Event] = {}
+
+
+def acordar(nome: str) -> bool:
+    """Faz a criação que está esperando a próxima tentativa tentar já. False quando ela não está esperando."""
+    with TAREFAS_LOCK:
+        evento = ACORDAR.get(nome)
+    if evento is None:
+        return False
+    evento.set()
+    return True
+
+
+def _esperar(nome, segundos) -> None:
+    if not nome:
+        time.sleep(segundos)
+        return
+    evento = threading.Event()
+    with TAREFAS_LOCK:
+        ACORDAR[nome] = evento
+    try:
+        evento.wait(segundos)
+    finally:
+        with TAREFAS_LOCK:
+            if ACORDAR.get(nome) is evento:
+                ACORDAR.pop(nome, None)
+
+
+# O botão Pausar do Radar (pedido do usuário em 2026-11-16: pausar os vídeos para um pedido urgente passar na frente).
+# O arquivo projetos/NOME/pausado segura a criação na próxima etapa ou no próximo aviso da esteira, e vale mesmo
+# depois de a fábrica reiniciar. Nada é perdido: ao despausar, a etapa continua de onde parou.
+ARQ_PAUSADO = "pausado"
+
+
+def _pausado(nome) -> bool:
+    return bool(nome) and (PROJETOS / nome / ARQ_PAUSADO).exists()
+
+
+def _segurar_se_pausado(task_id: str, nome) -> None:
+    if not _pausado(nome):
+        return
+    with TAREFAS_LOCK:
+        antes = (TAREFAS.get(task_id) or {}).get("mensagem")
+    _atualizar(task_id, pausado=True, mensagem="Pausado (botão Pausar do Radar)")
+    # dormir aqui não pode segurar a vaga de "uma de cada vez": o vídeo pausado dentro da Conferência das completadas
+    # travava todos os outros até a despausa (o british-heart-foundation esperou 45 min pelo europa-s-ocean-under-the-ice
+    # em 17/11/2026). Solta a vaga, dorme, e na volta espera a vez de novo
+    from . import vez
+    with vez.solto(lambda m: _log_tarefa(task_id, m), "vídeo pausado"):
+        while _pausado(nome) and (PROJETOS / nome / "projeto.json").exists():
+            _esperar(nome, 5)  # o despausar acorda na hora (acordar)
+    _atualizar(task_id, pausado=False, mensagem=antes or "Retomando...")
+
+
+def _etapa_tentando(task_id: str, nome, rotulo: str, funcao):
+    tentativa = 0
+    while True:
+        _segurar_se_pausado(task_id, nome)
+        try:
+            return funcao()
+        except (Exception, SystemExit) as err:
+            msg = str(err) or err.__class__.__name__
+            if _ERRO_PERMANENTE.search(msg):
+                raise ParadaPrecisaDeVoce(msg) from None
+            if nome and not (PROJETOS / nome / "projeto.json").exists():
+                raise  # o projeto foi apagado: não há o que continuar
+            espera = _ESPERAS[tentativa] if tentativa < min(TENTATIVAS_POR_ETAPA, len(_ESPERAS)) else ESPERA_LONGA
+            tentativa += 1
+            _log_tarefa(task_id, f"  {rotulo}: {msg}")
+            _log_tarefa(task_id, f"  tentando de novo em {espera}s, de onde parou (tentativa {tentativa + 1})")
+            _atualizar(task_id, mensagem=f"{rotulo}: um serviço falhou, tentando de novo em {espera}s...")
+            _esperar(nome, espera)
+            _atualizar(task_id, mensagem=f"{rotulo}: retomando...")
+
+
+def _nomes_em(pasta: Path, sub: str) -> set:
+    """Os nomes dentro de uma subpasta do projeto, de uma vez só (em minúsculas: o Windows não diferencia)."""
+    try:
+        return {e.name.lower() for e in os.scandir(pasta / sub)}
+    except OSError:
+        return set()
+
+
+def _cenas_sem_arquivo(pasta: Path, cenas: List[dict]) -> List[int]:
+    """A mesma regra, com as cenas já lidas e sem abrir o projeto: é assim que a listagem confere em lote.
+
+    Duas escolhas de velocidade, porque isto corre milhares de cenas a cada listagem. A pasta é lida de uma vez e
+    o resto é procura na memória, no lugar de uma ida ao disco por cena. E o caminho da imagem é montado à mão: o
+    Projeto.imagem passa pelo caminho(), que cria a pasta mãe — um mkdir por cena, escrita no disco para não
+    escrever nada."""
+    dentro: Dict[str, set] = {}
+
+    def tem(caminho: str) -> bool:
+        sub, _, nome = caminho.replace("\\", "/").rpartition("/")
+        if sub not in dentro:
+            dentro[sub] = _nomes_em(pasta, sub)
+        return nome.lower() in dentro[sub]
+
+    faltam = []
+    for c in cenas:
+        m = c.get("midia")
+        arquivo = m.get("arquivo") if m else None
+        if not tem(str(arquivo) if arquivo else f"imagens/{c['n']:04d}.png"):
+            faltam.append(c["n"])
+    return faltam
+
+
+def cenas_sem_arquivo(p: Projeto) -> List[int]:
+    """Cenas que o render recusaria: a mesma regra do render.origem_da_cena."""
+    return _cenas_sem_arquivo(p.pasta, p.ler_json("cenas.json")["cenas"])
+
+
+def _soltar_midia_sumida(p: Projeto) -> None:
+    """Cena que aponta para um arquivo que não existe mais volta a esperar material, para a busca pegar ela."""
+    dados = p.ler_json("cenas.json")
+    mexeu = False
+    for c in dados["cenas"]:
+        m = c.get("midia")
+        if m and m.get("arquivo") and not (p.pasta / m["arquivo"]).exists():
+            c.pop("midia", None)
+            mexeu = True
+    if mexeu:
+        p.salvar_json("cenas.json", dados)
+
+
+def _marcar_sem_foto_no_banco(p: Projeto, log=print) -> list[int]:
+    """A cena de acervo que terminou a esteira sem nenhuma foto passa a ser cena de IA (sem_midia_real).
+
+    Sem isso ela não é imagem de IA pendente (midia.precisa_ia) e a criação parava pedindo ajuda com a IA ligada: no
+    20-gigantes-da-era-do-gelo (2026-11-01) a cena 376 ("museum collection"), devolvida ao banco pelo teto de IA e sem
+    foto nenhuma lá, jogou 3h28 de produção fora com o recado "ou ligue a IA no config.yaml", já ligada."""
+    dados = p.ler_json("cenas.json")
+    sem_arquivo = set(cenas_sem_arquivo(p))
+    marcadas = [c for c in dados["cenas"]
+                if c["n"] in sem_arquivo and not c.get("midia") and not midia.precisa_ia(c)]
+    if not marcadas:
+        return []
+    for c in marcadas:
+        c["sem_midia_real"] = True
+    p.salvar_json("cenas.json", dados)
+    log(f"  {len(marcadas)} cena(s) sem nenhuma foto no banco viram imagem de IA: "
+        + ", ".join(str(c["n"]) for c in marcadas[:30]))
+    return [c["n"] for c in marcadas]
+
+
+def _estender_anterior(p: Projeto, log=print) -> list[int]:
+    """Canal sem IA: a cena que nenhum banco tem fica com a imagem da cena anterior, que segue na tela.
+
+    Pedido do usuário em 2026-11-13: no a-journey-through-orions-belt (No narration, sem IA) a criação parou a 96%
+    pedindo foto de 4 cenas (constelação se desfazendo, sistema estelar de Mintaka). Agora a imagem de antes se
+    estende por cima delas. A cópia leva fonte "estendida" para a varredura de repetidas não tirá-la de novo. Sem
+    cena anterior com imagem (a primeira do vídeo), usa a seguinte."""
+    dados = p.ler_json("cenas.json")
+    cenas = sorted(dados["cenas"], key=lambda c: c["n"])
+    sem = set(_cenas_sem_arquivo(p.pasta, cenas))
+    if not sem:
+        return []
+
+    def com_imagem(c):
+        return c["n"] not in sem and (c.get("midia") or {}).get("arquivo")
+
+    estendidas = []
+    for i, c in enumerate(cenas):
+        if c["n"] not in sem:
+            continue
+        fonte = next((o for o in reversed(cenas[:i]) if com_imagem(o)), None) \
+            or next((o for o in cenas[i + 1:] if com_imagem(o)), None)
+        if not fonte:
+            continue
+        m = fonte["midia"]
+        c["midia"] = {"arquivo": m["arquivo"], "tipo": m.get("tipo", "foto"), "fonte": "estendida", "de": fonte["n"]}
+        sem.discard(c["n"])
+        estendidas.append(c["n"])
+    if estendidas:
+        p.salvar_json("cenas.json", dados)
+        log("  canal sem IA: a imagem da cena anterior se estende por " + ", ".join(map(str, estendidas)))
+    return estendidas
+
+
+def _executar_criacao(nome: str, task_id: str) -> None:
+    """A esteira inteira. Pode ser chamada de novo a qualquer momento: pula o que já foi feito."""
+    with TAREFAS_LOCK:
+        if nome in CRIACOES_ATIVAS:
+            return
+        CRIACOES_ATIVAS.add(nome)
+    try:
+        _esteira(nome, task_id)
+    except ParadaPrecisaDeVoce as err:
+        _atualizar(task_id, status="erro", etapa="erro", concluido=False, pronto_para_edicao=False, precisa_voce=True,
+                   erro=str(err), mensagem=f"Parado, precisa de você: {err}")
+        _log_tarefa(task_id, f"[ERRO]: {err}")
+    except (Exception, SystemExit) as err:
+        _atualizar(task_id, status="erro", etapa="erro", concluido=False, pronto_para_edicao=False,
+                   erro=str(err), mensagem=f"Erro no processamento: {err}")
+        _log_tarefa(task_id, f"[ERRO]: {err}")
+    finally:
+        _salvar_criacao(task_id)
+        with TAREFAS_LOCK:
+            CRIACOES_ATIVAS.discard(nome)
+    with TAREFAS_LOCK:
+        terminou = (TAREFAS.get(task_id) or {}).get("status") == "concluido"
+    if terminou:
+        _renderizar_sozinho(nome, task_id)
+
+
+class _RodaJa:
+    """No lugar do BackgroundTasks do FastAPI: o render automático roda numa linha própria, como o do botão."""
+
+    def __init__(self, nome: str):
+        self.nome = nome
+
+    def add_task(self, funcao, *args, **kwargs):
+        threading.Thread(target=funcao, args=args, kwargs=kwargs, daemon=True, name=f"render-{self.nome}").start()
+
+
+def _renderizar_sozinho(nome: str, task_id: str) -> None:
+    """A criação terminou: o render começa sozinho, pelo mesmo caminho do botão Renderizar, e no fim saem o kit de
+    publicação, as thumbnails, os shorts e a pasta de entrega (iniciar_publicacao). Pedido do usuário em 2026-10-15.
+    Desliga com criacao.renderizar_ao_terminar: false no config.yaml."""
+    try:
+        if not (Projeto(nome).config.get("criacao") or {}).get("renderizar_ao_terminar", True):
+            return
+        disparar_render(nome, RenderPayload(), _RodaJa(nome))
+        _log_tarefa(task_id, "  render começou sozinho; no fim, a pasta com o vídeo, o título e a descrição")
+        _atualizar(task_id, mensagem="Cenas prontas! O vídeo está sendo renderizado sozinho.")
+        _salvar_criacao(task_id)
+    except HTTPException as erro:
+        _log_tarefa(task_id, f"  o render automático não começou: {erro.detail}")
+    except (Exception, SystemExit) as erro:
+        _log_tarefa(task_id, f"  o render automático não começou: {str(erro)[:200]}")
+
+
+def _esperar_o_agente(task_id: str, p, cenas_prontas) -> None:
+    # enquanto espera, a barra anda com os lotes que o agente já decidiu (de 15% a 35%): antes ela ficava parada
+    # nos 15% e a criação parecia travada
+    while True:
+        try:
+            cenas_prontas.result(timeout=5)  # o agente já tentou de novo sozinho; um erro que sobrou aparece aqui
+            return
+        except EsperaEsgotada:
+            andamento = roteirista.PROGRESSO.get(p.nome) or {}
+            if andamento.get("total"):
+                feitos, total = andamento["feitos"], andamento["total"]
+                _atualizar(task_id, progresso_pct=15 + int(20 * feitos / total),
+                           mensagem=f"Narração pronta! O agente já decidiu {feitos} de {total} lotes de cenas...")
+
+def _esteira(nome: str, task_id: str) -> None:
+    p = Projeto(nome)
+    fio = threading.current_thread()
+
+    def log_w(msg):
+        _log_tarefa(task_id, msg)
+        # a pausa no meio de uma etapa longa (as imagens), só no fio da esteira: um fio de trabalho parado aqui
+        # poderia segurar uma vaga que outro vídeo usa
+        if threading.current_thread() is fio:
+            _segurar_se_pausado(task_id, nome)
+    with TAREFAS_LOCK:
+        feitas = set(TAREFAS[task_id].setdefault("feitas", []))
+    # projeto de antes da esteira: o que já está no disco conta como feito
+    with TAREFAS_LOCK:
+        # depois de uma troca de narração: as cenas que ficaram sem imagem ou mudaram de fala (conferir_cenas) e,
+        # delas, as que mudaram de fala com a foto antiga (conferir_forcadas), que o Jev julga de novo
+        conferir_cenas = TAREFAS[task_id].get("conferir_cenas")
+        conferir_forcadas = set(TAREFAS[task_id].get("conferir_forcadas") or [])
+    if p.existe("cenas.json"):
+        feitas |= {"mapa", "narracao", "cenas"}
+        if (p.pasta / "conferir").exists() and conferir_cenas is None:
+            feitas.add("conferir")  # a conferência paga o Jev: a que já rodou não roda de novo
+
+    def marcar(etapa):
+        feitas.add(etapa)
+        _atualizar(task_id, feitas=sorted(feitas))
+
+    _atualizar(task_id, status="processando", erro=None, precisa_voce=False, aguardando_ate=None)
+
+    # PASSO 0: o agente de roteiro lê o roteiro inteiro e devolve o mapa do vídeo, que guia as cenas
+    agente = cenas_prontas = None
+    if "cenas" not in feitas and roteirista.ativo(p):
+        _atualizar(task_id, etapa="mapa", progresso_pct=8, mensagem="Lendo o roteiro inteiro e montando o mapa do vídeo...")
+        mapa_video = _etapa(task_id, "Mapa do roteiro", lambda: roteirista.mapa(p, log=log_w))
+        _atualizar(task_id, mapa=mapa_video)
+        marcar("mapa")
+
+        # o JSON de todas as cenas sai do texto, então o agente trabalha enquanto a narração é gravada
+        def montar_cenas():
+            dados = _etapa(task_id, "JSON de cenas", lambda: roteirista.roteiro_de_cenas(p, log=log_w))
+            _atualizar(task_id, cenas_planejadas=len(dados["cenas"]))
+            return dados
+
+        agente = ThreadPoolExecutor(max_workers=1)
+        cenas_prontas = agente.submit(montar_cenas)
+    elif "cenas" not in feitas:
+        # sem isso, parecia que o agente tinha travado: ele só não entra nesses casos
+        log_w("  agente de roteiro desligado neste projeto (perfil com personagem ou efeitos, modo offline "
+              "ou roteirista.ativo: false no config.yaml): as cenas seguem pelo caminho antigo")
+
+    # PASSO 1: Narração (junto com o JSON de cenas do agente)
+    if "narracao" not in feitas:
+        _atualizar(task_id, etapa="narracao", passo_atual=1, progresso_pct=15,
+                   mensagem=("Gravando a narração enquanto o agente monta o JSON das cenas..."
+                             if agente else "Gerando áudio da narração e marcando tempo das palavras..."))
+        try:
+            _etapa(task_id, "Narração", lambda: narracao.narrar(p, log=log_w))
+        finally:
+            if agente:
+                agente.shutdown(wait=False)
+        marcar("narracao")
+    if cenas_prontas is not None:
+        _atualizar(task_id, mensagem="Narração pronta! Esperando o agente terminar o JSON das cenas...")
+        # a narração já acabou: o que passar daqui é o agente de roteiro atrasando a criação
+        with tempos.medir(p, "Esperando o JSON de cenas", log=log_w):
+            _esperar_o_agente(task_id, p, cenas_prontas)
+
+    # PASSO 2: Direção de Arte e Divisão de Cenas
+    if "cenas" not in feitas:
+        _atualizar(task_id, etapa="cenas", passo_atual=2, progresso_pct=40,
+                   mensagem="Encaixando o JSON de cenas no tempo da narração...")
+        _etapa(task_id, "Divisão de cenas", lambda: cenas.planejar(p, log=log_w))
+        marcar("cenas")
+
+    # PASSO 2b: perfil todo em motion: toda cena vira clipe antes de qualquer busca de foto (a busca pula quem já tem)
+    from . import animation_ai, motion_ia
+    if motion_ia.pausado(p) and motion_ia.tudo_pedido(p) and animation_ai.ligado(p):
+        _atualizar(task_id, etapa="motion", progresso_pct=40, mensagem="Criando as cenas animadas de todas as cenas...")
+        try:
+            with tempos.medir(p, "Cenas animadas (vídeo todo)", log=log_w):
+                animation_ai.video_todo(p, log=log_w)
+        except (Exception, SystemExit) as erro_anim:
+            log_w(f"  as cenas animadas falharam, as que faltam seguem com foto: {erro_anim}")
+    if motion_ia.tudo_em_motion(p):
+        _atualizar(task_id, etapa="motion", progresso_pct=40, mensagem="Criando os clipes de motion de todas as cenas...")
+        try:
+            with tempos.medir(p, "Motion (vídeo todo)", log=log_w):
+                motion_ia.todas_as_cenas(p, log=log_w)
+        except (Exception, SystemExit) as erro_motion:
+            log_w(f"  o motion de todas as cenas falhou, as que faltam seguem com foto: {erro_motion}")
+
+    # PASSO 3: Mídia de Acervo (Pexels / Pixabay / Wikimedia). A busca pula as cenas que já têm material.
+    _atualizar(task_id, etapa="midia", passo_atual=3, progresso_pct=65,
+               mensagem="Buscando fotos e vídeos de acervo (Pexels, Pixabay e Wikimedia)...")
+    _soltar_midia_sumida(p)
+    imagens_adiantadas = imagens.adiantar(p, log_w)
+    _etapa(task_id, "Busca de acervo", lambda: midia.buscar(p, log=log_w))
+    marcar("midia")
+
+    # PASSO 4: Conferência das cenas de acervo. Vem antes das imagens de IA de propósito: o
+    # que a conferência conserta de graça no acervo deixa de virar imagem paga logo depois
+    cfg_corr = p.config.get("corrigir") or {}
+    # a cena que o Jev já aprovou na captura (antes de baixar) não é conferida de novo: só as que ficaram na
+    # dúvida, foram preenchidas no aperto ou não passaram pela conferência. É isso que tira a necessidade do
+    # botão Corrigir Mídia sem repetir centenas de julgamentos
+    # regra fixa: na dúvida é também toda cena com nota abaixo da mínima, e na criação a conferência troca
+    # sozinha tudo o que ficar abaixo dela (buscando no acervo, sem custo de imagem), sem deixar para o botão
+    minima = midia.nota_minima_da_conferencia(p)
+
+    def aprovada_na_captura(c):
+        cap = c.get("captura") or {}
+        return cap.get("conferida") and not cap.get("suspeita") and (cap.get("nota") or 0) >= minima
+
+    if conferir_cenas is None:
+        na_duvida = {c["n"] for c in corrigir.conferiveis(p) if not aprovada_na_captura(c)}
+    else:
+        na_duvida = {c["n"] for c in corrigir.conferiveis(p, numeros=set(conferir_cenas))
+                     if c["n"] in conferir_forcadas or not aprovada_na_captura(c)}
+    if "conferir" not in feitas and cfg_corr.get("automatico", True) and na_duvida:
+        _atualizar(task_id, etapa="conferir", passo_atual=4, progresso_pct=78,
+                   mensagem=f"Conferindo as {len(na_duvida)} cena(s) que ficaram na dúvida na captura...")
+        log_w(f"  {len(na_duvida)} cena(s) na dúvida vão para a conferência; as aprovadas na captura ficam como estão")
+        try:
+            # as cenas que a conferência manda para a IA já começam a ser geradas enquanto ela segue (imagens.ao_fundo)
+            with imagens.ao_fundo(p, log_w, onde="a conferência"):
+                resultado_conf = _etapa(task_id, "Conferência", lambda: corrigir.corrigir(
+                    p, numeros=na_duvida, rodadas=cfg_corr.get("rodadas", corrigir.RODADAS),
+                    nota_minima=minima, nota_para_trocar=minima, log=log_w))
+            _atualizar(task_id, conferencia={
+                "avaliadas": resultado_conf["avaliadas"], "trocadas": resultado_conf["trocadas"],
+                "para_revisar": resultado_conf.get("para_revisar", []),
+                "precisam_ia": resultado_conf.get("precisam_ia", [])})
+        except ParadaPrecisaDeVoce:
+            raise
+        except (Exception, SystemExit) as erro_conf:
+            # a conferência é uma melhoria, não um bloqueio: o vídeo segue mesmo se ela falhar
+            log_w(f"  a conferência das cenas falhou, seguindo sem ela: {erro_conf}")
+        marcar("conferir")
+
+    # PASSO 5: Imagens de IA para o que o acervo não resolveu. Os clipes das cenas que já têm a imagem começam a ser
+    # montados em segundo plano enquanto isso (render.adiantar_clipes): o render final só faz os que mudarem
+    render.adiantar_clipes(p, log_w)
+    _atualizar(task_id, etapa="imagens", passo_atual=5, progresso_pct=88, mensagem="Gerando imagens de IA...")
+    if imagens_adiantadas:
+        with tempos.medir(p, "Esperando as imagens adiantadas", log=log_w):
+            imagens_adiantadas.join()
+    _etapa(task_id, "Imagens de IA", lambda: imagens.gerar(p, log=log_w))
+    marcar("imagens")
+
+    # PASSO 6: nenhuma cena pode ficar sem imagem, senão o render recusa
+    for rodada in range(1, RODADAS_PARA_COMPLETAR + 1):
+        faltam = cenas_sem_arquivo(p)
+        if not faltam:
+            break
+        _atualizar(task_id, progresso_pct=94,
+                   mensagem=f"Completando {len(faltam)} cena(s) que ficaram sem imagem (rodada {rodada})...")
+        log_w(f"  {len(faltam)} cena(s) sem imagem: " + ", ".join(map(str, faltam[:30])))
+        _soltar_midia_sumida(p)
+        _etapa(task_id, "Completar cenas", lambda: corrigir.preparar_gratis(p, log=log_w))
+        _etapa(task_id, "Imagens de IA", lambda: imagens.gerar(p, log=log_w))
+    faltam = cenas_sem_arquivo(p)
+    if faltam:
+        # nunca copiar a imagem de outra cena: mais uma busca de imagem NOVA do assunto, nos 9 bancos
+        _soltar_midia_sumida(p)
+        _atualizar(task_id, progresso_pct=95,
+                   mensagem=f"Procurando foto nos bancos para {len(faltam)} cena(s) que ficaram sem imagem...")
+        _etapa(task_id, "Completar cenas", lambda: midia.buscar(p, apenas=set(faltam), log=log_w, permissivo=True))
+    # regra fixa: jamais repetir imagem, conferido na imagem em si, antes de dizer que está pronto
+    # cada etapa daqui para baixo diz o que está fazendo: a mensagem ficava na da última rodada acima, e no
+    # 20-gigantes-da-era-do-gelo (2026-11-01) o site mostrou "completando 1 cena (rodada 3)" por 52 min enquanto a
+    # conferência das completadas refazia dezenas de imagens
+    _atualizar(task_id, progresso_pct=95, mensagem="Conferindo se nenhuma imagem se repete no vídeo...")
+    _etapa(task_id, "Sem imagens repetidas", lambda: midia.tirar_repetidas(p, log=log_w))
+    # o que o Completar cenas pôs depois da conferência (a rodada que aceita o que a busca achou) passa pelo Jev
+    # agora: a errada busca de novo e, com a IA ligada, vira imagem de IA. Nunca para o vídeo
+    try:
+        _atualizar(task_id, progresso_pct=96,
+                   mensagem="Conferindo com o Jev as cenas completadas no fim (a errada é refeita)...")
+        # um vídeo por vez nesta conferência (vez.py): duas juntas levavam quase 3 vezes cada
+        from . import vez
+        with vez.na_vez("conferencia_completadas", p, log_w, "conferência das completadas"):
+            with tempos.medir(p, "Conferência das completadas", log=log_w), \
+                    imagens.ao_fundo(p, log_w, onde="a conferência das completadas"):
+                corrigir.conferir_completadas(p, log=log_w)
+    except ParadaPrecisaDeVoce:
+        raise
+    except (Exception, SystemExit) as erro_comp:
+        log_w(f"  a conferência das cenas completadas falhou, seguindo sem ela: {erro_comp}")
+    # garantia (pedido do usuário em 2026-11-07): a cena que ainda não combina com a fala vira imagem de IA, e a imagem
+    # de IA ruim é feita de novo. Nunca para o vídeo
+    try:
+        _atualizar(task_id, progresso_pct=96, mensagem="Trocando por imagem de IA as cenas que ainda não combinam com a fala...")
+        with tempos.medir(p, "Garantia das cenas", log=log_w):
+            corrigir.garantir(p, log=log_w)
+    except ParadaPrecisaDeVoce:
+        raise
+    except (Exception, SystemExit) as erro_gar:
+        log_w(f"  a garantia das cenas falhou, seguindo sem ela: {erro_gar}")
+    if cenas_sem_arquivo(p) and midia.ia_ativa(p):
+        # a repetida que não achou foto nova nos bancos vai para a imagem de IA (ia.ativa). Antes a criação parava
+        # pedindo uma foto (cena 79 do nunca-deve-ter-dentro-de-casa-parte-2, o petauro-do-açúcar, com a IA ligada)
+        _marcar_sem_foto_no_banco(p, log_w)
+        _atualizar(task_id, progresso_pct=97,
+                   mensagem=f"Imagem de IA para {len(cenas_sem_arquivo(p))} cena(s) que os bancos não tinham...")
+        _etapa(task_id, "Imagens de IA", lambda: imagens.gerar(p, log=log_w))
+    if cenas_sem_arquivo(p) and not midia.ia_ativa(p):
+        # canal sem IA: em vez de parar pedindo foto, a imagem da cena anterior continua (pedido de 2026-11-13)
+        _atualizar(task_id, progresso_pct=97,
+                   mensagem=f"Estendendo a imagem anterior sobre {len(cenas_sem_arquivo(p))} cena(s) sem foto nos bancos...")
+        _estender_anterior(p, log_w)
+    if cenas_sem_arquivo(p):
+        # nada do assunto nos bancos nem em outra cena do mesmo assunto: pôr outra coisa seria gafe, então pede ajuda
+        por_n = {c["n"]: c for c in p.ler_json("cenas.json")["cenas"]}
+        lista = "; ".join(f"cena {n} ({por_n[n].get('sujeito') or por_n[n].get('busca')})" for n in cenas_sem_arquivo(p)[:15])
+        if midia.ia_ativa(p):  # com a IA ligada, faltar imagem é a IA que não entregou: o motivo está no log da criação
+            raise ParadaPrecisaDeVoce(
+                f"Nem os bancos nem a imagem de IA entregaram estas cenas: {lista}. Veja o motivo no log e clique em "
+                "Retomar, ou suba uma foto delas no editor.")
+        raise ParadaPrecisaDeVoce(
+            f"Os bancos de imagens não têm nenhuma foto destes assuntos: {lista}. Suba uma foto dessas cenas no editor "
+            "(ou ligue a IA no config.yaml) e clique em Retomar.")
+
+    # as cenas completadas e as imagens de IA entram nos clipes adiantados, enquanto as animações e a trilha andam
+    render.adiantar_clipes(p, log_w)
+
+    # PASSO 6b: onde a fala traz um dado e o Jev diz que o motion ajuda o roteiro, a cena vira clipe de motion mesmo
+    # com a foto aprovada (pedido do usuário em 2026-10-07). Gratuito e sem bloquear: falhou, a cena fica com a foto
+    from . import motion_ia
+    if motion_ia.ligado(p):
+        _atualizar(task_id, etapa="motion", progresso_pct=96, mensagem="Procurando onde o motion ajuda o roteiro...")
+        try:
+            with tempos.medir(p, "Motion nas cenas com dado", log=log_w):
+                motion_ia.nas_uteis(p, log=log_w)
+        except (Exception, SystemExit) as erro_motion:
+            log_w(f"  o motion das cenas com dado falhou, elas seguem com a foto: {erro_motion}")
+    # PASSO 6c: onde a fala tem lista, datas, número ou comparação, a cena animada de modelo pronto entra no lugar da
+    # foto, no ritmo de um complemento (animation_ai.py). Gratuito e sem bloquear: falhou, a cena fica com a foto
+    from . import animation_ai
+    if animation_ai.ligado(p):
+        _atualizar(task_id, etapa="motion", progresso_pct=96, mensagem="Procurando onde uma cena animada ajuda o roteiro...")
+        try:
+            with tempos.medir(p, "Cenas animadas (animation-ai)", log=log_w):
+                animation_ai.nas_uteis(p, log=log_w)
+        except (Exception, SystemExit) as erro_anim:
+            log_w(f"  as cenas animadas falharam, elas seguem com a foto: {erro_anim}")
+
+    # PASSOS 7 e 8 e o render adiantado, AO MESMO TEMPO (pedido do usuário em 2026-10-12, para a criação andar mais
+    # rápido). Daqui em diante a imagem de cada cena está decidida: as animações por cima dependem só do tempo da fala,
+    # a trilha só do roteiro, e os clipes do render só da imagem de cada cena. Antes era uma fila: no
+    # 12-animais-estranhos (25 min) as animações começaram aos 107 min e o render só depois de tudo. Os clipes
+    # adiantados têm o nome tirado do conteúdo, e o render de verdade os reaproveita e só junta tudo.
+    def passo_animacoes():
+        # PASSO 7: diagramas, textos na tela, linhas do tempo e mapas viram animação (HyperFrames, gratuito). É uma
+        # melhoria: a cena que não der para animar continua com a foto, e uma falha aqui nunca para o vídeo
+        if not animacoes.ligada(p):
+            return
+        try:
+            with tempos.medir(p, "Animações (diagramas, textos, mapas)", log=log_w):
+                resumo_anim = animacoes.gerar(p, log=log_w, trava=trava_do_projeto(nome))
+            _atualizar(task_id, animacoes={"feitas": resumo_anim["feitas"], "prontas": resumo_anim["prontas"],
+                                           "ficaram_com_foto": sorted(resumo_anim["falharam"])})
+        except (Exception, SystemExit) as erro_anim:
+            log_w(f"  as animações falharam, as cenas seguem com foto: {erro_anim}")
+
+    def passo_trilha():
+        # PASSO 8: o modelo compõe a trilha pelos blocos do roteiro e o código toca (gratuito). Se falhar aqui, o
+        # render tenta de novo; e o vídeo nunca deixa de sair por causa dela
+        if not trilha.ligada(p):
+            return
+        try:
+            with tempos.medir(p, "Trilha", log=log_w):
+                trilha.gerar(p, log=log_w)
+        except (Exception, SystemExit) as erro_trilha:
+            log_w(f"  a trilha não saiu agora, o render tenta de novo: {erro_trilha}")
+
+    def adiantar_render():
+        if cenas_sem_arquivo(p):
+            return
+        try:
+            render.adiantar_clipes(p, log_w)
+        except (Exception, SystemExit) as erro_render:
+            log_w(f"  o render adiantado parou, o render de verdade monta o que faltar: {str(erro_render)[:200]}")
+
+    if video_ia.config(p).get("fracao"):
+        _etapa(task_id, "Vídeo de IA", lambda: video_ia.gerar(p, log=log_w))
+    _atualizar(task_id, etapa="animacoes", progresso_pct=97,
+               mensagem="Animações, trilha e os clipes do render, ao mesmo tempo...")
+    with ThreadPoolExecutor(max_workers=3) as juntos:
+        for futuro in [juntos.submit(f) for f in (passo_animacoes, passo_trilha, adiantar_render)]:
+            futuro.result()
+
+    try:
+        with tempos.medir(p, "Nota de qualidade", log=log_w):
+            _atualizar(task_id, qualidade=qualidade.registrar(p, "criação", log_w))
+    except (Exception, SystemExit) as erro_q:
+        log_w(f"  a nota de qualidade não saiu: {erro_q}")
+    with TAREFAS_LOCK:
+        comeco = str((TAREFAS.get(task_id) or {}).get("inicio") or "")[:19]
+    resumo_tempos = tempos.texto_do_resumo(p, desde=comeco or None)
+    if resumo_tempos:
+        log_w(f"  {resumo_tempos}")
+    try:
+        from . import relatorio_tempo
+        log_w(f"  onde foi o tempo, por IA: {relatorio_tempo.salvar(p, desde=comeco or None)}")
+    except Exception as erro_t:  # o relatório nunca derruba a criação
+        log_w(f"  o relatório de tempo não saiu: {erro_t}")
+    _atualizar(task_id, status="concluido", etapa="concluido", passo_atual=5, total_passos=5, progresso_pct=100,
+               mensagem="Cenas prontas com sucesso! Tudo pronto para renderizar.", pronto_para_edicao=True,
+               concluido=True, aguardando_ate=None)
+
+
+def iniciar_criacao(nome: str, tarefa: Optional[Dict[str, Any]] = None) -> str:
+    """Põe a esteira para rodar numa linha própria. Com tarefa=None, continua a última criação gravada."""
+    if tarefa is None:
+        tarefa = _ler_criacao(nome) or {}
+        tarefa = {**tarefa, "logs": tarefa.get("logs", [])}
+        tarefa.setdefault("tarefa_id", f"criar_{nome}_{datetime.now():%Y%m%d_%H%M%S}")
+        tarefa.update(projeto=nome, tipo="criacao", status="processando", concluido=False,
+                      pronto_para_edicao=False, erro=None, precisa_voce=False,
+                      mensagem="Retomando de onde parou...")
+        tarefa.setdefault("inicio", datetime.now().isoformat())
+        tarefa.setdefault("passo_atual", 1)
+        tarefa.setdefault("total_passos", 5)
+        tarefa.setdefault("progresso_pct", 5)
+    task_id = tarefa["tarefa_id"]
+    with TAREFAS_LOCK:
+        TAREFAS[task_id] = tarefa
+    _salvar_criacao(task_id)
+    threading.Thread(target=_executar_criacao, args=(nome, task_id), name=f"criacao-{nome}", daemon=True).start()
+    return task_id
+
+
+ENTREGA_ATRASADA_DIAS = 3
+
+
+def entregas_que_faltam() -> list:
+    """Os vídeos prontos dos últimos dias que não chegaram à pasta do computador: a fábrica desligou depois do render e
+    antes da entrega (o 20-criaturas-marinhas, 2026-11-09, religada às 17:44 com o final.mp4 gravado às 17:44:30)."""
+    if not PROJETOS.exists():
+        return []
+    limite = time.time() - ENTREGA_ATRASADA_DIAS * 86400
+    faltam = []
+    for pasta in sorted(PROJETOS.iterdir()):
+        final = pasta / "final.mp4"
+        try:
+            if not final.is_file() or final.stat().st_mtime < limite:
+                continue
+            entrega = pasta / "entrega_pc.json"
+            if entrega.exists() and entrega.stat().st_mtime >= final.stat().st_mtime:
+                continue
+        except OSError:
+            continue
+        estado = _ler_criacao(pasta.name) or {}
+        if estado.get("status") in ("processando", "aguardando"):
+            continue  # ainda criando: a entrega vem no fim dela
+        faltam.append(pasta.name)
+    return faltam
+
+
+# O render só existia na memória da fábrica: ela caindo no meio dele (pedido 92, 2026-11-10 22:01, criação concluída
+# e sem final.mp4) deixava o vídeo parado para sempre, porque a partida só retomava criações e entregas. Esta marca
+# fica na pasta do projeto enquanto o render roda e sai quando ele termina, bem ou com erro.
+RENDER_ANDAMENTO = "render_andamento.json"
+RENDER_RETOMADAS_MAX = 2  # o mesmo render derrubando a fábrica (falta de memória) não vira um ciclo sem fim
+
+
+def _marcar_render(pasta: Path, payload: "RenderPayload") -> None:
+    marca = pasta / RENDER_ANDAMENTO
+    retomadas = 0
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        retomadas = int(json.loads(marca.read_text(encoding="utf-8")).get("retomadas", 0))
+    with contextlib.suppress(OSError):
+        marca.write_text(json.dumps({"inicio": datetime.now().isoformat(timespec="seconds"), "retomadas": retomadas,
+                                     "payload": payload.model_dump(mode="json")}, ensure_ascii=False), encoding="utf-8")
+
+
+def renders_interrompidos() -> list:
+    """Os projetos cujo render estava rodando quando a fábrica desligou, com o pedido do render e quantas vezes ele
+    já foi retomado."""
+    if not PROJETOS.exists():
+        return []
+    achados = []
+    for pasta in sorted(PROJETOS.iterdir()):
+        marca = pasta / RENDER_ANDAMENTO
+        try:
+            if not marca.is_file():
+                continue
+            dados = json.loads(marca.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        achados.append((pasta.name, dados.get("payload") or {}, int(dados.get("retomadas") or 0)))
+    return achados
+
+
+def retomar_renders_interrompidos() -> list:
+    """Volta a renderizar o que a fábrica desligada interrompeu. Devolve os projetos retomados."""
+    retomados = []
+    for nome, pedido, retomadas in renders_interrompidos():
+        marca = PROJETOS / nome / RENDER_ANDAMENTO
+        if retomadas >= RENDER_RETOMADAS_MAX:
+            print(f"  o render de {nome} já foi retomado {retomadas} vezes e a fábrica caiu de novo: "
+                  "não retomo mais, clique em Renderizar")
+            with contextlib.suppress(OSError):
+                marca.unlink()
+            continue
+        try:
+            with contextlib.suppress(OSError):
+                marca.write_text(json.dumps({**json.loads(marca.read_text(encoding="utf-8")),
+                                             "retomadas": retomadas + 1}, ensure_ascii=False), encoding="utf-8")
+            disparar_render(nome, RenderPayload(**pedido), _RodaJa(nome))
+            print(f"  retomando o render de {nome}, que a fábrica desligada interrompeu")
+            retomados.append(nome)
+        except HTTPException as erro:
+            print(f"  o render de {nome} não foi retomado: {erro.detail}")
+        except (Exception, SystemExit) as erro:
+            print(f"  o render de {nome} não foi retomado: {str(erro)[:200]}")
+    return retomados
+
+
+def retomar_criacoes_interrompidas() -> None:
+    """Na partida da fábrica: toda criação que estava andando quando ela desligou volta a andar, o render interrompido
+    volta a renderizar, e o vídeo pronto que não chegou à pasta do computador é entregue (com o kit, as capas e os
+    shorts que faltarem)."""
+    if not PROJETOS.exists():
+        return
+    for pasta in sorted(PROJETOS.iterdir()):
+        estado = _ler_criacao(pasta.name) if pasta.is_dir() else None
+        if estado and estado.get("status") in ("processando", "aguardando"):
+            print(f"  retomando a criação de {pasta.name}, que foi interrompida")
+            iniciar_criacao(pasta.name)
+    renderizando = set(retomar_renders_interrompidos())  # o render que termina já entrega
+    for nome in entregas_que_faltam():
+        if nome in renderizando:
+            continue
+        print(f"  {nome} ficou pronto e não chegou à pasta do computador: entregando agora")
+        iniciar_publicacao(nome)
+
+
+# -----------------------------------------------------------------------------
+# Modelos Pydantic (Payloads)
+# -----------------------------------------------------------------------------
+
+class CriarProjetoPayload(BaseModel):
+    nome: str
+    roteiro: str
+    perfil: Optional[str] = "perfis/livro-de-enoque.yaml"
+    voz: Optional[str] = "pt-BR-AntonioNeural"  # nome de voz Edge-TTS, usado quando voz_provedor não é pago
+    voz_provedor: Optional[str] = None  # None/"edge-tts" usa a voz acima; "genaipro"/"openspeaker", os campos abaixo
+    voz_id: Optional[str] = None
+    voz_modelo: Optional[str] = None
+    voz_idioma: Optional[str] = None  # "pt", "es" ou "en" — só pra lembrar a aba certa ao reabrir
+    voz_nome: Optional[str] = None  # nome da voz, pra mostrar no editor sem buscar de novo
+    # nomes antigos, de quando a narração era pela ElevenLabs direta: um editor desatualizado ainda manda assim
+    voz_elevenlabs_id: Optional[str] = None
+    voz_elevenlabs_modelo: Optional[str] = None
+    voz_elevenlabs_idioma: Optional[str] = None
+    voz_estabilidade: Optional[float] = None
+    voz_similaridade: Optional[float] = None
+    voz_estilo: Optional[float] = None
+    voz_velocidade: Optional[float] = None
+    imagens_provedor: Optional[str] = None  # "openrouter" (Grok Imagine 2), "google" (Nano Banana 2) ou "kie" (Kie.ai). None usa o perfil
+
+
+class RefazerCenaPayload(BaseModel):
+    tipo: Optional[str] = None  # "ia", "foto_real", "video_real"
+    prompt: Optional[str] = None
+    busca: Optional[str] = None
+    forcar_ia: bool = False
+
+
+class ImagensAjustesPayload(BaseModel):
+    """Ajuste de provedor de imagem de IA só deste projeto, sem tocar no perfil do canal."""
+    provedor: Optional[str] = None  # "openrouter" (Grok Imagine 2), "google" (Nano Banana 2) ou "kie" (Kie.ai)
+    modelo: Optional[str] = None  # se não vier, assume o modelo padrão do provedor escolhido
+
+
+class VozAjustesPayload(BaseModel):
+    """Ajustes de voz só deste projeto (GenAIPro ou Edge-TTS), sem tocar no perfil do canal."""
+    provedor: Optional[str] = None  # "genaipro", "openspeaker", "fish" (grátis) ou "edge-tts" (antigo)
+    voice_id: Optional[str] = None
+    nome: Optional[str] = None
+    idioma: Optional[str] = None  # "pt", "es" ou "en" — só pra lembrar a aba certa ao reabrir
+    modelo: Optional[str] = None
+    estabilidade: Optional[float] = None
+    similaridade: Optional[float] = None
+    estilo: Optional[float] = None
+    velocidade: Optional[float] = None
+    continuidade: Optional[bool] = None
+    voz_edge: Optional[str] = None
+    velocidade_edge: Optional[str] = None
+    tom_edge: Optional[str] = None
+
+
+class NarracaoPayload(BaseModel):
+    roteiro: Optional[str] = None
+    velocidade: Optional[str] = None  # "-10%", "+0%", "+10%" (Edge-TTS)
+    nova_voz: bool = False
+    voz: Optional[VozAjustesPayload] = None  # ajustes de voz a aplicar antes de regerar
+
+
+class RenderOpcoesPayload(BaseModel):
+    fps: Optional[int] = 30
+    resolucao: Optional[str] = "1080p"
+    legenda: Optional[bool] = True
+    musica: Optional[bool] = True
+    volume_musica_db: Optional[float] = -16.0
+    movimento_camera: Optional[bool] = True
+
+
+class CenaConfirmada(BaseModel):
+    n: int
+    tipo: Optional[str] = "ia"
+    arquivo: Optional[str] = None
+    ini: Optional[float] = 0.0
+    fim: Optional[float] = 0.0
+
+
+class RenderPayload(BaseModel):
+    projeto: Optional[str] = None
+    opcoes: Optional[RenderOpcoesPayload] = None
+    cenas_confirmadas: Optional[List[CenaConfirmada]] = None
+    sem_avatar: bool = True
+    vertical: bool = False  # versão em pé (9:16) para Reels e Shorts, em final_vertical.mp4; a deitada fica como está
+
+
+class SalvarCenasPayload(BaseModel):
+    cenas: List[Dict[str, Any]]
+
+
+class PublicarYoutubePayload(BaseModel):
+    # vazios: valem os do kit de publicação (publicacao.json)
+    titulo: str = ""
+    descricao: Optional[str] = None
+    tags: Optional[List[str]] = None
+    privacidade: str = "public"  # "public", "unlisted" ou "private"
+    # ISO 8601 ("2026-10-12T18:00", na hora do canal, ou com fuso): sobe privado com publishAt e o YouTube publica
+    agendado_para: Optional[str] = None
+    com_shorts: bool = False      # os shorts do projeto sobem também, um por dia depois do vídeo (se agendado)
+    com_thumbnail: bool = True    # a thumbnail escolhida (thumbnail.jpg)
+    com_legenda: bool = True      # a legenda legendas_final.srt
+    simular: bool = False         # só devolve o que subiria, sem enviar nada
+    canal: str = ""               # o id do canal do YouTube em que publicar (vazio: o único conectado)
+
+
+class EscolherThumbPayload(BaseModel):
+    opcao: int
+
+
+# -----------------------------------------------------------------------------
+# Funções Auxiliares de Mídia
+# -----------------------------------------------------------------------------
+
+def definir_midia_manual(projeto: Projeto, cena_n: int, arquivo_bytes: bytes, nome_original: str) -> Dict[str, Any]:
+    """Substitui manualmente a imagem ou vídeo de uma cena por arquivo enviado pelo usuário."""
+    dados = projeto.ler_json("cenas.json")
+    cena = next((c for c in dados["cenas"] if c["n"] == cena_n), None)
+    if not cena:
+        raise HTTPException(status_code=404, detail=f"Cena {cena_n} não encontrada.")
+
+    ext = Path(nome_original).suffix.lower() if nome_original else ".png"
+    is_video = ext in (".mp4", ".mov", ".webm", ".mkv", ".avi")
+    carimbo = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # Guardar versão anterior na pasta antigas/
+    antigas_dir = projeto.caminho("antigas")
+    antigas_dir.mkdir(parents=True, exist_ok=True)
+
+    img_ia = projeto.imagem(cena_n)
+    if img_ia.exists():
+        shutil.move(str(img_ia), str(antigas_dir / f"{cena_n:04d}_ia_{carimbo}.png"))
+
+    if cena.get("midia") and cena["midia"].get("arquivo"):
+        arq_antigo = projeto.pasta / cena["midia"]["arquivo"]
+        if arq_antigo.exists():
+            shutil.move(str(arq_antigo), str(antigas_dir / f"{arq_antigo.stem}_{carimbo}{arq_antigo.suffix}"))
+
+    if is_video:
+        rel_path = f"midia/{cena_n:04d}_manual{ext}"
+        abs_path = projeto.pasta / rel_path
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(arquivo_bytes)
+
+        cena["tipo"] = "video_real"
+        cena["midia"] = {
+            "fonte": "upload_manual",
+            "id": f"manual_{cena_n}_{carimbo}",
+            "tipo": "video",
+            "arquivo": rel_path,
+            "capa": rel_path,
+            "autor": "Manual",
+            "licenca": "Própria",
+        }
+    else:
+        abs_path = projeto.imagem(cena_n)
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(arquivo_bytes)
+
+        cena["tipo"] = "ia"
+        cena["midia"] = None
+        # a foto fica em imagens/NNNN.png, pelo número da cena: a marca faz ela acompanhar a cena e vencer o acervo
+        # quando a narração muda e as cenas são renumeradas (cenas._levar_imagens_numeradas)
+        cena["imagem_da_pessoa"] = True
+
+    projeto.salvar_json("cenas.json", dados)
+    return cena
+
+
+def _url_com_versao(url: str, arquivo: Path) -> str:
+    """Acrescenta a data de modificação do arquivo na URL, pra o navegador nunca reaproveitar
+    do cache uma versão antiga quando o mesmo nome de arquivo é sobrescrito (restaurar,
+    regerar, refazer cena — todos gravam por cima do mesmo caminho)."""
+    try:
+        versao = int(arquivo.stat().st_mtime)
+    except OSError:
+        return url
+    return f"{url}?v={versao}"
+
+
+def enriquecer_cena(projeto: Projeto, cena: Dict[str, Any], motion: Optional[list] = None) -> Dict[str, Any]:
+    """Adiciona URLs e status de existência aos assets da cena."""
+    n = cena["n"]
+    tipo = cena.get("tipo", "ia")
+    midia_info = cena.get("midia")
+
+    # Imagem IA
+    img_ia = projeto.imagem(n)
+    img_ia_existe = img_ia.exists()
+    img_ia_url = _url_com_versao(f"/arquivos/{projeto.nome}/imagens/{n:04d}.png", img_ia) if img_ia_existe else None
+
+    # Mídia Real
+    midia_existe = False
+    midia_url = None
+    capa_url = None
+    if midia_info and midia_info.get("arquivo"):
+        arq = projeto.pasta / midia_info["arquivo"]
+        midia_existe = arq.exists()
+        if midia_existe:
+            midia_url = _url_com_versao(f"/arquivos/{projeto.nome}/{midia_info['arquivo'].replace(os.sep, '/')}", arq)
+    if midia_info and midia_info.get("capa"):
+        arq_capa = projeto.pasta / midia_info["capa"]
+        if arq_capa.exists():
+            capa_url = _url_com_versao(f"/arquivos/{projeto.nome}/{midia_info['capa'].replace(os.sep, '/')}", arq_capa)
+
+    # URL principal a ser exibida no frontend
+    # a mesma regra do render (origem_da_cena): sem imagem de IA, a cena com material real mostra o material, mesmo
+    # com tipo "ia". Na junção de cenas o tipo de uma vinha para a outra sem o material, e a cena com foto de banco
+    # aparecia como "sem arquivo" no editor, embora o render usasse a foto
+    url_principal = midia_url if (midia_url and (tipo in ("foto_real", "video_real") or not img_ia_existe)) else img_ia_url
+    # a animação é uma faixa própria por cima das cenas (lista "motion" de GET /cenas): a cena mostra a imagem dela.
+    # animada: alguma animação passa por cima dela, e o texto na tela da cena sai (a mesma regra do render)
+    try:
+        ligada = animacoes.config(projeto).get("ativo", True)
+        motion = (animacoes.validas(projeto) if motion is None else motion) if ligada else []
+        animada = any(animacoes.sobreposta(item, cena) for item in motion)
+        situacao_animacao = animacoes.situacao(projeto, cena, motion) if ligada else ""
+    except (OSError, KeyError, TypeError, ValueError):
+        animada, situacao_animacao = False, ""
+
+    # versões leves para o editor: miniatura da timeline e prévia do player, em vez do original pesado
+    thumb_url = previa_url = None
+    origem_previa = _origem_da_previa(projeto, cena)
+    if origem_previa is not None:
+        try:
+            v = int(origem_previa.stat().st_mtime)
+            thumb_url = f"/arquivos_previas/{projeto.nome}/mini/{n}.jpg?v={v}"
+            previa_url = f"/arquivos_previas/{projeto.nome}/tela/{n}.jpg?v={v}"
+        except OSError:
+            pass
+    # o vídeo de banco tem prévia leve própria: 480p, só o trecho que a cena usa
+    previa_video_url = None
+    video = _video_da_cena(projeto, cena)
+    if video is not None:
+        try:
+            v = f"{int(video.stat().st_mtime)}-{int(round((cena['fim'] - cena['ini']) * 10))}"
+            previa_video_url = f"/arquivos_previas/{projeto.nome}/video/{n}.mp4?v={v}"
+        except (OSError, KeyError, TypeError):
+            pass
+
+    # A cena pode ter sido planejada como real e não ter achado material (sem_midia_real):
+    # o tipo continua "foto_real"/"video_real" no cenas.json, mas o que aparece de fato é a
+    # imagem de IA gerada como reserva. O rótulo tem que refletir isso, senão mostra "Foto Real"
+    # numa cena que é IA de verdade.
+    tipo_efetivo = "ia" if cena.get("sem_midia_real") else tipo
+
+    # Badge descritivo da origem
+    if tipo_efetivo == "ia":
+        origem_badge = "IA"
+    elif tipo_efetivo == "video_real":
+        fonte_nome = (midia_info.get("fonte") or "acervo").capitalize() if midia_info else "Acervo"
+        origem_badge = f"Vídeo Real ({fonte_nome})"
+    elif tipo_efetivo == "foto_real":
+        fonte_nome = (midia_info.get("fonte") or "acervo").capitalize() if midia_info else "Acervo"
+        origem_badge = f"Foto Real ({fonte_nome})"
+    else:
+        origem_badge = tipo_efetivo
+    if midia_info and midia_info.get("fonte") == "motion_ia":
+        origem_badge = "Motion IA"  # clipe de motion feito pela fábrica no lugar da foto reprovada (motion_ia.py)
+    elif midia_info and midia_info.get("fonte") == "animation_ai":
+        origem_badge = "Animation IA"  # cena animada de modelo pronto (animation_ai.py)
+
+    # Efeito sonoro (SFX)
+    efeito_url = None
+    efeito = cena.get("efeito")
+    if efeito and efeito.get("descricao"):
+        desc = " ".join(efeito["descricao"].lower().split())
+        base = re.sub(r"[^a-z0-9]+", "-", desc).strip("-")[:50] or "efeito"
+        # Procura arquivo correspondente
+        for pasta in (RAIZ / "efeitos", RAIZ / "efeitos" / "teste"):
+            if pasta.exists():
+                for arq_sfx in pasta.glob(f"{base}*.mp3"):
+                    efeito_url = f"/arquivos_raiz/{arq_sfx.relative_to(RAIZ).as_posix()}"
+                    break
+            if efeito_url:
+                break
+
+    return {
+        **cena,
+        "texto_tela": None,  # o texto na tela do FFmpeg saiu da fábrica (2026-10-05): o editor não desenha mais
+        "url_midia": url_principal,
+        "thumb_url": thumb_url,      # miniatura de 320px, para a timeline e a lista de cenas
+        "previa_url": previa_url,    # prévia de 1280px, para o player mostrar fotos sem baixar o original
+        "previa_video_url": previa_video_url,  # vídeo de banco em 480p, só o trecho da cena, para o player
+        "img_ia_url": img_ia_url,
+        "img_ia_existe": img_ia_existe,
+        "midia_url": midia_url,
+        "capa_url": capa_url,
+        "midia_existe": midia_existe,
+        # nenhum arquivo para mostrar: material real que não baixou e imagem de IA que ainda não foi gerada
+        "sem_arquivo": url_principal is None,
+        "origem_badge": origem_badge,
+        "efeito_url": efeito_url,
+        # "pronta", "desatualizada" (a cena mudou depois), "desligada" (a pessoa preferiu a foto), "possivel" ou ""
+        "animacao_situacao": situacao_animacao,
+        "animada": animada,
+        # o que a revisão do vídeo pronto apontou nesta cena (vale para o final.mp4 de agora)
+        "revisao": revisao_video.problemas_da_cena(projeto, n, _revisao_atual(projeto)),
+    }
+
+
+def obter_legendas_projeto(p: Projeto) -> List[Dict[str, Any]]:
+    """Lê legendas_tela.srt (ou legendas.srt) e retorna lista estruturada de legendas de 1 linha."""
+    for nome_srt in ("legendas_tela.srt", "legendas.srt"):
+        caminho = p.pasta / nome_srt
+        if caminho.exists():
+            try:
+                conteudo = caminho.read_text(encoding="utf-8")
+                padrao = re.compile(
+                    r"(\d+)\s*\n(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*\n(.*?)(?=\n\s*\n|\Z)",
+                    re.DOTALL
+                )
+                itens = []
+                for m in padrao.finditer(conteudo):
+                    _, h1, m1, s1, ms1, h2, m2, s2, ms2, txt = m.groups()
+                    t_ini = int(h1) * 3600 + int(m1) * 60 + int(s1) + int(ms1) / 1000.0
+                    t_fim = int(h2) * 3600 + int(m2) * 60 + int(s2) + int(ms2) / 1000.0
+                    limpo = re.sub(r"\[.*?\]", "", txt).strip()
+                    limpo = " ".join(limpo.split())
+                    if limpo:
+                        itens.append({"ini": round(t_ini, 3), "fim": round(t_fim, 3), "texto": limpo})
+                if itens:
+                    return itens
+            except Exception:
+                pass
+    return []
+
+
+# -----------------------------------------------------------------------------
+# Rotas REST da API
+# -----------------------------------------------------------------------------
+
+@app.post("/api/projetos/criar")
+def criar_projeto(payload: CriarProjetoPayload, bg_tasks: BackgroundTasks):
+    """
+    Cria um novo projeto a partir de roteiro, perfil e voz.
+    Dispara as 4 etapas de geração em background e retorna 202 Accepted.
+    """
+    # o nome vira nome de pasta sozinho ("Animais do Brasil" -> "animais-do-brasil"), em vez de recusar
+    import unicodedata
+    nome = unicodedata.normalize("NFD", payload.nome or "")
+    nome = "".join(c for c in nome if not unicodedata.combining(c)).lower()
+    nome = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9_-]+", "-", nome)).strip("-_")[:80]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", nome):
+        raise HTTPException(
+            status_code=400,
+            detail="Nome inválido. Use apenas letras minúsculas, números, hífen e sublinhado."
+        )
+    if not payload.roteiro or not payload.roteiro.strip():
+        raise HTTPException(status_code=400, detail="O roteiro não pode estar vazio.")
+    with TAREFAS_LOCK:
+        if nome in CRIACOES_ATIVAS:
+            raise HTTPException(status_code=409, detail=f"O vídeo '{nome}' ainda está sendo criado. Use outro nome "
+                                                        "ou espere terminar.")
+
+    # Resolver perfil YAML
+    perfil_caminho = payload.perfil or "perfis/documentario.yaml"
+    if perfil_caminho in ("perfis/padrao.yaml", "padrao.yaml", "padrao"):
+        perfil_caminho = "perfis/documentario.yaml"
+    perfil_path = Path(perfil_caminho)
+    if not perfil_path.is_absolute():
+        perfil_path = RAIZ / perfil_caminho
+    if not perfil_path.exists():
+        alt = RAIZ / "perfis" / Path(perfil_caminho).name
+        if alt.exists():
+            perfil_path = alt
+        else:
+            perfil_path = RAIZ / "perfis" / "documentario.yaml"
+    if _perfil_de_avatar(perfil_path):
+        # antes a criação ia até 94% e parava com "cenas sem imagem": o vídeo desse perfil é o personagem
+        raise HTTPException(
+            status_code=400,
+            detail=(f"O perfil '{perfil_path.stem}' é de personagem (avatar do HeyGen) e precisa de vídeos gravados "
+                    "fora da fábrica. Escolha um perfil de documentário, como 'Documentário'."))
+
+    # Sem teto de duração: roteiro de qualquer tamanho é aceito. Abaixo do alvo de 20 min também
+    # não tem bloqueio, porque o editor não tem como pedir confirmação interativa como o terminal.
+    pasta = PROJETOS / nome
+    havia_projeto = pasta.exists()
+    pasta.mkdir(parents=True, exist_ok=True)
+
+    if havia_projeto:
+        shutil.rmtree(pasta / "cenas_lotes", ignore_errors=True)
+        (pasta / "cenas.json").unlink(missing_ok=True)
+        carimbo = f"{datetime.now():%Y%m%d-%H%M%S}"
+        for sub in ("imagens", "midia"):
+            if (pasta / sub).exists():
+                (pasta / sub).rename(pasta / f"{sub}_antigas_{carimbo}")
+
+    # Gravar roteiro.txt
+    (pasta / "roteiro.txt").write_text(payload.roteiro.strip(), encoding="utf-8")
+
+    # Normaliza voz para garantir compatibilidade total com Edge-TTS
+    voz_req = (payload.voz or "pt-BR-AntonioNeural").strip()
+    if "Thalita" in voz_req:
+        voz_req = "pt-BR-ThalitaMultilingualNeural"
+    elif voz_req not in {"pt-BR-AntonioNeural", "pt-BR-FranciscaNeural", "pt-BR-ThalitaMultilingualNeural", "pt-PT-DuarteNeural", "pt-PT-RaquelNeural"}:
+        voz_req = "pt-BR-AntonioNeural"
+
+    dados_projeto = {
+        "nome": nome,
+        "perfil": str(perfil_path.resolve()),
+        "offline": False,
+        "criado": datetime.now().isoformat(timespec="seconds"),
+        "voz": voz_req,
+    }
+    (pasta / "projeto.json").write_text(json.dumps(dados_projeto, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Ajuste de voz e de imagens só deste projeto, sem tocar no perfil do canal. Fica no projeto.json,
+    # então vale também quando a criação é retomada depois de um reinício
+    p = Projeto(nome)
+    if payload.voz_provedor == "fish":
+        # a voz grátis: Fish Audio pelo OpenRouter, no lugar do Edge-TTS
+        p.definir_voz_override({
+            "provedor": "fish",
+            "voice_id": payload.voz_id,
+            "nome": payload.voz_nome,
+            "idioma": payload.voz_idioma,
+            "velocidade": payload.voz_velocidade,
+        })
+    elif payload.voz_provedor in ("genaipro", "elevenlabs", "openspeaker"):
+        p.definir_voz_override({
+            "provedor": "openspeaker" if payload.voz_provedor == "openspeaker" else "genaipro",
+            "voice_id": payload.voz_id or payload.voz_elevenlabs_id,
+            "nome": payload.voz_nome,
+            "idioma": payload.voz_idioma or payload.voz_elevenlabs_idioma,
+            "modelo": payload.voz_modelo or payload.voz_elevenlabs_modelo,
+            "estabilidade": payload.voz_estabilidade,
+            "similaridade": payload.voz_similaridade,
+            "estilo": payload.voz_estilo,
+            "velocidade": payload.voz_velocidade,
+        })
+    elif payload.voz_provedor in ("local", "voicestudio", "voicebox"):
+        # voz_id é o código do catálogo (voz_local.catalogo: kokoro:pm_alex, qwen:Ryan, omnivoice:...)
+        p.definir_voz_override({"provedor": "local", "voz_local": payload.voz_id or "",
+                                "nome": payload.voz_nome, "idioma": payload.voz_idioma,
+                                "velocidade": payload.voz_velocidade})
+    elif payload.voz:
+        # o padrão do site: a voz open source do computador (VoiceStudio ou voicebox). Antes era a Fish, e antes
+        # dela o Edge, descontinuado
+        p.definir_voz_override({"provedor": "local"})
+    if payload.imagens_provedor in PROVEDORES_IMAGEM:
+        p.definir_imagens_override({
+            "provedor": payload.imagens_provedor,
+            "modelo": PROVEDORES_IMAGEM[payload.imagens_provedor],
+        })
+
+    task_id = iniciar_criacao(nome, {
+        "tarefa_id": f"criar_{nome}_{datetime.now():%Y%m%d_%H%M%S}",
+        "projeto": nome,
+        "tipo": "criacao",
+        "status": "processando",
+        "etapa": "narracao",
+        "passo_atual": 1,
+        "total_passos": 5,
+        "progresso_pct": 5,
+        "mensagem": "Iniciando criação do projeto e gerando narração...",
+        "pronto_para_edicao": False,
+        "concluido": False,
+        "feitas": [],
+        "logs": [],
+        "inicio": datetime.now().isoformat(),
+    })
+    return JSONResponse(
+        status_code=202,
+        content={
+            "sucesso": True,
+            "projeto": nome,
+            "status": "processando",
+            "mensagem": "Projeto iniciado. Acompanhe o progresso.",
+            "tarefa_id": task_id,
+        }
+    )
+
+
+class RetomarPayload(BaseModel):
+    confirmar: bool = False  # sem isto só devolve o que falta e quanto pode custar
+
+
+@app.post("/api/projetos/{nome}/retomar")
+def retomar_criacao(nome: str, payload: Optional[RetomarPayload] = None):
+    """Faz a criação andar de novo de onde parou: depois de um erro, de um reinício ou num projeto antigo parado."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    with TAREFAS_LOCK:
+        ativa = nome in CRIACOES_ATIVAS
+    if ativa:
+        if acordar(nome):
+            return {"status": "retomando", "mensagem": "A criação estava esperando a próxima tentativa e tenta de novo agora."}
+        return {"status": "processando", "mensagem": "A criação deste vídeo já está andando."}
+    p = Projeto(nome)
+    resumo = {"sem_acervo": 0, "sem_imagem_ia": 0, "custo_estimado_usd": 0.0}
+    if p.existe("cenas.json"):
+        lista = p.ler_json("cenas.json")["cenas"]
+        sem_acervo = sum(1 for c in lista if midia.pendente(c))
+        sem_ia = len(imagens.pendentes_ia(p, lista))
+        preco = custos.preco_da_imagem(p)
+        resumo = {"sem_acervo": sem_acervo, "sem_imagem_ia": sem_ia, "preco_por_imagem_usd": preco,
+                  "custo_estimado_usd": round((sem_ia + 0.15 * sem_acervo) * preco, 2)}
+    if not (payload and payload.confirmar):
+        return {**resumo, "status": "aguardando_confirmacao"}
+    task_id = iniciar_criacao(nome)
+    return JSONResponse(status_code=202, content={**resumo, "status": "processando", "tarefa_id": task_id})
+
+
+class PausarPayload(BaseModel):
+    pausado: bool = True
+
+
+@app.post("/api/projetos/{nome}/pausar")
+def pausar_criacao(nome: str, payload: Optional[PausarPayload] = None):
+    """Pausa (pausado: true) ou continua (false) a criação do vídeo. Pausado, ele segura na próxima etapa."""
+    pasta = PROJETOS / nome
+    if not (pasta / "projeto.json").exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    pausado = payload.pausado if payload else True
+    arq = pasta / ARQ_PAUSADO
+    if pausado:
+        arq.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+    else:
+        arq.unlink(missing_ok=True)
+        acordar(nome)
+    return {"ok": True, "nome": nome, "pausado": pausado}
+
+
+@app.get("/api/projetos/{nome}/mapa")
+def mapa_do_roteiro(nome: str):
+    """O JSON que o agente de roteiro montou: blocos, âncoras, armadilhas de busca, pessoas reais e proibidos."""
+    p = Projeto(nome) if (PROJETOS / nome).exists() else None
+    if p is None or not p.existe("roteiro_mapa.json"):
+        raise HTTPException(status_code=404, detail="Este projeto ainda não tem o mapa do roteiro.")
+    return p.ler_json("roteiro_mapa.json")
+
+
+@app.get("/api/projetos/{nome}/roteiro-cenas")
+def roteiro_de_cenas(nome: str):
+    """O JSON completo das cenas que o agente montou pelo texto, antes de encaixar na narração."""
+    p = Projeto(nome) if (PROJETOS / nome).exists() else None
+    if p is None or not p.existe("roteiro_cenas.json"):
+        raise HTTPException(status_code=404, detail="Este projeto ainda não tem o JSON de cenas do agente.")
+    return p.ler_json("roteiro_cenas.json")
+
+
+@app.get("/api/perfis")
+def listar_perfis():
+    """Retorna lista de perfis disponíveis na pasta perfis/."""
+    pasta_perfis = RAIZ / "perfis"
+    if not pasta_perfis.exists():
+        return {"perfis": []}
+
+    nomes_bonitos = {
+        "documentario": "Documentário (qualquer assunto)",
+        "animais-exoticos": "Animais Exóticos",
+        "apresentacao": "Apresentação e Corporativo",
+        "asteroide": "Ciência, Espaço & Documentário",
+        "livro-de-enoque": "História Antiga & Mistérios Bíblicos",
+        "meditacao": "Meditação & Relaxamento Guiado",
+        "motion-ai": "Motion IA (vídeo todo em motion graphics)",
+        "motion-vox": "Motion IA estilo Vox (vídeo todo em colagem de jornal)",
+        "documentario-vox": "Documentário com Motion IA estilo Vox",
+        "vo-cida": "Receitas & Histórias da Vovó",
+        "workshop": "Workshop & Educacional",
+    }
+
+    itens = []
+    for f in sorted(pasta_perfis.glob("*.yaml")):
+        stem = f.stem
+        if stem.startswith("base-"):
+            continue  # perfil-base, herdado pelos canais, não é um canal para escolher
+        if _perfil_de_avatar(f):
+            continue  # precisa dos vídeos do HeyGen, que não vêm no pacote: pelo site nunca ficaria pronto
+        desc = nomes_bonitos.get(stem, stem.replace("-", " ").title())
+        voz = _voz_do_canal(f)
+        if stem.startswith(PREFIXO_CANAL):
+            try:
+                desc = carregar_perfil(str(f)).get("nome") or desc
+            except (Exception, SystemExit):
+                pass
+        itens.append({
+            "id": stem,
+            "caminho": f"perfis/{f.name}",
+            "titulo": desc,
+            "arquivo": f.name,
+            "voz": voz,  # a voz do canal: o editor marca ela sozinho quando o canal é escolhido
+            "canal_do_editor": stem.startswith(PREFIXO_CANAL),
+        })
+
+    # o documentário genérico vem primeiro: é o padrão de quem não escolhe
+    itens.sort(key=lambda i: i["id"] != "documentario")
+    return {"perfis": itens}
+
+
+PREFIXO_CANAL = "canal-"  # canais criados pelo editor (perfis/canal-NOME.yaml), com a voz escolhida
+
+
+def _voz_do_canal(caminho: Path) -> Optional[Dict[str, Any]]:
+    """A voz guardada no canal, no formato do seletor de voz do editor. None quando o canal não tem voz escolhida
+    (o perfil base traz COLE_AQUI_O_VOICE_ID)."""
+    try:
+        voz = carregar_perfil(str(caminho)).get("voz") or {}
+    except (Exception, SystemExit):
+        return None
+    voice_id = str(voz.get("voice_id") or "").strip()
+    if voz.get("provedor") not in ("genaipro", "openspeaker", "fish") or not voice_id or "COLE" in voice_id:
+        return None
+    return {k: v for k, v in {
+        "provedor": voz.get("provedor"), "voice_id": voice_id, "nome": voz.get("nome_da_voz"),
+        "idioma": voz.get("idioma_da_voz"), "modelo": voz.get("modelo"), "estabilidade": voz.get("estabilidade"),
+        "similaridade": voz.get("similaridade"), "estilo": voz.get("estilo"), "velocidade": voz.get("velocidade"),
+    }.items() if v not in (None, "")}
+
+
+class CanalPayload(BaseModel):
+    nome: str
+    base: str  # o perfil de onde o canal herda estilo e diretrizes (perfis/ARQUIVO.yaml)
+    voz: Dict[str, Any]
+
+
+def _bloco_da_voz(voz: Dict[str, Any]) -> Dict[str, Any]:
+    provedor = voz.get("provedor")
+    if provedor == "local":  # as vozes grátis da fábrica (o Radar manda o código em voz_local)
+        codigo = str(voz.get("voz_local") or voz.get("voice_id") or "").strip()
+        try:
+            voz_local.resolver(codigo)
+        except voz_local.ErroVozLocal:
+            raise HTTPException(status_code=400, detail="Essa voz veio sem um código válido.")
+        bloco = {"provedor": "local", "voz_local": codigo}
+        if voz.get("nome"):
+            bloco["nome_da_voz"] = voz["nome"]
+        if voz.get("idioma"):
+            bloco.update({"idioma": str(voz["idioma"])[:2], "idioma_da_voz": voz["idioma"]})
+        return bloco
+    if provedor not in ("genaipro", "openspeaker", "fish") or not str(voz.get("voice_id") or "").strip():
+        raise HTTPException(status_code=400,
+                            detail="Escolha uma voz da GenAI Pro, do OpenSpeaker ou da Fish Audio antes de salvar o canal.")
+    bloco = {"provedor": provedor, "voice_id": str(voz["voice_id"]).strip()}
+    if provedor in ("genaipro", "openspeaker"):  # escolhida de propósito: não vira a voz local (Projeto.sem_narracao_paga)
+        bloco["paga_escolhida"] = True
+    for chave, destino in (("nome", "nome_da_voz"), ("idioma", "idioma_da_voz"), ("modelo", "modelo"),
+                           ("estabilidade", "estabilidade"), ("similaridade", "similaridade"), ("estilo", "estilo"),
+                           ("velocidade", "velocidade")):
+        if voz.get(chave) not in (None, ""):
+            bloco[destino] = voz[chave]
+    return bloco
+
+
+@app.post("/api/canais")
+def salvar_canal(payload: CanalPayload):
+    """Cria (ou atualiza) um canal com a voz escolhida: perfis/canal-NOME.yaml, herdando do perfil base.
+
+    Pedido do usuário em 2026-10-15: escolher o canal no novo vídeo e a voz já vir com ele. Canal que já existe com o
+    mesmo nome tem a voz e a base trocadas; o resto do arquivo fica."""
+    import yaml
+    nome = " ".join(payload.nome.split())[:60]
+    import unicodedata
+    slug = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize("NFKD", nome.lower()).encode("ascii", "ignore").decode()).strip("-")
+    if not slug:
+        raise HTTPException(status_code=400, detail="Dê um nome ao canal.")
+    base = Path(payload.base).name
+    if not (RAIZ / "perfis" / base).exists():
+        raise HTTPException(status_code=400, detail=f"O perfil base {base} não existe.")
+    arquivo = RAIZ / "perfis" / f"{PREFIXO_CANAL}{slug}.yaml"
+    if base == arquivo.name:  # atualizar a voz do próprio canal: mantém a base que ele já tinha
+        atual = yaml.safe_load(arquivo.read_text(encoding="utf-8")) or {}
+        base = atual.get("base") or "documentario.yaml"
+    dados = yaml.safe_load(arquivo.read_text(encoding="utf-8")) if arquivo.exists() else {}
+    dados = dados or {}
+    dados.update({"base": base, "nome": nome, "voz": _bloco_da_voz(payload.voz)})
+    cabecalho = (f"# Canal criado no editor ({datetime.now():%Y-%m-%d}). Herda tudo de {base} e guarda a voz "
+                 "do canal.\n# Para mudar estilo, diretrizes ou texto fixo da descrição, edite aqui (veja "
+                 "perfis/base-documentario.yaml).\n")
+    arquivo.write_text(cabecalho + yaml.safe_dump(dados, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return {"sucesso": True, "caminho": f"perfis/{arquivo.name}", "id": arquivo.stem, "titulo": nome,
+            "voz": _voz_do_canal(arquivo)}
+
+
+# ------------------------------------------------------------------------------------------- a página Animações do Radar
+
+class AjustesAnimacaoPayload(BaseModel):
+    ajustes: Dict[str, Any]
+
+
+class AnimacaoDoCanalPayload(AjustesAnimacaoPayload):
+    perfil: str  # canal-NOME (só os perfis de canal: os de base valem para muitos canais)
+
+
+def _ajustes_ou_400(ajustes) -> dict:
+    try:
+        return ajustes_animacao.limpar(ajustes)
+    except ajustes_animacao.AjusteInvalido as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.get("/api/animacoes/catalogo")
+def animacoes_catalogo():
+    """Os estilos, as animações de cada um, as letras e os fundos que a pessoa pode escolher."""
+    return ajustes_animacao.catalogo()
+
+
+@app.get("/api/animacoes/previa", response_class=HTMLResponse)
+def animacoes_previa(ajustes: str = "{}", tipo: str = "", parado: Optional[float] = None):
+    """A animação tocando no navegador, sem gravar nem gastar. `parado`: um quadro só, para a galeria."""
+    try:
+        pedido = json.loads(ajustes)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Os ajustes vieram em formato errado.")
+    try:
+        return HTMLResponse(ajustes_animacao.previa(pedido, tipo, parado))
+    except ajustes_animacao.AjusteInvalido as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.get("/api/animacoes/fonte/{arquivo}")
+def animacoes_fonte(arquivo: str):
+    caminho = ajustes_animacao.arquivo_de_fonte(arquivo)
+    if caminho is None or not caminho.exists():
+        raise HTTPException(status_code=404, detail="Essa letra não existe.")
+    return FileResponse(caminho, media_type="font/ttf")
+
+
+@app.post("/api/animacoes/conferir")
+def animacoes_conferir(payload: AjustesAnimacaoPayload):
+    """A mesma conferência da gravação: a cena que reprovar aqui voltaria para a foto na produção. Grátis."""
+    _ajustes_ou_400(payload.ajustes)
+    try:
+        return ajustes_animacao.conferir(payload.ajustes)
+    except RuntimeError as erro:
+        raise HTTPException(status_code=503, detail=str(erro))
+
+
+def _arquivo_do_canal(perfil: str) -> Path:
+    nome = Path(perfil).stem
+    arquivo = RAIZ / "perfis" / f"{nome}.yaml"
+    if not nome.startswith(PREFIXO_CANAL) or not arquivo.exists():
+        raise HTTPException(status_code=400, detail="Este canal ainda não tem perfil próprio na fábrica: escolha a voz "
+                                                    "do canal primeiro.")
+    return arquivo
+
+
+@app.get("/api/canais/animacoes")
+def animacoes_do_canal(perfil: str):
+    import yaml
+    dados = yaml.safe_load(_arquivo_do_canal(perfil).read_text(encoding="utf-8")) or {}
+    return {"ajustes": dados.get("animation_ai") or None}
+
+
+@app.post("/api/canais/animacoes")
+def animacoes_do_canal_salvar(payload: AnimacaoDoCanalPayload):
+    """O padrão do canal: vale para os próximos vídeos dele. Os vídeos já feitos não mudam."""
+    import yaml
+    limpo = _ajustes_ou_400(payload.ajustes)
+    arquivo = _arquivo_do_canal(payload.perfil)
+    linhas = arquivo.read_text(encoding="utf-8").splitlines()
+    cabecalho = "".join(l + "\n" for l in linhas[:next((i for i, l in enumerate(linhas) if not l.startswith("#")), 0)])
+    dados = yaml.safe_load("\n".join(linhas)) or {}
+    dados["animation_ai"] = {**(dados.get("animation_ai") or {}), **limpo}
+    arquivo.write_text(cabecalho + yaml.safe_dump(dados, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return {"sucesso": True, "ajustes": limpo}
+
+
+@app.post("/api/projetos/{nome}/animacoes")
+def animacoes_do_projeto(nome: str, payload: AjustesAnimacaoPayload):
+    """O estilo só deste vídeo, por cima do canal. Só antes de começar: a criação lê os ajustes enquanto anda."""
+    limpo = _ajustes_ou_400(payload.ajustes)
+    if not (PROJETOS / nome / "projeto.json").exists():
+        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    with TAREFAS_LOCK:
+        if nome in CRIACOES_ATIVAS:
+            raise HTTPException(status_code=409, detail="Este vídeo já está sendo criado.")
+    Projeto(nome).definir_override("animation_ai", limpo)
+    return {"sucesso": True, "ajustes": limpo}
+
+
+def _perfil_de_avatar(caminho: Path) -> bool:
+    """Perfil com personagem do HeyGen: o vídeo depende de clipes gravados fora da fábrica."""
+    try:
+        return bool((carregar_perfil(str(caminho)).get("avatar") or {}).get("ativo"))
+    except (Exception, SystemExit):
+        return False
+
+
+@app.get("/api/vozes")
+def listar_vozes():
+    """Retorna lista de vozes pt-BR disponíveis para narração no Edge-TTS."""
+    vozes = [
+        {"id": "pt-BR-AntonioNeural", "nome": "Antônio - pt-BR (Voz Masculina Natural)", "genero": "masculino"},
+        {"id": "pt-BR-FranciscaNeural", "nome": "Francisca - pt-BR (Voz Feminina Expressiva)", "genero": "feminino"},
+        {"id": "pt-BR-ThalitaMultilingualNeural", "nome": "Thalita - pt-BR (Voz Feminina Suave)", "genero": "feminino"},
+        {"id": "pt-PT-DuarteNeural", "nome": "Duarte - pt-PT (Voz Masculina Portugal)", "genero": "masculino"},
+        {"id": "pt-PT-RaquelNeural", "nome": "Raquel - pt-PT (Voz Feminina Portugal)", "genero": "feminino"},
+    ]
+    return {"vozes": vozes}
+
+
+_CACHE_VOZES: Dict[tuple, tuple] = {}
+_CACHE_VOZES_SEGUNDOS = 3600
+
+
+@app.get("/api/vozes/genaipro")
+@app.get("/api/vozes/elevenlabs")  # nome antigo, pra editor desatualizado
+def listar_vozes_genaipro(idioma: str = "pt", busca: str = "", genero: str = "", pagina: int = 0):
+    """Vozes da biblioteca da GenAIPro, com prévia em áudio. Sem busca, traz as de narração mais usadas do idioma.
+
+    Não gasta créditos. A resposta fica guardada por uma hora pra não repetir a consulta."""
+    idioma = idioma if any(i["id"] == idioma for i in genaipro.IDIOMAS) else "pt"
+    genero = genero if genero in ("male", "female") else ""
+    busca = (busca or "").strip()[:60]
+    base = {"modelos": MODELOS_NARRACAO, "idiomas": genaipro.IDIOMAS, "idioma_atual": idioma,
+            "preco_por_mil": round(custos_reais.preco_por_caractere(config_geral())[0] * 1000, 4)}
+    if not genaipro.tem_chave():
+        return {**base, "vozes": [], "erro": "Falta a chave da GenAIPro. Cole em GENAIPRO_API no .env."}
+    chave_cache = (idioma, busca.lower(), genero, pagina)
+    guardado = _CACHE_VOZES.get(chave_cache)
+    # o aviso de voz lenta sai da medida mais recente, nunca do que ficou guardado por uma hora
+    com_aviso = lambda lista: [v | genaipro.lentidao(v.get("voice_id")) for v in lista]
+    if guardado and time.time() - guardado[0] < _CACHE_VOZES_SEGUNDOS:
+        return {**base, "vozes": com_aviso(guardado[1][0]), "tem_mais": guardado[1][1]}
+    try:
+        vozes, tem_mais = _vozes_do_idioma(idioma, busca, genero, pagina)
+    except SystemExit as e:
+        return {**base, "vozes": [], "erro": str(e)}
+    _CACHE_VOZES[chave_cache] = (time.time(), (vozes, tem_mais))
+    return {**base, "vozes": com_aviso(vozes), "tem_mais": tem_mais}
+
+
+PAGINAS_POR_VEZ = 4  # cada página da GenAIPro traz umas 20 vozes
+
+
+def _vozes_do_idioma(idioma, busca, genero, pagina):
+    """Só as vozes do idioma pedido, juntando 4 páginas da GenAIPro por vez. Medido em 29/10/2026: cada página traz
+    umas 20 vozes (japonês tem mais de 176), e no idioma com pouca voz de narração ela completa com outras línguas
+    (sueco: 17 em sueco e 58 em inglês, hindi, espanhol...). Com menos de 40, entra também quem não é de narração."""
+    def buscar(uso):
+        paginas = range(pagina * PAGINAS_POR_VEZ, (pagina + 1) * PAGINAS_POR_VEZ)
+        with ThreadPoolExecutor(max_workers=PAGINAS_POR_VEZ) as grupo:
+            lotes = list(grupo.map(lambda p: genaipro.vozes(busca=busca or None, idioma=idioma, genero=genero or None,
+                                                            uso=uso, quantidade=30, pagina=p), paginas))
+        return [v for lote in lotes for v in lote], bool(lotes[-1])
+
+    vozes, tem_mais = buscar(None if busca else "narrative_story")
+    do_idioma = [v for v in vozes if v["idioma"] == idioma]
+    if len(do_idioma) < 40 and not busca:
+        outras, tem_mais = buscar(None)
+        do_idioma += [v for v in outras if v["idioma"] == idioma]
+    vistas, unicas = set(), []
+    for v in do_idioma:
+        if v["voice_id"] not in vistas:
+            vistas.add(v["voice_id"])
+            unicas.append(v)
+    return unicas, tem_mais
+
+
+_CACHE_VOZES_FISH: Dict[tuple, tuple] = {}
+
+
+@app.get("/api/vozes/fish")
+def listar_vozes_fish(idioma: str = "pt", busca: str = "", genero: str = ""):
+    """Vozes da biblioteca pública da Fish Audio, com amostra em áudio, para a voz grátis (no lugar do Edge-TTS).
+
+    Não gasta nada. A resposta fica guardada por uma hora."""
+    idioma = idioma if any(i["id"] == idioma for i in IDIOMAS_VOZ) else "pt"
+    genero = genero if genero in ("male", "female") else ""
+    busca = (busca or "").strip()[:60]
+    base = {"modelos": [], "idiomas": IDIOMAS_VOZ, "idioma_atual": idioma, "preco_por_mil": 0}
+    chave_cache = (idioma, busca.lower(), genero)
+    guardado = _CACHE_VOZES_FISH.get(chave_cache)
+    if guardado and time.time() - guardado[0] < _CACHE_VOZES_SEGUNDOS:
+        return {**base, "vozes": guardado[1]}
+    try:
+        vozes = fish.vozes(busca=busca or None, idioma=idioma, genero=genero or None, quantidade=40)
+    except fish.ErroFish as e:
+        return {**base, "vozes": [], "erro": str(e)}
+    _CACHE_VOZES_FISH[chave_cache] = (time.time(), vozes)
+    return {**base, "vozes": vozes}
+
+
+@app.get("/api/vozes/local")
+def listar_vozes_locais(idioma: str = "", busca: str = "", genero: str = "", origem: str = "", tipo: str = "",
+                        limite: int = 200):
+    """Todas as vozes open source do VoiceStudio e do voicebox que a fábrica roda (voz_local.catalogo). Grátis.
+
+    idioma filtra as vozes nativas da língua e mantém as que falam qualquer língua (OmniVoice e Qwen)."""
+    vozes = voz_local.catalogo()
+    if idioma:
+        vozes = [v for v in vozes if not v.get("idioma") or v["idioma"] == idioma]
+    if genero in ("masculina", "feminina", "male", "female"):
+        alvo = {"male": "masculina", "female": "feminina"}.get(genero, genero)
+        vozes = [v for v in vozes if v.get("genero") in (alvo, "")]
+    if origem:
+        vozes = [v for v in vozes if v["origem"].lower() == origem.lower()]
+    if tipo:
+        vozes = [v for v in vozes if v.get("tipo") == tipo]
+    if busca.strip():
+        b = busca.strip().lower()
+        vozes = [v for v in vozes if b in f"{v['id']} {v.get('nome')} {v.get('descricao')}".lower()]
+    for v in vozes:
+        v["previa"] = f"/api/vozes/local/previa?voz={quote(v['id'])}&idioma={idioma or 'pt'}"
+    return {"total": len(vozes), "vozes": vozes[:max(1, min(limite, 2000))], "padrao": voz_local.codigo_da_voz({}),
+            "preco_por_mil": 0}
+
+
+@app.get("/api/vozes/local/previa")
+def previa_voz_local(voz: str, idioma: str = "pt"):
+    """Um trecho curto na voz pedida (gerado uma vez e guardado). Grátis, roda na placa de vídeo."""
+    try:
+        arquivo = voz_local.previa(voz, idioma, log=print)
+    except voz_local.ErroVozLocal as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return FileResponse(arquivo, media_type="audio/wav")
+
+
+@app.get("/api/genaipro/creditos")
+def creditos_genaipro():
+    """Saldo da GenAIPro, quando vence e quanto isso rende em minutos de narração. Não gasta nada."""
+    if not genaipro.tem_chave():
+        return {"configurada": False, "creditos": 0, "pacotes": []}
+    try:
+        conta = genaipro.conta()
+    except SystemExit as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    por_caractere, origem = custos_reais.preco_por_caractere(config_geral())
+    creditos_por_caractere, _ = custos_reais.creditos_por_caractere(config_geral())
+    ritmo = 900  # caracteres por minuto de uma narração típica
+    return {**conta, "configurada": True,
+            "minutos_de_narracao": int(conta["creditos"] / (creditos_por_caractere * ritmo)),
+            "preco_por_minuto_usd": round(por_caractere * ritmo, 4), "origem_do_preco": origem}
+
+
+@app.get("/api/vozes/openspeaker")
+def listar_vozes_openspeaker(idioma: str = "pt", busca: str = "", genero: str = "", pagina: int = 0,
+                             provedor: str = "elevenlabs"):
+    """Vozes da biblioteca do OpenSpeaker (ai33.pro), com prévia em áudio. Não gasta créditos.
+
+    A API do OpenSpeaker já filtra e pagina por idioma, então aqui não é preciso juntar páginas como na GenAIPro.
+    A resposta fica guardada por uma hora pra não repetir a consulta."""
+    idioma_id = idioma if any(i["id"] == idioma for i in openspeaker.IDIOMAS) else "pt"
+    genero = genero if genero in ("male", "female") else ""
+    busca = (busca or "").strip()[:60]
+    base = {"modelos": [], "idiomas": openspeaker.IDIOMAS, "idioma_atual": idioma_id,
+            "preco_por_mil": round(custos_reais.preco_por_caractere(
+                config_geral(), provedor="openspeaker")[0] * 1000, 4)}
+    if not openspeaker.tem_chave():
+        return {**base, "vozes": [], "erro": "Falta a chave do OpenSpeaker. Cole em OPENSPEAKER_API no .env."}
+    nome_do_idioma = next((i["nome"] for i in openspeaker.IDIOMAS if i["id"] == idioma_id), "")
+    chave_cache = ("openspeaker", provedor, idioma_id, busca.lower(), genero, pagina)
+    com_aviso = lambda lista: [v | openspeaker.lentidao(v.get("voice_id")) for v in lista]
+    guardado = _CACHE_VOZES.get(chave_cache)
+    if guardado and time.time() - guardado[0] < _CACHE_VOZES_SEGUNDOS:
+        return {**base, "vozes": com_aviso(guardado[1][0]), "tem_mais": guardado[1][1]}
+    try:
+        vozes = openspeaker.vozes(busca=busca or None, idioma=nome_do_idioma or None, genero=genero or None,
+                                  quantidade=60, pagina=pagina, provedor=provedor)
+    except SystemExit as e:
+        return {**base, "vozes": [], "erro": str(e)}
+    tem_mais = len(vozes) >= 60
+    _CACHE_VOZES[chave_cache] = (time.time(), (vozes, tem_mais))
+    return {**base, "vozes": com_aviso(vozes), "tem_mais": tem_mais}
+
+
+@app.get("/api/openspeaker/creditos")
+def creditos_openspeaker():
+    """Saldo do OpenSpeaker e quanto isso rende em minutos de narração. Não gasta nada."""
+    if not openspeaker.tem_chave():
+        return {"configurada": False, "creditos": 0, "pacotes": []}
+    try:
+        conta = openspeaker.conta()
+    except SystemExit as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    por_caractere, origem = custos_reais.preco_por_caractere(config_geral(), provedor="openspeaker")
+    por_caractere_creditos, _ = custos_reais.creditos_por_caractere(config_geral(), provedor="openspeaker")
+    ritmo = 900  # caracteres por minuto de uma narração típica
+    return {**conta, "configurada": True,
+            "minutos_de_narracao": int(conta["creditos"] / (por_caractere_creditos * ritmo)),
+            "preco_por_minuto_usd": round(por_caractere * ritmo, 4), "origem_do_preco": origem}
+
+
+@app.get("/api/imagens/provedores")
+def listar_provedores_imagem():
+    """Os provedores de imagem de IA que o usuário pode escolher por projeto. O padrão é o OpenRouter."""
+    precos = (config_geral().get("precos") or {})
+    preco_google = precos.get("imagem", 0.0336)
+    preco_google_lote = precos.get("imagem_lote", 0.0168)
+    assinatura = chatgpt_assinatura.estado()
+    return {
+        "provedores": [
+            {
+                "id": "assinatura",
+                "nome": "Assinatura do ChatGPT",
+                "modelo": chatgpt_assinatura.MODELO_IMAGEM,
+                "custo": "nada por imagem: gasta o limite da sua assinatura (janela de 5 horas e semana)",
+                "descricao": "As imagens saem pela conta ChatGPT logada neste computador (`codex login`), sem chave "
+                             "de API. Se o limite acabar no meio de um vídeo, as que faltam saem pela chave de API."
+                             + ("" if assinatura.get("conectada")
+                                else " Agora não dá para usar: " + str(assinatura.get("motivo") or "sem login")),
+                "disponivel": bool(assinatura.get("conectada")),
+                "conta": assinatura.get("email") or "",
+                "plano": assinatura.get("plano") or "",
+                "recomendado": False,
+            },
+            {
+                "id": "openrouter",
+                "nome": "GPT-5.4 Image 2 (OpenRouter)",
+                "modelo": MODELO_OPENROUTER_IMAGEM,
+                "custo": f"US$ {precos.get('imagem_openrouter', 0.005):.4f}/imagem em qualidade baixa, no saldo do OpenRouter que a fábrica já usa",
+                "descricao": "O padrão da fábrica: o GPT-5.4 Image 2 da OpenAI, em 16:9 e qualidade baixa, pela chave do OpenRouter.",
+                "recomendado": True,
+            },
+            {
+                "id": "google",
+                "nome": "Nano Banana 2 Lite (Google)",
+                "modelo": "gemini-3.1-flash-lite-image",
+                "custo": f"US$ {preco_google:.4f}/imagem (ou US$ {preco_google_lote:.4f} no modo lote, metade do preço)",
+                "descricao": "Ótima qualidade fotorrealista cobrada na mesma chave GEMINI_API_KEY que o resto da fábrica já usa.",
+                "recomendado": False,
+            },
+            {
+                "id": "kie",
+                "nome": "Kie.ai (Grok Imagine 2.0)",
+                "modelo": "grok-imagine-image-2-0/text-to-image",
+                "custo": "cobrado à parte, em créditos da sua conta na Kie.ai",
+                "descricao": "Geração fotorrealista com Grok Imagine 2.0 via Kie.ai, precisa de KIE_API_KEY no .env e saldo na Kie.",
+                "recomendado": False,
+            },
+        ]
+    }
+
+
+@app.get("/api/chatgpt/estado")
+def estado_da_assinatura():
+    """A conta ChatGPT logada neste computador, o plano e quanto já foi usado das janelas de limite. O Radar mostra
+    isto no cartão de Conexões da conta."""
+    return chatgpt_assinatura.estado()
+
+
+@app.get("/api/nichos/buscar")
+def buscar_nichos(q: str, dias: int = 30, limite: int = 40):
+    """Vídeos recentes sobre o termo com visualização muito acima do tamanho do canal."""
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="Digite um termo para buscar.")
+    try:
+        resultado = nichos.buscar(q.strip(), dias=dias, maximo=min(limite, 100))
+    except SystemExit as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"videos": resultado}
+
+
+@app.get("/api/nichos/canal/{canal_id}/videos")
+def videos_do_canal_nicho(canal_id: str, pagina: Optional[str] = None):
+    """Miniatura e título dos vídeos de um canal, paginado sob pedido."""
+    try:
+        return nichos.videos_do_canal(canal_id, pagina=pagina)
+    except SystemExit as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+CHAVES_CONHECIDAS = [
+    {
+        "env": "GENAIPRO_API",
+        "nome": "GenAIPro",
+        "para_que": "Narração com as vozes e os modelos da ElevenLabs, pagando por créditos.",
+        "obrigatoria": True,
+        "sem_ela": "Só dá pra narrar com a voz grátis do Edge-TTS.",
+        "onde": "genaipro.io",
+    },
+    {
+        "env": "OPENSPEAKER_API",
+        "nome": "OpenSpeaker",
+        "para_que": "Narração com as mesmas vozes da ElevenLabs por créditos mais baratos (ai33.pro).",
+        "obrigatoria": False,
+        "sem_ela": "A narração paga continua na GenAI Pro.",
+        "onde": "ai33.pro",
+    },
+    {
+        "env": "ELEVENLABS_API_KEY",
+        "nome": "ElevenLabs (opcional)",
+        "para_que": "Só efeitos sonoros e música, que a GenAIPro não faz.",
+        "obrigatoria": False,
+        "sem_ela": "Os vídeos saem sem efeitos sonoros novos.",
+        "onde": "elevenlabs.io",
+    },
+    {
+        "env": "GEMINI_API_KEY",
+        "nome": "Google Gemini",
+        "para_que": "Planeja as cenas e confere se o conteúdo bate com a narração (Corrigir Mídia).",
+        "obrigatoria": False,
+        "sem_ela": "O planejamento de cenas cai para o Claude Code pela assinatura.",
+        "onde": "aistudio.google.com/apikey",
+    },
+    {
+        "env": "GEMINI_API_KEY_IMAGE",
+        "nome": "Google Gemini (imagens)",
+        "para_que": "Gera as imagens de IA (Nano Banana), separada da chave de planejamento acima.",
+        "obrigatoria": False,
+        "sem_ela": "Usa a mesma GEMINI_API_KEY de cima pra gerar imagem também.",
+        "onde": "aistudio.google.com/apikey",
+    },
+    {
+        "env": "PEXELS_API_KEY",
+        "nome": "Pexels",
+        "para_que": "Banco de fotos e vídeos reais, de graça.",
+        "obrigatoria": True,
+        "sem_ela": "Perde uma das fontes de material real.",
+        "onde": "pexels.com/api",
+    },
+    {
+        "env": "PIXABAY_API_KEY",
+        "nome": "Pixabay",
+        "para_que": "Banco de fotos e vídeos reais, de graça.",
+        "obrigatoria": True,
+        "sem_ela": "Perde uma das fontes de material real.",
+        "onde": "pixabay.com/api/docs",
+    },
+    {
+        "env": "COVERR_API_KEY",
+        "nome": "Coverr",
+        "para_que": "Mais vídeos de banco de imagens, de graça.",
+        "obrigatoria": False,
+        "sem_ela": "Os vídeos vêm só do Pexels e do Pixabay.",
+        "onde": "api.coverr.co/docs (a chave se pede por e-mail a team@coverr.co)",
+    },
+    {
+        "env": "KIE_API_KEY",
+        "nome": "Kie.ai",
+        "para_que": "Geração de imagens com Grok Imagine 2.0.",
+        "obrigatoria": False,
+        "sem_ela": "As imagens são geradas pelo Google Gemini.",
+        "onde": "kie.ai",
+    },
+    {
+        "env": "YOUTUBE_API_KEY",
+        "nome": "YouTube Data API",
+        "para_que": "Procurar Nichos: achar vídeos virais e comparar canais.",
+        "obrigatoria": False,
+        "sem_ela": "A página Procurar Nichos não funciona.",
+        "onde": "console.cloud.google.com",
+    },
+]
+
+
+def _mascarar(valor: str) -> str:
+    """Mostra só as pontas da chave. O valor cheio nunca sai do servidor."""
+    v = (valor or "").strip()
+    if not v:
+        return ""
+    if len(v) <= 10:
+        return v[:2] + "…" * 6
+    return f"{v[:4]}{'…' * 8}{v[-4:]}"
+
+
+@app.get("/api/config/chaves")
+def listar_chaves():
+    """Diz quais chaves estão configuradas, sem devolver nenhuma delas por inteiro."""
+    itens = []
+    for c in CHAVES_CONHECIDAS:
+        valor = os.environ.get(c["env"], "").strip()
+        valida = bool(valor) and not valor.startswith("gsk_")
+        itens.append({**c, "configurada": valida, "previa": _mascarar(valor) if valida else ""})
+    return {"chaves": itens, "arquivo": str(RAIZ / ".env")}
+
+
+def mesclar_env(texto: str, novas: Dict[str, str]) -> str:
+    """Devolve o conteúdo do .env com as chaves novas aplicadas."""
+    restantes = dict(novas)
+    ja_escritas = set()
+    saida = []
+    for linha in texto.splitlines():
+        crua = linha.strip()
+        if crua and not crua.startswith("#") and "=" in crua:
+            nome = crua.split("=", 1)[0].strip()
+            if nome in novas:
+                if nome in ja_escritas:
+                    continue
+                saida.append(f"{nome}={novas[nome]}")
+                ja_escritas.add(nome)
+                restantes.pop(nome, None)
+                continue
+        saida.append(linha)
+
+    for nome, valor in restantes.items():
+        saida.append(f"{nome}={valor}")
+
+    return "\n".join(saida) + "\n"
+
+
+def garantir_token() -> None:
+    """Garante que sempre existe um FABRICA_TOKEN, mesmo na primeira vez que a fábrica roda."""
+    if os.environ.get("FABRICA_TOKEN", "").strip():
+        return
+    token = secrets.token_urlsafe(32)
+    env = RAIZ / ".env"
+    atual = env.read_text(encoding="utf-8") if env.exists() else ""
+    env.write_text(mesclar_env(atual, {"FABRICA_TOKEN": token}), encoding="utf-8")
+    os.environ["FABRICA_TOKEN"] = token
+
+
+garantir_token()
+ytpub.iniciar_checador()
+
+
+class ChavesEntrada(BaseModel):
+    chaves: Dict[str, str]
+
+
+@app.post("/api/config/chaves")
+def salvar_chaves(entrada: ChavesEntrada):
+    """Grava as chaves no .env, preservando o resto do arquivo."""
+    conhecidas = {c["env"] for c in CHAVES_CONHECIDAS}
+    novas = {}
+    for nome, valor in (entrada.chaves or {}).items():
+        if nome not in conhecidas:
+            raise HTTPException(status_code=400, detail=f"Chave desconhecida: {nome}")
+        valor = (valor or "").strip()
+        if not valor:
+            continue
+        novas[nome] = "" if valor.lower() == "limpar" else valor
+
+    if not novas:
+        return {"ok": True, "atualizadas": []}
+
+    env = RAIZ / ".env"
+    atual = env.read_text(encoding="utf-8") if env.exists() else ""
+    env.write_text(mesclar_env(atual, novas), encoding="utf-8")
+
+    for nome, valor in novas.items():
+        os.environ[nome] = valor
+
+    return {"ok": True, "atualizadas": sorted(novas)}
+
+
+@app.get("/api/saude")
+async def saude():
+    """A fábrica está de pé: o LIGAR e o VIGIA conferem aqui. É async e não lê nada, então responde na hora mesmo com a
+    criação ocupando tudo. Antes eles conferiam na /api/projetos, que lê o cenas.json e o perfil de todo projeto (uns
+    4 s parada); com a criação trabalhando ela passava dos 20 s, o vigia achava que a fábrica travou e reiniciava no
+    meio do vídeo (4 vezes no tescos-60-billion, em 2026-10-27), e a esteira refazia o fim da criação a cada vez."""
+    return {"ok": True}
+
+
+# A listagem é pedida o tempo todo — o painel e o Radar (Produzir, Acompanhar e Resultados) voltam a ela a cada
+# poucos segundos — e o que ela tem de caro quase nunca muda: ler as cenas, conferir no disco o arquivo de cada
+# uma e procurar a capa. Com 31 projetos e 11 mil cenas somadas isso levava 4 s por chamada e a tela ficava
+# parada esperando. Agora cada projeto guarda o que leu e só relê quando a data de algo que importa muda: o
+# projeto.json, as cenas, o alinhamento e as duas pastas de material (a data de uma pasta muda quando um arquivo
+# entra ou sai dela, que é exatamente o que a conferência olha).
+_LISTA_LIDA: Dict[str, tuple] = {}
+
+
+def _assinatura(pasta: Path) -> tuple:
+    def quando(nome: str) -> float:
+        try:
+            return (pasta / nome).stat().st_mtime
+        except OSError:
+            return -1.0
+    # a data das pastas basta quase sempre, mas o Windows só marca a hora de 15 em 15 ms: um arquivo que entra no
+    # mesmo instante da leitura passaria despercebido e o projeto ficaria para sempre com a resposta velha. Contar
+    # quantos arquivos há dentro fecha essa fresta, e é uma leitura de pasta, não uma ida ao disco por cena.
+    return (tuple(quando(n) for n in ("projeto.json", "cenas.json", "alinhamento.json", "imagens", "midia")),
+            len(_nomes_em(pasta, "imagens")), len(_nomes_em(pasta, "midia")))
+
+
+def _lido_do_projeto(pasta: Path) -> Dict[str, Any]:
+    """A parte cara de um projeto, guardada até o disco mudar. `completas` sai sem a esteira: ela não é do disco."""
+    assinatura = _assinatura(pasta)
+    guardado = _LISTA_LIDA.get(pasta.name)
+    if guardado and guardado[0] == assinatura:
+        return guardado[1]
+
+    try:
+        info = json.loads((pasta / "projeto.json").read_text(encoding="utf-8"))
+    except Exception:
+        info = {}
+
+    cenas_count = 0
+    completas = False
+    if (pasta / "cenas.json").exists():
+        try:
+            cenas = json.loads((pasta / "cenas.json").read_text(encoding="utf-8")).get("cenas", [])
+            cenas_count = len(cenas)
+            completas = cenas_count > 0 and not _cenas_sem_arquivo(pasta, cenas)
+        except (Exception, SystemExit):
+            pass
+
+    duracao = 0.0
+    if (pasta / "alinhamento.json").exists():
+        try:
+            duracao = json.loads((pasta / "alinhamento.json").read_text(encoding="utf-8")).get("duracao", 0.0)
+        except Exception:
+            pass
+
+    lido = {"info": info, "cenas_count": cenas_count, "completas": completas,
+            "duracao": duracao, "capa": _capa_do_projeto(pasta)}
+    _LISTA_LIDA[pasta.name] = (assinatura, lido)
+    return lido
+
+
+@app.get("/api/projetos")
+def listar_projetos():
+    """Lista todos os projetos existentes em projetos/."""
+    if not PROJETOS.exists():
+        return {"projetos": []}
+
+    lista = []
+    for p in sorted(PROJETOS.iterdir()):
+        if p.is_dir() and (p / "projeto.json").exists():
+            lido = _lido_do_projeto(p)
+            info = lido["info"]
+            lista.append({
+                "nome": p.name,
+                "perfil": info.get("perfil", ""),
+                "offline": info.get("offline", False),
+                "criado": info.get("criado", ""),
+                "cenas_count": lido["cenas_count"],
+                "duracao": lido["duracao"],
+                "tem_final": (p / "final.mp4").exists(),
+                "tem_narracao": (p / "narracao.wav").exists(),
+                # o painel só libera o "Editar" quando nenhuma cena está sem imagem ou vídeo; com a esteira ainda
+                # trabalhando não conta como pronto, e isso fica fora do guardado porque muda sem o disco mudar
+                "cenas_completas": lido["completas"] and p.name not in CRIACOES_ATIVAS,
+                # o que a esteira de criação está fazendo agora, para o painel não mostrar "processando" à toa
+                "criacao": _resumo_criacao(p.name),
+                "capa": lido["capa"],
+            })
+
+    return {"projetos": lista}
+
+
+def _resumo_criacao(nome: str) -> Dict[str, Any]:
+    """rodando: a esteira está trabalhando neste vídeo agora. Senão, o último estado gravado dela."""
+    with TAREFAS_LOCK:
+        rodando = nome in CRIACOES_ATIVAS
+        na_memoria = next((dict(t) for t in reversed(list(TAREFAS.values()))
+                           if t.get("projeto") == nome and t.get("tipo") == "criacao"), None)
+    estado = na_memoria or _ler_criacao(nome) or {}
+    return {
+        "rodando": rodando,
+        "status": estado.get("status"),
+        "mensagem": estado.get("mensagem"),
+        "progresso_pct": estado.get("progresso_pct"),
+        "aguardando_ate": estado.get("aguardando_ate"),
+        "precisa_voce": bool(estado.get("precisa_voce")),
+    }
+
+
+def _capa_do_projeto(pasta: Path) -> Optional[str]:
+    """Miniatura do projeto para o painel."""
+    for sub, padroes in (("midia", ("*_capa.jpg", "*.jpg", "*.png")), ("imagens", ("*.png",))):
+        origem = pasta / sub
+        if not origem.is_dir():
+            continue
+        for padrao in padroes:
+            achados = sorted(origem.glob(padrao))
+            if achados:
+                return f"/arquivos/{pasta.name}/{sub}/{achados[len(achados) // 2].name}"
+    return None
+
+
+@app.get("/api/projetos/{nome}")
+def obter_projeto(nome: str):
+    """Devolve status geral do projeto, tempo total e configurações."""
+    pasta = PROJETOS / nome
+    if not pasta.exists() or not (pasta / "projeto.json").exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    p = Projeto(nome)
+    duracao = 0.0
+    if p.existe("alinhamento.json"):
+        duracao = p.ler_json("alinhamento.json").get("duracao", 0.0)
+
+    cenas_count = 0
+    if p.existe("cenas.json"):
+        cenas_count = len(p.ler_json("cenas.json").get("cenas", []))
+
+    roteiro_texto = ""
+    if p.existe("roteiro.txt"):
+        try:
+            roteiro_texto = (pasta / "roteiro.txt").read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    return {
+        "nome": p.nome,
+        "offline": p.offline,
+        "duracao": duracao,
+        "cenas_count": cenas_count,
+        "perfil": p.perfil.get("nome", "?"),
+        "roteiro": roteiro_texto,
+        "tem_final": p.existe("final.mp4"),
+        "tem_narracao": p.existe("narracao.wav"),
+        "url_final": _url_com_versao(f"/arquivos/{nome}/final.mp4", p.caminho("final.mp4")) if p.existe("final.mp4") else None,
+        "tem_final_vertical": p.existe("final_vertical.mp4"),
+        "url_final_vertical": (_url_com_versao(f"/arquivos/{nome}/final_vertical.mp4", p.caminho("final_vertical.mp4"))
+                               if p.existe("final_vertical.mp4") else None),
+        "url_narracao": f"/arquivos/{nome}/narracao.wav" if p.existe("narracao.wav") else None,
+        # MP3 leve para o player do editor; o WAV original continua para o render e para baixar
+        # com a data da narração no endereço: trocar a voz troca o endereço, e o navegador não toca a gravação antiga
+        "url_narracao_leve": (_url_com_versao(f"/arquivos_narracao/{nome}.mp3", p.pasta / "narracao.wav")
+                              if p.existe("narracao.wav") else None),
+        "legendas": obter_legendas_projeto(p),
+        "voz": p.perfil.get("voz") or {},
+        "imagens": p.perfil.get("imagens") or {},
+        # enquanto a esteira trabalha, as cenas mudam por baixo: o editor mostra "em produção" e não renderiza
+        "criacao": _resumo_criacao(nome),
+    }
+
+
+def _recusar_se_criando(nome: str, acao: str) -> None:
+    """Renderizar ou salvar no meio da criação pega cenas trocando de imagem (sem arquivo por instantes) e,
+    ao salvar, grava por cima o estado antigo que o editor carregou."""
+    with TAREFAS_LOCK:
+        criando = nome in CRIACOES_ATIVAS
+    if criando:
+        estado = _resumo_criacao(nome)
+        raise HTTPException(status_code=409, detail=(
+            f"O vídeo ainda está sendo criado ({estado.get('progresso_pct') or 0}%: {estado.get('mensagem') or ''}). "
+            f"Espere terminar para {acao}; o editor avisa quando ficar pronto."))
+
+
+# tarefas que trocam a imagem das cenas: o render não pode rodar junto (nem elas junto do render)
+_MEXEM_NA_MIDIA = ("corrigir_", "continuar_", "limpeza_")
+
+
+def _recusar_se_ocupado(nome: str, prefixos: tuple, acao: str) -> None:
+    """O render lê o arquivo de cada cena minutos depois de montar a lista; o Corrigir Mídia troca esses arquivos.
+
+    No nunca-deve-ter-dentro-de-casa-parte-2 os dois rodaram juntos: a cena 166 passou de imagem de IA para foto do
+    Pexels no meio do render, o FFmpeg não achou imagens/0166.png e a tela ficou 20 min parada nos 32%."""
+    with TAREFAS_LOCK:
+        ativa = next((t for tid, t in TAREFAS.items() if t.get("projeto") == nome and tid.startswith(prefixos)
+                      and t.get("status") in ("processando", "renderizando")), None)
+    if ativa:
+        andamento = ativa.get("mensagem") or ativa.get("etapa_atual") or ""
+        raise HTTPException(status_code=409, detail=(
+            f"Outra tarefa está mexendo neste vídeo ({ativa.get('progresso_pct') or 0}%: {andamento}). "
+            f"Espere terminar para {acao}."))
+
+
+@app.delete("/api/projetos/{nome}")
+def apagar_projeto(nome: str):
+    """Manda o projeto para a lixeira (projetos/_lixeira), com tudo o que já foi pago: `fabrica restaurar NOME` volta
+    ele. Antes a pasta era apagada, e recriar o vídeo pagava a produção inteira de novo (lixeira.py)."""
+    from . import lixeira
+
+    pasta = PROJETOS / nome
+    if not pasta.exists() or not (pasta / "projeto.json").exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    pasta_resolvida = pasta.resolve()
+    raiz_resolvida = PROJETOS.resolve()
+    if raiz_resolvida not in pasta_resolvida.parents:
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+
+    # vídeo pronto ainda trabalhando (kit, thumbnails, shorts, entrega) ou render, Corrigir...: recusa. A criação
+    # continua podendo ser parada pelo × (a esteira para quando o projeto some)
+    with TAREFAS_LOCK:
+        publicando = nome in _PUBLICANDO
+    if publicando:
+        raise HTTPException(status_code=409, detail=(
+            "O vídeo ainda está montando o kit de publicação, as thumbnails e os shorts. "
+            "Espere terminar para apagar."))
+    _recusar_se_ocupado(nome, ("render_",) + _MEXEM_NA_MIDIA, "apagar")
+
+    # vai para projetos/_lixeira, não é apagado de vez (fabrica/lixeira.py)
+    try:
+        lixeira.mover(pasta_resolvida)
+    except PermissionError as e:
+        raise HTTPException(status_code=409,
+                            detail=f"Não foi possível apagar o projeto: um arquivo ainda está em uso ({e}).")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Não foi possível apagar o projeto: {e}")
+    try:
+        lixeira.limpar_antigos()
+    except Exception:
+        pass
+    return {"ok": True, "nome": nome, "lixeira": True}
+
+
+@app.get("/api/projetos/{nome}/custos")
+def custos_reais_projeto(nome: str):
+    """Gasto real (dinheiro de verdade já cobrado) deste vídeo."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    return custos_reais.resumo(Projeto(nome))
+
+
+@app.get("/api/projetos/{nome}/legendas")
+def obter_legendas(nome: str):
+    """Devolve as legendas cronometradas a partir do legendas_tela.srt."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    return {"legendas": obter_legendas_projeto(p)}
+
+
+@app.get("/api/projetos/{nome}/cenas")
+def listar_cenas(nome: str):
+    """Lê o cenas.json e devolve a lista completa de cenas enriquecida com URLs de mídia."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    p = Projeto(nome)
+    if not p.existe("cenas.json"):
+        return {"cenas": []}
+
+    dados = p.ler_json("cenas.json")
+    cenas_brutas = dados.get("cenas", [])
+    motion = _motion_do_projeto(p)
+    cenas_enriquecidas = [enriquecer_cena(p, c, motion) for c in cenas_brutas]
+    # o editor abriu o projeto: as prévias de vídeo que faltam começam a ser feitas, na ordem das cenas
+    if motion or any(c.get("previa_video_url") for c in cenas_enriquecidas):
+        preparar_previas_video(nome)
+
+    return {"cenas": cenas_enriquecidas, "sem_arquivo": sum(1 for c in cenas_enriquecidas if c["sem_arquivo"]),
+            "motion": [_motion_para_o_editor(p, item) for item in motion]}
+
+
+def _motion_do_projeto(p: Projeto) -> list:
+    """As animações em dia do projeto (a camada por cima das cenas), ou [] se a etapa está desligada."""
+    try:
+        return animacoes.validas(p) if animacoes.config(p).get("ativo", True) else []
+    except (OSError, KeyError, TypeError, ValueError):
+        return []
+
+
+def _motion_para_o_editor(p: Projeto, item: Dict[str, Any]) -> Dict[str, Any]:
+    """Um bloco da faixa Motion do editor: onde começa e termina, o que mostra e a prévia transparente dela."""
+    return {
+        "id": item["id"], "ini": item["ini"], "fim": item["fim"],
+        "modelo": item.get("modelo"), "visual": item.get("visual"), "texto": item.get("texto", ""),
+        # a assinatura do render no endereço: animação refeita, endereço novo
+        "url": f"/arquivos_previas/{p.nome}/motion/{item['id']}.webm?v={item.get('render') or ''}",
+    }
+
+
+@app.post("/api/projetos/{nome}/imagens/provedor")
+def definir_provedor_imagem(nome: str, payload: ImagensAjustesPayload):
+    """Troca qual IA gera as imagens só neste projeto."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    if payload.provedor not in PROVEDORES_IMAGEM:
+        raise HTTPException(status_code=400, detail="provedor precisa ser 'assinatura', 'openrouter', 'google' ou 'kie'.")
+    p = Projeto(nome)
+    p.definir_imagens_override({
+        "provedor": payload.provedor,
+        "modelo": payload.modelo or PROVEDORES_IMAGEM[payload.provedor],
+    })
+    return {"sucesso": True, "imagens": p.perfil.get("imagens") or {}}
+
+
+_TRAVAS_DOS_PROJETOS: Dict[str, threading.Lock] = {}
+_TRAVA_DAS_TRAVAS = threading.Lock()
+
+
+def trava_do_projeto(nome: str) -> threading.Lock:
+    """Uma alteração de cada vez no cenas.json de um projeto.
+
+    Cada alteração lê o arquivo inteiro, trabalha e grava o arquivo inteiro de volta. Com duas trocas de cena ao
+    mesmo tempo (cenas 123 e 124 do ouro-da-serra-gaucha), a segunda tinha lido o arquivo com a 123 ainda vazia,
+    no meio da troca dela, e gravou essa cópia por cima: a 123 ficava sem imagem. Agora a segunda espera a
+    primeira terminar e só então lê o arquivo."""
+    with _TRAVA_DAS_TRAVAS:
+        return _TRAVAS_DOS_PROJETOS.setdefault(nome, threading.Lock())
+
+
+_REVISOES = {}  # projeto -> (data do revisao_video.json, dados): o editor lista centenas de cenas por vez
+_REVISANDO = set()
+
+
+def _revisao_atual(p: Projeto):
+    arquivo = p.pasta / "revisao_video.json"
+    if not arquivo.exists():
+        return None
+    chave = arquivo.stat().st_mtime_ns
+    guardada = _REVISOES.get(p.nome)
+    if not guardada or guardada[0] != chave:
+        try:
+            _REVISOES[p.nome] = (chave, revisao_video.resultado(p))
+        except (OSError, ValueError):
+            return None
+    return _REVISOES[p.nome][1]
+
+
+def iniciar_revisao_video(nome: str) -> bool:
+    """Revisa o vídeo pronto numa linha à parte. Nunca atrapalha: se falhar, o vídeo está pronto do mesmo jeito."""
+    p = Projeto(nome)
+    if not revisao_video.ligada(p) or not p.existe("final.mp4"):
+        return False
+    with TAREFAS_LOCK:
+        if nome in _REVISANDO:
+            return True
+        _REVISANDO.add(nome)
+
+    def trabalhar():
+        try:
+            revisao_video.revisar(Projeto(nome), log=print)
+        except (Exception, SystemExit) as erro:
+            print(f"[revisão do vídeo] {nome}: {str(erro)[:160]}")
+        finally:
+            with TAREFAS_LOCK:
+                _REVISANDO.discard(nome)
+
+    threading.Thread(target=trabalhar, daemon=True, name=f"revisao-{nome}").start()
+    return True
+
+
+_PUBLICANDO = set()
+
+
+def iniciar_publicacao(nome: str, forcar: bool = False) -> bool:
+    """Monta o kit de publicação (publicacao.py) numa linha à parte. Nunca atrapalha o render."""
+    with TAREFAS_LOCK:
+        if nome in _PUBLICANDO:
+            return True
+        _PUBLICANDO.add(nome)
+
+    def trabalhar():
+        # o kit, as 3 thumbnails e os shorts, nessa ordem (as capas usam os textos do kit). Cada um que falhar não
+        # impede os outros
+        # a entrega no computador vem logo depois do kit (pedido do usuário em 2026-11-09: "o vídeo depois de feito
+        # demora muito pra ir pra pasta"). Ela só precisa do vídeo e da descrição; antes esperava as 3 thumbnails e os
+        # shorts, que ela nem leva quando entrega.so_o_video está ligado (o padrão). Com ele desligado, a entrega roda
+        # de novo no fim, para levar as capas e os shorts
+        def entregar_de_novo(pr):
+            if not entrega_pc.config(pr).get("so_o_video", True):
+                entrega_pc.entregar(pr, log=print)
+
+        try:
+            for etapa, funcao in (("kit de publicação", lambda pr: publicacao.gerar(pr, log=print, forcar=forcar)),
+                                  # a pasta do vídeo pronto no computador, com a descrição (entrega_pc.py)
+                                  ("entrega no computador", lambda pr: entrega_pc.entregar(pr, log=print)),
+                                  ("thumbnails", lambda pr: thumbnail.gerar(pr, log=print)),
+                                  ("shorts", lambda pr: shorts.gerar(pr, log=print) if shorts.config(pr)["ativo"] else None),
+                                  ("entrega com capas e shorts", entregar_de_novo),
+                                  ("google drive", lambda pr: drive.enviar(pr, log=print)),
+                                  # o disco aperta depressa: as sobras dos vídeos antigos saem aqui (faxina.py)
+                                  ("faxina de disco", lambda pr: faxina.faxinar(log=print))):
+                try:
+                    funcao(Projeto(nome))
+                except (Exception, SystemExit) as erro:
+                    print(f"[{etapa}] {nome}: {str(erro)[:160]}")
+        finally:
+            with TAREFAS_LOCK:
+                _PUBLICANDO.discard(nome)
+
+    threading.Thread(target=trabalhar, daemon=True, name=f"publicacao-{nome}").start()
+    return True
+
+
+@app.get("/api/garimpo/contas")
+def garimpo_contas():
+    return garimpo.listar_contas()
+
+
+@app.post("/api/garimpo/contas")
+def garimpo_conta_nova(corpo: Dict[str, Any]):
+    try:
+        return {"nome": garimpo.salvar_conta(corpo.get("nome"), corpo.get("cookies"))}
+    except ValueError as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.post("/api/garimpo/contas/{nome}/testar")
+def garimpo_conta_testar(nome: str):
+    try:
+        return garimpo.testar_conta(nome)
+    except ValueError as erro:
+        raise HTTPException(status_code=404, detail=str(erro))
+
+
+@app.delete("/api/garimpo/contas/{nome}")
+def garimpo_conta_apagar(nome: str):
+    return {"ok": garimpo.apagar_conta(nome)}
+
+
+@app.get("/consumo/openrouter.csv")
+def consumo_csv(chave: str = "", desde: Optional[str] = None):
+    """O registro do consumo no OpenRouter, para o IMPORTDATA do Google Planilhas. Fora do /api: a chave aqui é a só
+    de leitura do consumo (CONSUMO_PLANILHA_TOKEN), nunca o token do editor."""
+    from . import consumo
+    if not consumo.chave_confere(chave):
+        raise HTTPException(status_code=401, detail="Chave da planilha de consumo inválida.")
+    return Response(consumo.csv_do_registro(desde), media_type="text/csv; charset=utf-8",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/consumo/oficial.csv")
+def consumo_oficial_csv(chave: str = ""):
+    """O total oficial da conta no OpenRouter (o último consultado), para o Resumo da planilha do Google."""
+    from . import consumo
+    if not consumo.chave_confere(chave):
+        raise HTTPException(status_code=401, detail="Chave da planilha de consumo inválida.")
+    return Response(consumo.csv_oficial(), media_type="text/csv; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/projetos/{nome}/thumbs")
+def ver_thumbs(nome: str):
+    """As 3 opções de thumbnail, a escolhida e a prancha do celular (arquivos em /arquivos/NOME/...)."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    return {"rodando": nome in _PUBLICANDO, "thumbs": p.ler_json("thumbs.json") if p.existe("thumbs.json") else None}
+
+
+@app.post("/api/projetos/{nome}/thumbs/escolher")
+def escolher_thumb(nome: str, payload: EscolherThumbPayload):
+    """A pessoa escolhe a capa: thumbnail.jpg passa a ser a opção pedida."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    try:
+        return thumbnail.escolher(Projeto(nome), payload.opcao)
+    except SystemExit as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.get("/api/projetos/{nome}/shorts")
+def ver_shorts(nome: str):
+    """Os shorts cortados do vídeo pronto (shorts/shorts.json)."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    dados = p.ler_json("shorts/shorts.json") if p.existe("shorts/shorts.json") else {"shorts": []}
+    return {"rodando": nome in _PUBLICANDO, **dados}
+
+
+@app.get("/api/projetos/{nome}/publicacao")
+def ver_publicacao(nome: str):
+    """Kit de publicação do vídeo: título, alternativas, descrição com capítulos, tags, hashtags, comentário fixado,
+    se é conteúdo sintético e a legenda para subir junto. Serve para preencher a janela de publicar no YouTube."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    dados = p.ler_json("publicacao.json") if p.existe("publicacao.json") else None
+    return {"rodando": nome in _PUBLICANDO, "pronto": dados is not None, "publicacao": dados}
+
+
+@app.post("/api/projetos/{nome}/publicacao")
+def gerar_publicacao(nome: str, forcar: bool = False):
+    """Monta (ou refaz, com forcar) o kit de publicação em segundo plano. Grátis."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    if not Projeto(nome).existe("alinhamento.json"):
+        raise HTTPException(status_code=400, detail="O projeto ainda não tem narração.")
+    iniciar_publicacao(nome, forcar)
+    return JSONResponse(status_code=202, content={"sucesso": True})
+
+
+@app.get("/api/projetos/{nome}/revisao-video")
+def ver_revisao_video(nome: str):
+    """O que a revisão do vídeo pronto apontou, se ela é do final.mp4 de agora, e se ela está rodando."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    dados = revisao_video.resultado(p) or {}
+    return {"rodando": nome in _REVISANDO, "tem_video": p.existe("final.mp4"), "revisadas": dados.get("revisadas", 0),
+            "cenas": dados.get("cenas", {}), "graves": dados.get("graves", []), "quando": dados.get("quando")}
+
+
+@app.post("/api/projetos/{nome}/revisao-video")
+def rodar_revisao_video(nome: str):
+    """Revisa de novo o vídeo pronto, em segundo plano. Gratuito."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    if not Projeto(nome).existe("final.mp4"):
+        raise HTTPException(status_code=400, detail="Renderize o vídeo antes de revisar.")
+    iniciar_revisao_video(nome)
+    return {"rodando": True}
+
+
+class AnimacaoPayload(BaseModel):
+    acao: str = "gerar"  # "gerar" ou "remover" (a cena volta para a foto e fica assim)
+    forcar: bool = False  # pede uma animação nova ao modelo mesmo se a atual estiver em dia
+
+
+@app.post("/api/projetos/{nome}/cenas/{n}/animacao")
+def animacao_da_cena(nome: str, n: int, payload: AnimacaoPayload):
+    """Anima a cena (diagrama, texto na tela, linha do tempo ou mapa) ou faz ela voltar para a foto. Gratuito."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    cena = next((c for c in p.ler_json("cenas.json").get("cenas", []) if c["n"] == n), None)
+    if cena is None:
+        raise HTTPException(status_code=404, detail=f"A cena {n} não existe.")
+    trava = trava_do_projeto(nome)
+    if payload.acao == "remover":
+        animacoes.remover(p, n, trava=trava)
+        resumo = {}
+    else:
+        if cena.get("visual") not in animacoes.tipos(p):
+            raise HTTPException(status_code=400, detail="Só cenas de diagrama, texto na tela, linha do tempo ou mapa "
+                                                        "viram animação.")
+        if not animacoes.node_pronto():
+            raise HTTPException(status_code=400, detail="Falta o Node.js 22 ou mais na máquina da fábrica "
+                                                        "(nodejs.org) para fazer animações.")
+        try:
+            resumo = animacoes.gerar(p, numeros={n}, forcar=payload.forcar, log=print, trava=trava)
+        except (Exception, SystemExit) as e:
+            raise HTTPException(status_code=500, detail=f"Não consegui animar a cena: {e}")
+        if n in resumo.get("falharam", {}):
+            raise HTTPException(status_code=422, detail=f"A animação não passou na conferência e a cena ficou com a "
+                                                        f"foto: {resumo['falharam'][n]}")
+    cena = next(c for c in p.ler_json("cenas.json")["cenas"] if c["n"] == n)
+    item = animacoes.da_cena(p, cena)
+    if item is not None:
+        try:
+            # a prévia transparente que o editor toca na faixa Motion já sai pronta
+            animacoes.previa_da_camada(p, item, criar=True)
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError) as erro:
+            print(f"[animação] prévia da cena {n} de {nome}: {str(erro)[:160]}")
+    preparar_previas_video(nome)
+    return {"sucesso": True, "cena": enriquecer_cena(p, cena), "resumo": resumo}
+
+
+@app.delete("/api/projetos/{nome}/motion/{ident}")
+def excluir_motion(nome: str, ident: str):
+    """Exclui uma animação da faixa Motion (ou todas, com ident "todos"). Gratuito; vale no próximo render."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    excluidas = animacoes.remover_item(p, ident)
+    if not excluidas:
+        raise HTTPException(status_code=404, detail="Essa animação não existe ou já foi excluída.")
+    return {"sucesso": True, "excluidas": excluidas,
+            "motion": [_motion_para_o_editor(p, item) for item in _motion_do_projeto(p)]}
+
+
+@app.post("/api/projetos/{nome}/cenas/{n}/refazer")
+def refazer_cena(nome: str, n: int, payload: RefazerCenaPayload):
+    """Executa imagens.refazer() para a cena n com novos termos de busca ou prompt."""
+    with trava_do_projeto(nome):
+        return _refazer_cena(nome, n, payload)
+
+
+def _refazer_cena(nome: str, n: int, payload: RefazerCenaPayload):
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    p = Projeto(nome)
+    forcar_ia = payload.forcar_ia or payload.tipo == "ia"
+    prompt = payload.prompt
+    busca = payload.busca
+    tipo = payload.tipo
+
+    try:
+        imagens.refazer(p, [n], prompt=prompt, busca=busca, forcar_ia=forcar_ia, log=print, tipo=tipo)
+        if tipo in ("foto_real", "video_real"):
+            dados = p.ler_json("cenas.json")
+            for c in dados.get("cenas", []):
+                if c["n"] == n:
+                    c["tipo"] = tipo
+                    break
+            p.salvar_json("cenas.json", dados)
+    except imagens.SemCota as e:
+        raise HTTPException(status_code=402, detail=str(e))
+    except (Exception, SystemExit) as e:
+        msg = str(e)
+        if any(w in msg.lower() for w in ("saldo", "crédito", "credito", "cota", "insufficient", "balance")):
+            raise HTTPException(status_code=402, detail=msg)
+        raise HTTPException(status_code=500, detail=f"Erro ao refazer cena: {msg}")
+
+    dados = p.ler_json("cenas.json")
+    cena = next((c for c in dados.get("cenas", []) if c["n"] == n), None)
+    if not cena:
+        raise HTTPException(status_code=500, detail="Cena não encontrada após recriação.")
+
+    cena_info = enriquecer_cena(p, cena)
+    return {
+        "sucesso": True,
+        "cena": n,
+        "tipo": cena_info["tipo"],
+        "url_midia": cena_info["url_midia"],
+        "ini": cena_info["ini"],
+        "fim": cena_info["fim"],
+        "origem_badge": cena_info["origem_badge"],
+    }
+
+
+@app.post("/api/projetos/{nome}/cenas/{n}/upload")
+async def upload_cena_midia(nome: str, n: int, file: UploadFile = File(...)):
+    """Recebe um arquivo (multipart/form-data) e substitui a mídia da cena n."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    p = Projeto(nome)
+    conteudo = await file.read()
+    def com_trava():
+        with trava_do_projeto(nome):
+            antes = next((c for c in p.ler_json("cenas.json").get("cenas", []) if c["n"] == n), None)
+            resultado = definir_midia_manual(p, n, conteudo, file.filename or "upload.png")
+            if antes:
+                aprendizados.registrar(p, antes, "upload")
+            return resultado
+
+    cena_atualizada = await asyncio.to_thread(com_trava)
+    cena_info = enriquecer_cena(p, cena_atualizada)
+
+    return {
+        "sucesso": True,
+        "cena": n,
+        "tipo": cena_info["tipo"],
+        "url_midia": cena_info["url_midia"],
+        "ini": cena_info["ini"],
+        "fim": cena_info["fim"],
+        "origem_badge": cena_info["origem_badge"],
+    }
+
+
+class RestoreAntigaPayload(BaseModel):
+    name: str
+    n: int
+    filename: str
+
+
+@app.get("/api/project/scene/antigas")
+def listar_antigas(name: str = Query(...), n: int = Query(...)):
+    """Lista versões anteriores de mídia salvas na pasta antigas/ para a cena n."""
+    pasta = PROJETOS / name
+    if not pasta.exists():
+        return {"antigas": []}
+    antigas_dir = pasta / "antigas"
+    if not antigas_dir.exists():
+        return {"antigas": []}
+
+    padrao = f"{n:04d}*"
+    resultado = []
+    for arq in sorted(antigas_dir.glob(padrao), reverse=True):
+        ext = arq.suffix.lower()
+        if ext in (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".webm"):
+            is_video = ext in (".mp4", ".mov", ".webm")
+            resultado.append({
+                "filename": arq.name,
+                "url": f"/arquivos/{name}/antigas/{arq.name}",
+                "is_video": is_video,
+            })
+    return {"antigas": resultado}
+
+
+@app.post("/api/project/scene/restore-antiga")
+def restaurar_antiga(payload: RestoreAntigaPayload):
+    """Restaura um arquivo da pasta antigas/ como a mídia ativa da cena n."""
+    with trava_do_projeto(payload.name):
+        return _restaurar_antiga(payload)
+
+
+def _copiar_com_data_nova(origem, destino) -> None:
+    """Copia e põe a data de agora no arquivo. A prévia do editor e o endereço da mídia levam a data do arquivo como
+    versão, e o navegador guarda cada versão por um ano: com o copy2 (que copia a data antiga), a imagem restaurada
+    voltava a uma versão que o navegador já tinha, e o editor seguia mostrando a imagem de antes (cena 8 do
+    everything-you-need-to-answer, 2026-10-14: "restaurar não faz nada")."""
+    shutil.copyfile(origem, destino)
+    os.utime(destino, None)
+
+
+def _restaurar_antiga(payload: RestoreAntigaPayload):
+    pasta = PROJETOS / payload.name
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    arq_antigo = pasta / "antigas" / payload.filename
+    if not arq_antigo.exists():
+        raise HTTPException(status_code=404, detail="Arquivo antigo não encontrado.")
+
+    p = Projeto(payload.name)
+    dados = p.ler_json("cenas.json")
+    cena = next((c for c in dados.get("cenas", []) if c["n"] == payload.n), None)
+    if not cena:
+        raise HTTPException(status_code=404, detail="Cena não encontrada.")
+
+    ext = arq_antigo.suffix.lower()
+    is_video = ext in (".mp4", ".mov", ".webm")
+
+    if is_video:
+        rel_path = f"midia/{payload.n:04d}{ext}"
+        destino = p.pasta / rel_path
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        _copiar_com_data_nova(str(arq_antigo), str(destino))
+
+        capa_antiga = arq_antigo.with_name(arq_antigo.stem + "_capa.jpg")
+        capa_rel = f"midia/{payload.n:04d}_capa.jpg"
+        if capa_antiga.exists():
+            _copiar_com_data_nova(str(capa_antiga), str(p.pasta / capa_rel))
+        else:
+            try:
+                _frame_do_video(destino, p.pasta / capa_rel, 0.5)
+            except Exception:
+                capa_rel = None
+
+        cena["tipo"] = "video_real"
+        cena["midia"] = {
+            "fonte": "restaurado",
+            "id": f"restaurado_{payload.n}",
+            "tipo": "video",
+            "arquivo": rel_path,
+            "capa": capa_rel or rel_path,
+        }
+    else:
+        destino = p.imagem(payload.n)
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        _copiar_com_data_nova(str(arq_antigo), str(destino))
+        cena["tipo"] = "ia"
+        cena["midia"] = None
+
+    p.salvar_json("cenas.json", dados)
+    return {"sucesso": True, "cena": payload.n, "tipo": cena["tipo"]}
+
+
+@app.post("/api/projetos/{nome}/narracao")
+def refazer_narracao(nome: str, payload: NarracaoPayload):
+    """Atualiza o roteiro (se fornecido) e regera a narração."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    _recusar_se_criando(nome, "trocar a narração")
+    p = Projeto(nome)
+    antes = corrigir.falas_do_material(p)
+
+    if payload.roteiro is not None:
+        (pasta / "roteiro.txt").write_text(payload.roteiro, encoding="utf-8")
+
+    if payload.voz is not None:
+        p.definir_voz_override(payload.voz.dict(exclude_unset=True))
+    if payload.velocidade and not (payload.voz and payload.voz.velocidade_edge):
+        p.definir_voz_override({"velocidade_edge": payload.velocidade})
+
+    if payload.nova_voz:
+        shutil.rmtree(pasta / "narracao", ignore_errors=True)
+
+    try:
+        duracao = narracao.narrar(p, log=print)
+        if p.existe("cenas.json"):
+            cenas.atualizar_tempos(p)
+    except (Exception, SystemExit) as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao gerar narração: {str(e)}")
+
+    preenchendo = _completar_depois_da_narracao(p, antes) if p.existe("cenas.json") else None
+    alinhamento = p.ler_json("alinhamento.json") if p.existe("alinhamento.json") else {}
+    motion = _motion_do_projeto(p)
+    cenas_atualizadas = [enriquecer_cena(p, c, motion) for c in p.ler_json("cenas.json").get("cenas", [])]
+
+    return {
+        "sucesso": True,
+        "duracao": duracao,
+        "cenas": cenas_atualizadas,
+        "alinhamento": alinhamento,
+        "preenchendo": preenchendo,
+    }
+
+
+def _completar_depois_da_narracao(p: Projeto, antes: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Trocar a narração nunca pode deixar o vídeo com cena faltando nem com imagem que não combina.
+
+    A voz nova muda o ritmo: as cenas se dividem, se juntam e mudam de fala. Aqui a mesma esteira da criação volta a
+    andar a partir da busca, sozinha: busca de acervo com a conferência na captura, conferência do Jev, imagens de
+    IA (se ligada), cenas completadas, nenhuma imagem repetida, animações e trilha. O Jev julga só o que mudou: as
+    cenas sem imagem e as que continuam com a foto antiga mas com outra fala. O editor mostra "Em produção" e o
+    render fica travado até terminar."""
+    mudou = corrigir.depois_da_narracao(p, antes)
+    vazias, mudaram, repetidas, alvo = mudou["vazias"], mudou["mudaram"], mudou["repetidas"], mudou["alvo"]
+    if not alvo:
+        return None
+    with trava_do_projeto(p.nome):
+        midia.soltar_repetidas(p)  # a cópia sai antes: o Jev não gasta julgando uma foto que vai sair
+    task_id = f"criar_{p.nome}_{datetime.now():%Y%m%d_%H%M%S}"
+    iniciar_criacao(p.nome, {
+        "tarefa_id": task_id, "projeto": p.nome, "tipo": "criacao", "status": "processando", "concluido": False,
+        "pronto_para_edicao": False, "erro": None, "precisa_voce": False, "inicio": datetime.now().isoformat(),
+        "mensagem": "A narração mudou: completando e conferindo as cenas...", "passo_atual": 3, "total_passos": 5,
+        "progresso_pct": 60, "logs": [f"Narração trocada: {len(vazias)} cena(s) sem imagem, {len(mudaram)} com outra "
+                                      f"fala e {len(repetidas)} com imagem repetida voltam para a esteira"],
+        "feitas": ["mapa", "narracao", "cenas"],
+        "conferir_cenas": sorted(alvo), "conferir_forcadas": sorted(mudaram - vazias),
+    })
+    return {"tarefa_id": task_id, "sem_imagem": sorted(vazias), "outra_fala": sorted(mudaram),
+            "repetidas": sorted(repetidas)}
+
+
+@app.post("/api/projetos/{nome}/cenas/salvar")
+def salvar_cenas(nome: str, payload: SalvarCenasPayload):
+    """Salva diretamente alterações no array de cenas em cenas.json."""
+    with trava_do_projeto(nome):
+        return _salvar_cenas(nome, payload)
+
+
+def _salvar_cenas(nome: str, payload: SalvarCenasPayload):
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    _recusar_se_criando(nome, "salvar alterações")
+
+    p = Projeto(nome)
+    cenas_file = pasta / "cenas.json"
+
+    # Backup de segurança
+    if cenas_file.exists():
+        carimbo = datetime.now().strftime("%Y%m%d-%H%M%S")
+        shutil.copy2(cenas_file, pasta / f"cenas_backup_{carimbo}.json")
+
+    # Limpa campos transitórios injetados pela API
+    cenas_limpas = []
+    for c in payload.cenas:
+        c_copia = {k: v for k, v in c.items() if not k.startswith("url_") and k not in ("img_ia_existe", "midia_existe", "origem_badge")}
+        cenas_limpas.append(c_copia)
+
+    p.salvar_json("cenas.json", {"cenas": cenas_limpas})
+    return {"sucesso": True, "cenas_count": len(cenas_limpas)}
+
+
+SEM_ESPACO =re.compile(r"no space left|errno 28|not enough space|espa[çc]o insuficiente|disk full|disco cheio",
+                        re.I)
+FAXINA_FOLGA_RENDER_GB = 80  # render que caiu por falta de espaço: a faxina libera até essa folga antes de tentar
+
+
+def _erro_do_render(task_id: str) -> Optional[str]:
+    """O erro do render, ou None quando ele deu certo."""
+    with TAREFAS_LOCK:
+        t = TAREFAS.get(task_id) or {}
+        return str(t.get("erro") or "erro sem mensagem") if t.get("status") == "erro" else None
+
+
+def _render_de_novo(nome: str, task_id: str, erro: str) -> None:
+    """Prepara a segunda e última tentativa do render. Faltou espaço: a faxina tira as sobras dos vídeos antigos antes."""
+    print(f"[render] {nome} falhou: {erro[:300]}. Tentando mais uma vez")
+    if SEM_ESPACO.search(erro):
+        cfg = {**faxina._config(), "ativo": True}
+        cfg["livre_gb"] = max(float(cfg.get("livre_gb", faxina.LIVRE_GB)), FAXINA_FOLGA_RENDER_GB)
+        try:
+            liberado = faxina.faxinar(log=print, cfg=cfg)
+            print(f"[render] {nome}: faltou espaço no disco; a faxina liberou {liberado / 2**30:.1f} GB, "
+                  f"livres agora {shutil.disk_usage(PROJETOS).free / 2**30:.1f} GB")
+        except (Exception, SystemExit) as erro_fax:
+            print(f"[render] {nome}: a faxina falhou: {str(erro_fax)[:200]}")
+    with TAREFAS_LOCK:
+        t = TAREFAS.get(task_id)
+        if t is not None:
+            t.update(status="renderizando", erro=None, concluido=False, progresso_pct=5,
+                     etapa_atual="O render falhou; tentando mais uma vez...")
+            t["logs"].append(f"[AVISO]: o render falhou ({erro[:300]}); tentando mais uma vez")
+
+
+def _avisar_render_falhou(nome: str, erro: str) -> None:
+    """A segunda tentativa também falhou: a criação do vídeo fica parada com o erro, e é isso que o Radar lê para avisar
+    no celular e mostrar o botão Retomar (radar/avisos.py, parada)."""
+    falta_espaco = bool(SEM_ESPACO.search(erro))
+    livre_gb = shutil.disk_usage(PROJETOS).free / 2**30
+    motivo = (f"falta espaço no disco ({livre_gb:.0f} GB livres): libere espaço e clique em Retomar" if falta_espaco
+              else "clique em Retomar para renderizar de novo")
+    texto = f"O render falhou duas vezes, {motivo}. Erro: {erro[:300]}"
+    print(f"[render] {nome}: {texto}")
+    estado = _ler_criacao(nome)
+    if not estado or not estado.get("tarefa_id"):
+        return
+    tid = estado["tarefa_id"]
+    with TAREFAS_LOCK:
+        t = TAREFAS.setdefault(tid, estado)
+        t.update(status="erro", etapa="erro", concluido=False, pronto_para_edicao=False, precisa_voce=True,
+                 erro=texto, mensagem=f"Parado, precisa de você: {texto}")
+        t.setdefault("logs", []).append(f"[ERRO]: {texto}")
+    _salvar_criacao(tid)
+
+
+@app.post("/api/projetos/{nome}/render")
+def disparar_render(nome: str, payload: RenderPayload, bg_tasks: BackgroundTasks):
+    """Dispara a montagem e renderização do vídeo (FFmpeg) em segundo plano."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    _recusar_se_criando(nome, "renderizar")
+    _recusar_se_ocupado(nome, _MEXEM_NA_MIDIA, "renderizar")
+
+    p = Projeto(nome)
+    task_id = f"render_{nome}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    if payload.opcoes:
+        cfg = p.config.get("render") or {}
+        if payload.opcoes.fps:
+            cfg["fps"] = payload.opcoes.fps
+        p.config["render"] = cfg
+
+    with TAREFAS_LOCK:
+        TAREFAS[task_id] = {
+            "projeto": nome,
+            "status": "renderizando",
+            "progresso_pct": 5,
+            "etapa_atual": "Iniciando a versão em pé (9:16)..." if payload.vertical else "Iniciando montagem com FFmpeg...",
+            "concluido": False,
+            "logs": ["Iniciando renderização da versão em pé..." if payload.vertical else "Iniciando renderização..."],
+            "vertical": payload.vertical,
+            "inicio": time.time(),
+            "sucesso": False,
+            "tarefa_id": task_id,
+        }
+
+    def render_worker():
+        _marcar_render(pasta, payload)
+        try:
+            _render_worker()
+            # o render que falha tenta mais uma vez sozinho e, se falhar de novo, avisa (pedido do usuário em
+            # 2026-11-14: o 15-animais falhou à 01:21 por falta de espaço e ficou 14 h parado sem ninguém saber)
+            erro = _erro_do_render(task_id)
+            if erro is not None:
+                _render_de_novo(nome, task_id, erro)
+                _render_worker()
+                erro = _erro_do_render(task_id)
+                if erro is not None:
+                    _avisar_render_falhou(nome, erro)
+        finally:
+            # terminou (bem ou com erro): só a fábrica caindo no meio deixa a marca para a partida retomar
+            with contextlib.suppress(OSError):
+                (pasta / RENDER_ANDAMENTO).unlink()
+
+    def _render_worker():
+        try:
+            total_clipes = 1
+            clipes_prontos = 0
+
+            def log_fn(msg):
+                nonlocal total_clipes, clipes_prontos
+                msg_str = str(msg)
+                with TAREFAS_LOCK:
+                    if task_id in TAREFAS:
+                        TAREFAS[task_id]["logs"].append(msg_str)
+                        if "clipes para renderizar" in msg_str:
+                            m = re.search(r"(\d+)\s+clipes para renderizar", msg_str)
+                            if m:
+                                total_clipes = max(1, int(m.group(1)))
+                                TAREFAS[task_id]["progresso_pct"] = 10
+                                TAREFAS[task_id]["etapa_atual"] = f"Preparando {total_clipes} cenas para renderizar..."
+                        elif "clipes " in msg_str and "/" in msg_str:
+                            m = re.search(r"clipes\s+(\d+)/(\d+)", msg_str)
+                            if m:
+                                cur = int(m.group(1))
+                                tot = max(1, int(m.group(2)))
+                                pct = int(10 + (cur / tot) * 75)
+                                TAREFAS[task_id]["progresso_pct"] = min(88, pct)
+                                TAREFAS[task_id]["etapa_atual"] = f"Montando clipe da cena {cur} de {tot} com FFmpeg"
+                        elif "juntando" in msg_str:
+                            TAREFAS[task_id]["progresso_pct"] = 90
+                            TAREFAS[task_id]["etapa_atual"] = "Concatenando cenas e aplicando transições..."
+                        elif "mixando" in msg_str or "música" in msg_str:
+                            TAREFAS[task_id]["progresso_pct"] = 95
+                            TAREFAS[task_id]["etapa_atual"] = "Mixando áudio final e trilha sonora..."
+
+            sem_avatar = payload.sem_avatar
+            final_path = render.renderizar(p, log=log_fn, sem_avatar=sem_avatar, vertical=payload.vertical)
+
+            tamanho_mb = 0.0
+            if Path(final_path).exists():
+                tamanho_mb = round(Path(final_path).stat().st_size / (1024 * 1024), 1)
+
+            dur = 0.0
+            if p.existe("alinhamento.json"):
+                try:
+                    dur = p.ler_json("alinhamento.json").get("duracao", 0.0)
+                except Exception:
+                    pass
+            m = int(dur // 60)
+            s = int(dur % 60)
+            dur_str = f"{m:02d}:{s:02d}"
+
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["status"] = "concluido"
+                    TAREFAS[task_id]["sucesso"] = True
+                    TAREFAS[task_id]["concluido"] = True
+                    TAREFAS[task_id]["progresso_pct"] = 100
+                    TAREFAS[task_id]["etapa_atual"] = ("Versão em pé renderizada com sucesso!" if payload.vertical
+                                                       else "Vídeo final renderizado com sucesso!")
+                    TAREFAS[task_id]["final_mp4"] = str(final_path)
+                    TAREFAS[task_id]["video_url"] = _url_com_versao(f"/arquivos/{nome}/{Path(final_path).name}", Path(final_path))
+                    TAREFAS[task_id]["duracao"] = dur_str
+                    TAREFAS[task_id]["tamanho_mb"] = tamanho_mb
+                    TAREFAS[task_id]["logs"].append("Vídeo renderizado com sucesso!")
+            try:
+                if not payload.vertical:  # a revisão olha o final.mp4; a versão em pé tem as mesmas cenas
+                    iniciar_revisao_video(nome)  # o modelo olha o vídeo pronto em segundo plano; nunca falha o render
+                    iniciar_publicacao(nome)  # título, descrição com capítulos e tags, grátis e em segundo plano
+            except (Exception, SystemExit) as erro_rev:
+                print(f"[revisão do vídeo] {nome}: {str(erro_rev)[:160]}")
+        except (Exception, SystemExit) as err:
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["status"] = "erro"
+                    TAREFAS[task_id]["concluido"] = False
+                    TAREFAS[task_id]["erro"] = str(err)
+                    TAREFAS[task_id]["etapa_atual"] = f"Erro na renderização: {str(err)}"
+                    TAREFAS[task_id]["logs"].append(f"[ERRO]: {str(err)}")
+
+    bg_tasks.add_task(render_worker)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "sucesso": True,
+            "status": "renderizando",
+            "mensagem": "Renderização iniciada em segundo plano.",
+            "tarefa_id": task_id,
+        }
+    )
+
+
+@app.get("/api/projetos/{nome}/verificar")
+def verificar_midia(nome: str):
+    """Aponta mídia suspeita nas cenas (id inventado, arquivo duplicado ou sumido), sem mudar nada."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    return {
+        "avisos": verificar.verificar(p),
+        "avisos_contexto": verificar.verificar_contexto_visual(p),
+    }
+
+
+class CorrigirMidiaPayload(BaseModel):
+    """Tudo opcional: o botão Corrigir Mídia do editor chama sem corpo."""
+    cenas: Optional[List[int]] = None  # só essas cenas
+    rodadas: Optional[int] = None
+    nota_minima: Optional[int] = None
+    ia: bool = False  # só gera imagem de IA nas que sobrarem se isto vier true, o que quem chama confirma como custo
+    # o diretor (diretor.py) lê o roteiro inteiro e decide o que muda antes da conferência do Jev. Sem o campo, ele
+    # entra quando a IA está ligada (ia.ativa), porque a cena que mostra outra coisa recebe IA obrigatoriamente
+    diretor: Optional[bool] = None
+
+
+def _atualizar_progresso(task_id: str, msg: str):
+    with TAREFAS_LOCK:
+        t = TAREFAS.get(task_id)
+        if not t:
+            return
+        t["logs"].append(str(msg))
+        m = str(msg)
+        rodada = re.search(r"rodada (\d+)", m)
+        if "buscando outro material" in m:
+            t["mensagem"] = "Buscando outro material real, de graça..."
+        elif rodada:
+            t["progresso_pct"] = min(90, 30 + 20 * int(rodada.group(1)))
+            t["mensagem"] = "Conferindo se o material combina com a narração..."
+        elif "cena(s) de material real ainda sem arquivo" in m:
+            t["progresso_pct"] = 15
+            t["mensagem"] = "Buscando material real para as cenas sem arquivo..."
+
+
+@app.get("/api/projetos/{nome}/qualidade")
+def qualidade_do_projeto(nome: str):
+    """A nota do vídeo: quanto das cenas mostra o que a fala diz, quantas mostram outra coisa, de onde veio cada
+    imagem, e o histórico (fim da criação, de cada Corrigir). Grátis: só lê as notas que o Jev já deu."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    historico = p.ler_json("qualidade.json").get("historico", []) if p.existe("qualidade.json") else []
+    return {"atual": qualidade.calcular(p), "historico": historico,
+            "texto": qualidade.formatar(qualidade.calcular(p))}
+
+
+@app.post("/api/projetos/{nome}/limpar-midia")
+@app.post("/api/projetos/{nome}/corrigir-midia")
+def corrigir_midia(nome: str, bg_tasks: BackgroundTasks, payload: Optional[CorrigirMidiaPayload] = None):
+    """Botão Corrigir Mídia: confere se o material real de cada cena combina com a narração e troca o que não combina.
+
+    Só olha foto e vídeo de acervo. Imagens de IA são ignoradas. As trocas são de graça (outra busca em Pexels, Pixabay
+    e Wikimedia). Só gera imagem de IA se o corpo trouxer ia=true. O resultado mantém as chaves que o editor já lê."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    payload = payload or CorrigirMidiaPayload()
+    _recusar_se_ocupado(nome, ("render_",) + _MEXEM_NA_MIDIA, "corrigir a mídia")
+    p = Projeto(nome)
+    task_id = f"corrigir_{nome}_{datetime.now():%Y%m%d_%H%M%S}"
+    with TAREFAS_LOCK:
+        TAREFAS[task_id] = {
+            "tarefa_id": task_id, "projeto": nome, "tipo": "limpeza", "status": "processando",
+            "mensagem": "Preparando a conferência de mídia...", "progresso_pct": 5, "logs": [],
+            "resultado": None, "inicio": datetime.now().isoformat(),
+        }
+
+    def trabalho():
+        from . import gemini_local, groq_local, openrouter_local
+
+        def log_w(msg):
+            _atualizar_progresso(task_id, msg)
+
+        try:
+            cfg = p.config.get("corrigir") or {}
+            usos = {"groq": groq_local, "gemini": gemini_local, "jev": openrouter_local}
+            modulo_uso = usos.get(corrigir.provedor(p), groq_local)
+            antes = modulo_uso.resumo_uso(p) or {}
+            numeros = set(payload.cenas) if payload.cenas else None
+
+            prep = corrigir.preparar_gratis(p, log=log_w)
+            # primeira ação: o diretor, que conhece o roteiro inteiro, aponta e resolve as cenas que mostram outra coisa
+            usar_diretor = payload.diretor if payload.diretor is not None else midia.ia_ativa(p)
+            resultado_diretor = None
+            if usar_diretor:
+                _atualizar_progresso(task_id, "  o diretor está lendo o roteiro inteiro e revisando as cenas")
+                decisoes = diretor.revisar(p, log=log_w)
+                if numeros:
+                    decisoes = {**decisoes, "mudar": [m for m in decisoes["mudar"] if m["n"] in numeros]}
+                resultado_diretor = {**diretor.aplicar(p, decisoes, log=log_w), "decisoes": decisoes["mudar"]}
+            total = len(corrigir.conferiveis(p, numeros))
+            log_w(f"  conferindo {total} cena(s) de material real (cenas de IA ficam de fora)")
+            resumo = corrigir.corrigir(
+                p, numeros=numeros, rodadas=payload.rodadas or cfg.get("rodadas", corrigir.RODADAS),
+                nota_minima=payload.nota_minima or cfg.get("nota_minima", corrigir.NOTA_MINIMA), log=log_w)
+
+            # com a IA ligada, as cenas que mostravam outra coisa já saíram com imagem de IA (corrigir.resolver_com_ia)
+            geradas = len(resumo.get("geradas_com_ia") or []) + len((resultado_diretor or {}).get("ia") or [])
+            if payload.ia and resumo["precisam_ia"]:
+                log_w(f"  gerando {len(resumo['precisam_ia'])} imagem(ns) de IA, pedido explícito de quem chamou")
+                corrigir.regerar_com_ia(p, resumo["precisam_ia"], log=log_w)
+                geradas += len(resumo["precisam_ia"])
+
+            depois = modulo_uso.resumo_uso(p) or {}
+            reprovadas = resumo["avaliadas"] - resumo["aprovadas_de_primeira"]
+            resolvidas = max(0, reprovadas - len(resumo["precisam_ia"]) + geradas)
+            resultado = {
+                # chaves que o editor já lê
+                "cenas_com_problema_no_inicio": prep["suspeitas"],
+                "cenas_resolvidas_com_material_real": prep["resolvidas"],
+                "sem_arquivo_antes": prep.get("sem_arquivo_antes", 0),
+                "sem_arquivo_resolvidas": prep.get("sem_arquivo_resolvidas", 0),
+                "imagens_ia_geradas": geradas,
+                "imagens_ia_com_falha": [],
+                "avisos_restantes": [],
+                "cenas_conteudo_incompativel": reprovadas,
+                "cenas_conteudo_corrigidas": resolvidas,
+                # novas
+                "avaliadas": resumo["avaliadas"],
+                "trocadas": resumo["trocadas"],
+                "restauradas": resumo.get("restauradas", []),
+                "precisam_ia": resumo["precisam_ia"],
+                "para_revisar": resumo.get("para_revisar", []),
+                "sem_conferencia": resumo["sem_conferencia"],
+                "provedor": corrigir.provedor(p),
+                "custo_usd": round(depois.get("custo", 0) - antes.get("custo", 0), 4),
+                "mensagem": corrigir.formatar(resumo),
+                "diretor": resultado_diretor,
+                "qualidade": qualidade.registrar(p, "corrigir mídia", log_w),
+            }
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id].update(status="concluido", progresso_pct=100,
+                                            mensagem="Conferência concluída.", resultado=resultado)
+        except (Exception, SystemExit) as err:
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id].update(status="erro", erro=str(err), mensagem=f"Erro na conferência: {err}")
+
+    bg_tasks.add_task(trabalho)
+    return JSONResponse(status_code=202, content={
+        "sucesso": True, "status": "processando",
+        "mensagem": "Conferência de mídia iniciada em segundo plano.", "tarefa_id": task_id})
+
+
+def _preco_medio_do_jev(p: Projeto) -> float:
+    """Custo médio de uma chamada do Jev, medido no uso_jev.json do projeto (uns US$ 0,00005)."""
+    try:
+        chamadas = json.loads((p.pasta / "uso_jev.json").read_text(encoding="utf-8"))
+        if chamadas:
+            return sum(c.get("custo_usd", 0) or 0 for c in chamadas) / len(chamadas)
+    except (OSError, ValueError):
+        pass
+    return 0.00005
+
+
+class ContinuarPayload(BaseModel):
+    confirmar: bool = False  # sem isto só devolve o que falta e quanto custa, sem fazer nada
+
+
+@app.post("/api/projetos/{nome}/continuar")
+def continuar_carregamento(nome: str, bg_tasks: BackgroundTasks, payload: Optional[ContinuarPayload] = None):
+    """Botão Continuar carregamento: termina o que faltou depois de uma interrupção (servidor reiniciado, cota, queda).
+
+    Busca o material real das cenas que ainda esperam por ele e gera as imagens de IA que faltam. Cada etapa continua
+    de onde parou, sem refazer o que já está pronto. Sem confirmar=true só calcula o que falta e o custo."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    if not p.existe("cenas.json"):
+        raise HTTPException(status_code=409, detail="O projeto ainda não tem cenas. Crie o projeto de novo.")
+    cenas_lista = p.ler_json("cenas.json")["cenas"]
+    sem_acervo = [c["n"] for c in cenas_lista if midia.pendente(c)]
+    sem_ia = [c["n"] for c in imagens.pendentes_ia(p, cenas_lista)]
+    preco = custos.preco_da_imagem(p)
+    # das cenas que ainda vão ao acervo, uma parte não acha material e cai para IA; com a IA desligada, nenhuma cai
+    custo_ia = (len(sem_ia) + (0.15 * len(sem_acervo) if midia.ia_ativa(p) else 0)) * preco
+    # a busca nos bancos é grátis; o Jev confere até candidatos_conferidos fotos por cena, e mais uma conferência
+    por_jev = _preco_medio_do_jev(p)
+    conferidos = int((p.config.get("midia") or {}).get("candidatos_conferidos", 3))
+    custo = round(custo_ia + len(sem_acervo) * (conferidos + 1) * por_jev, 4)
+    resumo = {"sem_acervo": len(sem_acervo), "sem_imagem_ia": len(sem_ia), "custo_estimado_usd": custo,
+              "preco_por_imagem_usd": preco, "nada_a_fazer": not sem_acervo and not sem_ia}
+    if not (payload and payload.confirmar) or resumo["nada_a_fazer"]:
+        return resumo
+    _recusar_se_ocupado(nome, ("render_",) + _MEXEM_NA_MIDIA, "continuar o carregamento")
+
+    task_id = f"continuar_{nome}_{datetime.now():%Y%m%d_%H%M%S}"
+    with TAREFAS_LOCK:
+        TAREFAS[task_id] = {
+            "tarefa_id": task_id, "projeto": nome, "tipo": "limpeza", "status": "processando",
+            "mensagem": "Continuando o carregamento...", "progresso_pct": 5, "logs": [],
+            "resultado": None, "inicio": datetime.now().isoformat(),
+        }
+
+    def trabalho():
+        def log_w(msg):
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["logs"].append(str(msg))
+
+        try:
+            if sem_acervo:
+                with TAREFAS_LOCK:
+                    TAREFAS[task_id].update(progresso_pct=20, mensagem="Buscando fotos e vídeos de acervo...")
+                midia.buscar(p, log=log_w)
+            with TAREFAS_LOCK:
+                TAREFAS[task_id].update(progresso_pct=60, mensagem="Gerando as imagens de IA que faltam...")
+            imagens.gerar(p, log=log_w)
+            depois = imagens.pendentes_ia(p, p.ler_json("cenas.json")["cenas"])
+            with TAREFAS_LOCK:
+                TAREFAS[task_id].update(status="concluido", progresso_pct=100, mensagem="Carregamento concluído.",
+                                        resultado={**resumo, "ainda_faltam": [c["n"] for c in depois]})
+        except (Exception, SystemExit) as err:
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id].update(status="erro", erro=str(err), mensagem=f"Erro ao continuar: {err}")
+
+    bg_tasks.add_task(trabalho)
+    return JSONResponse(status_code=202, content={**resumo, "sucesso": True, "status": "processando", "tarefa_id": task_id})
+
+
+@app.post("/api/projetos/{nome}/limpar-midia-completo")
+def limpar_midia(nome: str, bg_tasks: BackgroundTasks):
+    """Fluxo antigo: varre mídia suspeita e, no fim, gera imagem de IA sem pedir confirmação de custo. Não é o botão."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    _recusar_se_ocupado(nome, ("render_",) + _MEXEM_NA_MIDIA, "limpar a mídia")
+    p = Projeto(nome)
+    task_id = f"limpeza_{nome}_{datetime.now():%Y%m%d_%H%M%S}"
+    with TAREFAS_LOCK:
+        TAREFAS[task_id] = {
+            "tarefa_id": task_id,
+            "projeto": nome,
+            "tipo": "limpeza",
+            "status": "processando",
+            "mensagem": "Procurando mídia suspeita...",
+            "progresso_pct": 5,
+            "logs": [],
+            "resultado": None,
+            "inicio": datetime.now().isoformat(),
+        }
+
+    def limpeza_worker():
+        def log_w(msg):
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["logs"].append(str(msg))
+                    msg_str = str(msg)
+                    if "cena(s) com m" in msg_str:
+                        TAREFAS[task_id]["progresso_pct"] = 15
+                        TAREFAS[task_id]["mensagem"] = "Buscando material real de graça..."
+                    elif "precisam de imagem de IA" in msg_str:
+                        TAREFAS[task_id]["progresso_pct"] = 55
+                        TAREFAS[task_id]["mensagem"] = "Gerando imagens de IA pro que sobrou..."
+                    elif "analisando o conte" in msg_str:
+                        TAREFAS[task_id]["progresso_pct"] = 75
+                        TAREFAS[task_id]["mensagem"] = "Gemini conferindo se o conteúdo bate com a narração..."
+                    elif "conteúdo incompat" in msg_str and "corrigindo" in msg_str:
+                        TAREFAS[task_id]["progresso_pct"] = 90
+                        TAREFAS[task_id]["mensagem"] = "Corrigindo cenas com conteúdo incompatível..."
+                    elif "tentativa" in msg_str:
+                        TAREFAS[task_id]["progresso_pct"] = max(TAREFAS[task_id]["progresso_pct"], 60)
+
+        prov_atual = ((p.perfil.get("imagens") or {}).get("provedor") or "kie").lower()
+        mod_atual = (p.perfil.get("imagens") or {}).get("modelo") or (MODELO_KIE if prov_atual in ("kie", "kie.ai") else MODELO_GOOGLE)
+        imagens_original = dict(p.perfil.get("imagens") or {})
+        p.perfil["imagens"] = {**imagens_original, "provedor": prov_atual, "modelo": mod_atual}
+        try:
+            resultado = limpeza.limpar(p, log=log_w)
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["status"] = "concluido"
+                    TAREFAS[task_id]["progresso_pct"] = 100
+                    TAREFAS[task_id]["mensagem"] = "Limpeza concluída."
+                    TAREFAS[task_id]["resultado"] = resultado
+        except (Exception, SystemExit) as err:
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["status"] = "erro"
+                    TAREFAS[task_id]["erro"] = str(err)
+                    TAREFAS[task_id]["mensagem"] = f"Erro na limpeza: {err}"
+        finally:
+            p.perfil["imagens"] = imagens_original
+
+    bg_tasks.add_task(limpeza_worker)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "sucesso": True,
+            "status": "processando",
+            "mensagem": "Limpeza de mídia iniciada em segundo plano.",
+            "tarefa_id": task_id,
+        }
+    )
+
+
+@app.get("/api/projetos/{nome}/status")
+def status_projeto(nome: str, task_id: Optional[str] = None):
+    """Retorna o progresso em tempo real da tarefa de renderização ou criação.
+
+    pago_pendente: os gratuitos esgotaram e a tarefa espera a pessoa liberar o modelo pago (pago.py). Vai em toda
+    resposta, porque o editor acompanha cada tarefa por aqui."""
+    resposta = _status_projeto(nome, task_id)
+    if isinstance(resposta, dict):
+        resposta["pago_pendente"] = pago.pendente(nome)
+    return resposta
+
+
+class PagoPayload(BaseModel):
+    liberar: bool = False
+
+
+@app.get("/api/projetos/{nome}/pago")
+def pago_do_projeto(nome: str):
+    """Os gratuitos esgotaram? (o pedido em aberto, ou None) e se o pago já está liberado hoje."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    return {"pendente": pago.pendente(nome), "liberado_hoje": pago.liberado(p), "confirmar_pago": pago.confirmar(p)}
+
+
+@app.post("/api/projetos/{nome}/pago")
+def liberar_pago(nome: str, payload: PagoPayload):
+    """A pessoa liberou o modelo pago neste projeto até o fim do dia: a tarefa que esperava segue na hora."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    p = Projeto(nome)
+    if payload.liberar:
+        pago.liberar(p)
+    return {"pendente": pago.pendente(nome), "liberado_hoje": pago.liberado(p)}
+
+
+def _status_projeto(nome: str, task_id: Optional[str] = None):
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    tarefa_alvo = None
+    with TAREFAS_LOCK:
+        if task_id and task_id in TAREFAS:
+            tarefa_alvo = dict(TAREFAS[task_id])
+        else:
+            tarefas_do_proj = [t for t in TAREFAS.values() if t.get("projeto") == nome]
+            if tarefas_do_proj:
+                tarefa_alvo = dict(tarefas_do_proj[-1])
+    if tarefa_alvo is None and (task_id or "").startswith("criar_"):
+        # a fábrica reiniciou no meio: o andamento da criação está gravado no disco
+        tarefa_alvo = _ler_criacao(nome)
+    if tarefa_alvo is None and (task_id or "").startswith("render_"):
+        # a fábrica reiniciou no meio do render: o FFmpeg morreu junto, e a tela não pode esperar para sempre
+        return {"status": "erro", "concluido": False, "progresso_pct": 0, "tarefa_id": task_id,
+                "erro": ("A renderização foi interrompida porque a fábrica reiniciou. Clique em Renderizar de novo: "
+                         "as cenas já montadas são reaproveitadas e vai bem mais rápido."),
+                "etapa_atual": "Renderização interrompida"}
+
+    if tarefa_alvo:
+        tipo = tarefa_alvo.get("tipo", "render")
+        if tipo == "limpeza":
+            return {
+                "status": tarefa_alvo.get("status", "processando"),
+                "mensagem": tarefa_alvo.get("mensagem", "Processando..."),
+                "progresso_pct": tarefa_alvo.get("progresso_pct", 5),
+                "logs": tarefa_alvo.get("logs", []),
+                "resultado": tarefa_alvo.get("resultado"),
+                "erro": tarefa_alvo.get("erro"),
+                "tarefa_id": tarefa_alvo.get("tarefa_id"),
+            }
+        if tipo == "criacao":
+            return {
+                "etapa": tarefa_alvo.get("etapa", "narracao"),
+                "passo_atual": tarefa_alvo.get("passo_atual", 1),
+                "total_passos": tarefa_alvo.get("total_passos", 5),
+                "progresso_pct": tarefa_alvo.get("progresso_pct", 10),
+                "mensagem": tarefa_alvo.get("mensagem", "Processando..."),
+                "pronto_para_edicao": tarefa_alvo.get("pronto_para_edicao", False),
+                "tarefa_id": tarefa_alvo.get("tarefa_id"),
+                "status": tarefa_alvo.get("status", "processando"),
+                "mapa": tarefa_alvo.get("mapa"),  # o JSON do agente de roteiro, assim que ficar pronto
+                "cenas_planejadas": tarefa_alvo.get("cenas_planejadas"),  # quantas cenas o JSON do agente tem
+                "conferencia": tarefa_alvo.get("conferencia"),
+                "aguardando_ate": tarefa_alvo.get("aguardando_ate"),  # esperando cota: volta sozinha nessa hora
+                "erro": tarefa_alvo.get("erro"),
+                "precisa_voce": bool(tarefa_alvo.get("precisa_voce")),
+            }
+
+        st = tarefa_alvo.get("status")
+        if st == "renderizando":
+            return {
+                "status": "renderizando",
+                "progresso_pct": tarefa_alvo.get("progresso_pct", 10),
+                "etapa_atual": tarefa_alvo.get("etapa_atual", "Montando clipe com FFmpeg..."),
+                "concluido": False,
+                "tarefa_id": tarefa_alvo.get("tarefa_id"),
+            }
+        elif st == "concluido":
+            return {
+                "status": "concluido",
+                "progresso_pct": 100,
+                "concluido": True,
+                "video_url": tarefa_alvo.get("video_url", f"/arquivos/{nome}/final.mp4"),
+                "vertical": bool(tarefa_alvo.get("vertical")),
+                "duracao": tarefa_alvo.get("duracao", "01:02"),
+                "tamanho_mb": tarefa_alvo.get("tamanho_mb", 15.0),
+                "tarefa_id": tarefa_alvo.get("tarefa_id"),
+            }
+        elif st == "erro":
+            return {
+                "status": "erro",
+                "progresso_pct": tarefa_alvo.get("progresso_pct", 0),
+                "concluido": False,
+                "erro": tarefa_alvo.get("erro", "Erro desconhecido"),
+                "etapa_atual": tarefa_alvo.get("etapa_atual", "Erro na operação"),
+                "tarefa_id": tarefa_alvo.get("tarefa_id"),
+            }
+
+    p = Projeto(nome)
+    pronto = p.existe("cenas.json") and p.existe("alinhamento.json")
+    return {
+        "status": "pronto" if pronto else "incompleto",
+        "concluido": p.existe("final.mp4"),
+        "pronto_para_edicao": pronto,
+        "progresso_pct": 100 if pronto else 0,
+        "mensagem": "Projeto pronto para edição" if pronto else "Aguardando geração de cenas",
+        "etapa": "concluido" if pronto else "pendente",
+        "passo_atual": 4 if pronto else 1,
+        "total_passos": 5,
+    }
+
+
+@app.get("/api/sfx-library")
+def listar_sfx():
+    """Retorna lista de efeitos sonoros disponíveis na pasta efeitos/."""
+    pasta_efeitos = RAIZ / "efeitos"
+    if not pasta_efeitos.exists():
+        return {"sfx": []}
+
+    itens = []
+    for f in sorted(pasta_efeitos.glob("**/*.mp3")):
+        rel = f.relative_to(RAIZ).as_posix()
+        desc = ""
+        txt_file = f.with_suffix(".txt")
+        if txt_file.exists():
+            try:
+                desc = txt_file.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+        itens.append({
+            "nome": f.stem,
+            "caminho": rel,
+            "url": f"/arquivos_raiz/{rel}",
+            "descricao": desc or f.stem.replace("-", " "),
+        })
+
+    return {"sfx": itens}
+
+
+@app.get("/api/music-library")
+def listar_musicas():
+    """Retorna lista de trilhas musicais disponíveis na pasta musicas/."""
+    pasta_musicas = RAIZ / "musicas"
+    if not pasta_musicas.exists():
+        return {"musicas": []}
+
+    itens = []
+    for f in sorted(pasta_musicas.glob("**/*")):
+        if f.is_file() and f.suffix.lower() in (".mp3", ".wav", ".m4a", ".aac"):
+            rel = f.relative_to(RAIZ).as_posix()
+            itens.append({
+                "nome": f.stem,
+                "categoria": f.parent.name,
+                "caminho": rel,
+                "url": f"/arquivos_raiz/{rel}",
+            })
+
+    return {"musicas": itens}
+
+
+def _redirect_uri(request: Request) -> str:
+    return str(request.base_url) + "api/youtube/oauth/callback"
+
+
+@app.get("/api/youtube/conectar")
+def youtube_conectar(request: Request):
+    """Manda a pessoa pra tela de login do Google."""
+    try:
+        url = ytpub.url_autorizacao(_redirect_uri(request))
+    except SystemExit as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return RedirectResponse(url)
+
+
+@app.get("/api/youtube/oauth/callback")
+def youtube_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None,
+                     state: Optional[str] = None):
+    """O Google volta pra cá depois do login."""
+    def pagina(titulo: str, corpo: str) -> HTMLResponse:
+        return HTMLResponse(f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>{titulo}</title><style>
+body {{ font-family: -apple-system, sans-serif; background: #0a0c10; color: #f8fafc;
+  display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+div {{ text-align: center; max-width: 380px; padding: 24px; }}
+h1 {{ font-size: 18px; }} p {{ color: #94a3b8; font-size: 13px; }}
+</style></head><body><div><h1>{titulo}</h1><p>{corpo}</p></div></body></html>""")
+
+    if error:
+        return pagina("Não deu para conectar", f"O Google recusou: {error}. Pode fechar esta aba e tentar de novo.")
+    if not code:
+        return pagina("Não deu para conectar", "Faltou o código de autorização. Feche esta aba e tente de novo.")
+    try:
+        if state == drive.ESTADO:  # o Drive volta pela mesma URL do YouTube: não há outra para cadastrar no Google
+            drive.concluir_autorizacao(code, _redirect_uri(request))
+            return pagina("Conectado!", "O Google Drive já está ligado à fábrica. Pode fechar esta aba.")
+        ytpub.concluir_autorizacao(code, _redirect_uri(request))
+    except SystemExit as e:
+        return pagina("Não deu para conectar", f"{e} Pode fechar esta aba e tentar de novo.")
+    return pagina("Conectado!", "Sua conta do YouTube já está ligada à fábrica. Pode fechar esta aba e voltar ao painel.")
+
+
+@app.get("/api/drive/status")
+def drive_status():
+    return {"conectado": drive.conectada()}
+
+
+@app.get("/api/drive/conectar")
+def drive_conectar(request: Request):
+    try:
+        return {"url": drive.url_autorizacao(_redirect_uri(request))}
+    except SystemExit as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.post("/api/drive/desconectar")
+def drive_desconectar():
+    drive.desconectar()
+    return {"sucesso": True}
+
+
+@app.get("/api/youtube/status")
+def youtube_status(canal: str = ""):
+    """Com canal: só aquele canal. Sem canal: todos os conectados (e, se for um só, ele em "conta")."""
+    return {"conectado": ytpub.conectada(canal), "conta": ytpub.conta(canal), "contas": ytpub.contas()}
+
+
+@app.post("/api/youtube/desconectar")
+def youtube_desconectar(canal: str = ""):
+    ytpub.desconectar(canal)
+    return {"sucesso": True}
+
+
+@app.post("/api/projetos/{nome}/youtube/publicar")
+def youtube_publicar(nome: str, payload: PublicarYoutubePayload, bg_tasks: BackgroundTasks):
+    """Sobe o final.mp4 do projeto pro YouTube em segundo plano."""
+    p = Projeto(nome) if (PROJETOS / nome).exists() else None
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+    if not p.existe("final.mp4"):
+        raise HTTPException(status_code=400, detail="Esse projeto ainda não tem um vídeo final renderizado.")
+    if payload.privacidade not in ("public", "unlisted", "private"):
+        raise HTTPException(status_code=400, detail="Privacidade precisa ser public, unlisted ou private.")
+    argumentos = dict(quando=payload.agendado_para, privacidade=payload.privacidade, com_shorts=payload.com_shorts,
+                      com_thumbnail=payload.com_thumbnail, com_legenda=payload.com_legenda,
+                      titulo=payload.titulo or None, descricao=payload.descricao, tags=payload.tags,
+                      canal=payload.canal)
+    if payload.simular:
+        try:
+            return ytpub.publicar_projeto(p, simular=True, **argumentos)
+        except SystemExit as erro:
+            raise HTTPException(status_code=400, detail=str(erro))
+    if not ytpub.conectada(payload.canal):
+        raise HTTPException(status_code=400, detail="Conecte uma conta do YouTube antes de publicar."
+                            if not payload.canal else
+                            "Esse canal ainda não foi conectado: autorize a fábrica nele antes de publicar.")
+    if not payload.canal and len(ytpub.contas()) > 1:
+        raise HTTPException(status_code=400, detail="Há mais de um canal conectado: diga em qual deles publicar.")
+
+    task_id = f"youtube_{nome}_{datetime.now():%Y%m%d_%H%M%S}"
+    with TAREFAS_LOCK:
+        TAREFAS[task_id] = {
+            "tarefa_id": task_id, "projeto": nome, "tipo": "youtube",
+            "status": "enviando", "progresso_pct": 0,
+            "mensagem": "Enviando vídeo para o YouTube...",
+            "concluido": False, "erro": None,
+        }
+
+    def worker():
+        try:
+            def progresso(pct):
+                with TAREFAS_LOCK:
+                    if task_id in TAREFAS:
+                        TAREFAS[task_id]["progresso_pct"] = pct
+
+            # o vídeo com o kit de publicação, a thumbnail, a legenda e, se pedido, os shorts; o agendamento é do
+            # próprio YouTube (publishAt), sem depender da fábrica ligada na hora
+            dados_youtube = ytpub.publicar_projeto(p, on_progresso=progresso, log=print, **argumentos)
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["status"] = "concluido"
+                    TAREFAS[task_id]["concluido"] = True
+                    TAREFAS[task_id]["progresso_pct"] = 100
+                    TAREFAS[task_id]["mensagem"] = "Agendado com sucesso!" if payload.agendado_para else "Publicado com sucesso!"
+                    TAREFAS[task_id]["youtube"] = dados_youtube
+        except (Exception, SystemExit) as err:
+            with TAREFAS_LOCK:
+                if task_id in TAREFAS:
+                    TAREFAS[task_id]["status"] = "erro"
+                    TAREFAS[task_id]["erro"] = str(err)
+                    TAREFAS[task_id]["mensagem"] = f"Falha ao publicar: {err}"
+
+    bg_tasks.add_task(worker)
+    return JSONResponse(status_code=202, content={"sucesso": True, "tarefa_id": task_id})
+
+
+@app.get("/api/projetos/{nome}/youtube/status")
+def youtube_publicar_status(nome: str, task_id: Optional[str] = None):
+    """Progresso do envio em andamento e status do agendamento/publicação."""
+    pasta = PROJETOS / nome
+    if not pasta.exists():
+        raise HTTPException(status_code=404, detail=f"Projeto '{nome}' não encontrado.")
+
+    tarefa = None
+    if task_id:
+        with TAREFAS_LOCK:
+            tarefa = dict(TAREFAS[task_id]) if task_id in TAREFAS else None
+
+    p = Projeto(nome)
+    publicado = p.ler_json("youtube.json") if p.existe("youtube.json") else None
+    return {"tarefa": tarefa, "publicado": publicado}
+
+
+# -----------------------------------------------------------------------------
+# Streaming de Arquivos Estáticos com suporte nativo a Range Requests
+# -----------------------------------------------------------------------------
+
+@app.api_route("/arquivos/{nome}/{caminho:path}", methods=["GET", "HEAD"])
+def servir_arquivo_projeto(nome: str, caminho: str, baixar: bool = False):
+    """Serve qualquer arquivo do projeto com suporte a Range requests (HTTP 206)."""
+    arquivo = PROJETOS / nome / caminho
+    if not arquivo.exists() or not arquivo.is_file():
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+
+    # Proteção de Path Traversal
+    try:
+        arquivo.resolve().relative_to((PROJETOS / nome).resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+
+    mime_type, _ = mimetypes.guess_type(str(arquivo))
+    # o Cloudflare do túnel guardava o vídeo por horas: depois de um novo render, o player recebia pedaços
+    # do arquivo antigo misturados com o novo e travava em 0:00. no-cache obriga a conferir se mudou.
+    cabecalho = {"Cache-Control": "no-cache"} if arquivo.suffix.lower() in (".mp4", ".wav", ".mp3") else None
+    if baixar:
+        # o vídeo, a versão em pé, a thumbnail, a legenda e os shorts baixam com o título, nunca final.mp4 ou S01.mp4
+        # (metadados.py, pedido do usuário em 2026-10-20)
+        try:
+            from . import metadados
+
+            baixado = metadados.nome_para_baixar(Projeto(nome), caminho) or arquivo.name
+        except (Exception, SystemExit):
+            baixado = arquivo.name
+        return FileResponse(arquivo, media_type=mime_type or "application/octet-stream", filename=baixado, headers=cabecalho)
+    return FileResponse(arquivo, media_type=mime_type or "application/octet-stream", headers=cabecalho)
+
+
+TAMANHOS_PREVIA = {"mini": 320, "tela": 1280}
+_TRAVA_LEVES = threading.Lock()
+
+
+def _origem_da_previa(p: Projeto, cena: Dict[str, Any]) -> Optional[Path]:
+    """O arquivo de onde sai a prévia: a foto da cena, a capa do vídeo, ou a imagem de IA."""
+    m = cena.get("midia") or {}
+    if m.get("arquivo"):
+        arq = p.pasta / m["arquivo"]
+        if arq.exists() and arq.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+            return arq
+        if m.get("capa") and (p.pasta / m["capa"]).exists():
+            return p.pasta / m["capa"]
+        if arq.exists():
+            return arq  # vídeo sem capa: a prévia sai de um quadro dele
+    img = p.imagem(cena["n"])
+    return img if img.exists() else None
+
+
+def _gerar_previa(origem: Path, destino: Path, largura: int) -> None:
+    """Reduz a imagem (ou um quadro do vídeo) para a largura pedida. O editor carrega isso em vez do original,
+    que numa foto da Wikimedia chega a 20 MB e pelo túnel travava a timeline."""
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destino.with_suffix(".tmp.jpg")
+    if origem.suffix.lower() in (".mp4", ".mov", ".webm", ".m4v"):
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "0.5", "-i", str(origem), "-vframes", "1",
+                        "-vf", f"scale='min({largura},iw)':-2", "-q:v", "4", str(tmp)], check=True)
+    else:
+        # a foto do jeito que ela entra no vídeo (moldura do retrato, recorte pelos rostos), e não a foto esticada
+        # pelo meio: o editor mostrava só o tronco do jogador da cena 16 do virou-filme-em-1996
+        try:
+            quadro = render.quadro_da_foto(origem, largura)
+        except Exception:
+            from PIL import Image
+            with Image.open(origem) as im:
+                quadro = im.convert("RGB")
+                quadro.thumbnail((largura, largura * 4))
+        quadro.save(tmp, "JPEG", quality=82, optimize=True)
+    tmp.replace(destino)
+
+
+@app.api_route("/arquivos_previas/{nome}/{tamanho}/{n}.jpg", methods=["GET", "HEAD"])
+def servir_previa(nome: str, tamanho: str, n: int):
+    """Miniatura (mini, 320px) ou prévia (tela, 1280px) da cena, feita uma vez e guardada em _previas.
+    O nome do arquivo guardado leva a data da origem, então uma mídia trocada ganha prévia nova sozinha."""
+    if tamanho not in TAMANHOS_PREVIA or not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail="Prévia não encontrada.")
+    p = Projeto(nome)
+    cena = next((c for c in p.ler_json("cenas.json").get("cenas", []) if c.get("n") == n), None)
+    origem = _origem_da_previa(p, cena) if cena else None
+    if origem is None:
+        raise HTTPException(status_code=404, detail="Essa cena ainda não tem imagem.")
+    # a versão do enquadramento entra no nome: mudou o jeito de montar a prévia, ela é feita de novo
+    versao = f"{int(origem.stat().st_mtime)}q{rostos.VERSAO}"
+    destino = p.pasta / "_previas" / tamanho / f"{n:04d}_{versao}.jpg"
+    if not destino.exists():
+        with _TRAVA_LEVES:
+            if not destino.exists():
+                for velho in destino.parent.glob(f"{n:04d}_*.jpg") if destino.parent.exists() else []:
+                    velho.unlink(missing_ok=True)
+                try:
+                    _gerar_previa(origem, destino, TAMANHOS_PREVIA[tamanho])
+                except Exception:
+                    # não deu para reduzir (formato estranho): serve o original, que ao menos aparece
+                    return FileResponse(origem)
+    return FileResponse(destino, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+EXTENSOES_VIDEO = (".mp4", ".mov", ".webm", ".m4v")
+
+
+ALTURA_PREVIA_VIDEO = 480
+_PREPARANDO_PREVIAS = set()  # projetos com as prévias de vídeo sendo feitas em segundo plano
+
+
+def _video_da_cena(p: Projeto, cena: Dict[str, Any], criar: bool = False) -> Optional[Path]:
+    m = cena.get("midia") or {}
+    arq = p.pasta / m["arquivo"] if m.get("arquivo") else None
+    return arq if arq and arq.exists() and arq.suffix.lower() in EXTENSOES_VIDEO else None
+
+
+def _destino_previa_video(p: Projeto, cena: Dict[str, Any], origem: Path) -> Path:
+    """O nome leva a data da origem e a duração da cena: mídia trocada ou corte mudado ganham prévia nova."""
+    decimos = int(round((cena["fim"] - cena["ini"]) * 10))
+    return p.pasta / "_previas" / "video" / f"{cena['n']:04d}_{int(origem.stat().st_mtime)}_{decimos}.mp4"
+
+
+def _gerar_previa_video(origem: Path, destino: Path, duracao_cena: float) -> None:
+    """Corta do vídeo de banco só o trecho que a cena usa, em 480p e sem som.
+
+    O original é 1080p de 9 a 18 Mbps e chega a 111 MB, mas a cena mostra 3 a 5 segundos dele: pelo túnel do
+    Cloudflare o player esperava o download do arquivo inteiro e travava. O começo segue a mesma regra do render
+    (render._entrada_video), para o editor mostrar o mesmo trecho que vai sair no vídeo final."""
+    from .util import duracao_audio
+
+    disponivel = duracao_audio(origem)
+    inicio = min(1.0, (disponivel - duracao_cena) / 2) if disponivel >= duracao_cena + 1 else 0.0
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destino.with_name(f"{destino.stem}.{threading.get_ident()}.tmp.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{inicio:.3f}", "-i", str(origem),
+                    "-t", f"{duracao_cena + 1.5:.3f}", "-an", "-vf", f"scale=-2:{ALTURA_PREVIA_VIDEO},fps=30",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-maxrate", "1200k", "-bufsize", "2400k",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(tmp)], check=True)
+    for velho in destino.parent.glob(f"{destino.name.split('_')[0]}_*.mp4"):
+        if velho != destino and not velho.name.endswith(".tmp.mp4"):
+            velho.unlink(missing_ok=True)
+    tmp.replace(destino)
+
+
+def _previa_video_pronta(p: Projeto, cena: Dict[str, Any]) -> Optional[Path]:
+    """Devolve a prévia leve do vídeo da cena, fazendo agora se ainda não existir. None se a cena não é vídeo."""
+    origem = _video_da_cena(p, cena, criar=True)
+    if origem is None:
+        return None
+    destino = _destino_previa_video(p, cena, origem)
+    if not destino.exists():
+        _gerar_previa_video(origem, destino, max(0.5, cena["fim"] - cena["ini"]))
+    return destino
+
+
+def preparar_previas_video(nome: str) -> None:
+    """Faz em segundo plano as prévias de vídeo que faltam, na ordem das cenas, para o player já achar prontas."""
+    with _TRAVA_LEVES:
+        if nome in _PREPARANDO_PREVIAS:
+            return
+        _PREPARANDO_PREVIAS.add(nome)
+
+    def trabalhar():
+        try:
+            p = Projeto(nome)
+            # primeiro as prévias das animações: são poucas e leves, e o player toca todas por cima das cenas
+            for item in _motion_do_projeto(p):
+                try:
+                    animacoes.previa_da_camada(p, item, criar=True)
+                except Exception as erro:
+                    print(f"[prévias de animação] {item.get('id')} de {nome}: {str(erro)[:120]}")
+            for cena in p.ler_json("cenas.json").get("cenas", []):
+                try:
+                    _previa_video_pronta(p, cena)
+                except Exception as erro:
+                    print(f"[prévias de vídeo] cena {cena.get('n')} de {nome}: {str(erro)[:120]}")
+        except (Exception, SystemExit) as erro:
+            print(f"[prévias de vídeo] {nome}: {str(erro)[:120]}")
+        finally:
+            with _TRAVA_LEVES:
+                _PREPARANDO_PREVIAS.discard(nome)
+
+    threading.Thread(target=trabalhar, daemon=True, name=f"previas-video-{nome}").start()
+
+
+@app.api_route("/arquivos_previas/{nome}/video/{n}.mp4", methods=["GET", "HEAD"])
+def servir_previa_video(nome: str, n: int):
+    """Prévia leve do vídeo da cena para o player do editor (480p, só o trecho da cena, sem som)."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    p = Projeto(nome)
+    cena = next((c for c in p.ler_json("cenas.json").get("cenas", []) if c.get("n") == n), None)
+    origem = _video_da_cena(p, cena, criar=True) if cena else None
+    if origem is None:
+        raise HTTPException(status_code=404, detail="Essa cena não tem vídeo.")
+    try:
+        destino = _previa_video_pronta(p, cena)
+    except Exception:
+        # não deu para reduzir: serve o original, que ao menos toca
+        return FileResponse(origem, media_type=mimetypes.guess_type(str(origem))[0] or "video/mp4",
+                            headers={"Cache-Control": "no-cache"})
+    # o endereço muda quando a mídia ou o corte mudam (?v=), então o navegador pode guardar a prévia
+    return FileResponse(destino, media_type="video/mp4", headers={"Cache-Control": "private, max-age=604800"})
+
+
+@app.api_route("/arquivos_previas/{nome}/motion/{ident}.webm", methods=["GET", "HEAD"])
+def servir_previa_motion(nome: str, ident: str):
+    """A animação inteira em WebM transparente, para a faixa Motion do player do editor (feita agora se faltar)."""
+    if not (PROJETOS / nome).exists():
+        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    p = Projeto(nome)
+    item = next((i for i in _motion_do_projeto(p) if i["id"] == ident), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Essa animação não existe ou está desatualizada.")
+    try:
+        destino = animacoes.previa_da_camada(p, item, criar=True)
+    except Exception as erro:
+        raise HTTPException(status_code=500, detail=f"Não consegui preparar a prévia da animação: {str(erro)[:160]}")
+    if destino is None:
+        raise HTTPException(status_code=404, detail="A animação ainda não foi desenhada.")
+    return FileResponse(destino, media_type="video/webm", headers={"Cache-Control": "private, max-age=604800"})
+
+
+@app.api_route("/arquivos_narracao/{nome}.mp3", methods=["GET", "HEAD"])
+def servir_narracao_leve(nome: str):
+    """A narração em MP3 leve para o editor: o WAV de um vídeo de 28 min passa de 140 MB e, pelo túnel, o
+    player não conseguia tocar o vídeo inteiro. Gerada uma vez; refeita só se a narração mudar."""
+    wav = PROJETOS / nome / "narracao.wav"
+    if not wav.exists():
+        raise HTTPException(status_code=404, detail="Esse projeto ainda não tem narração.")
+    mp3 = PROJETOS / nome / "narracao_editor.mp3"
+    if not mp3.exists() or mp3.stat().st_mtime < wav.stat().st_mtime:
+        with _TRAVA_LEVES:
+            if not mp3.exists() or mp3.stat().st_mtime < wav.stat().st_mtime:
+                tmp = mp3.with_suffix(".tmp.mp3")
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-ac", "1", "-b:a", "80k",
+                                str(tmp)], check=True)
+                tmp.replace(mp3)
+    return FileResponse(mp3, media_type="audio/mpeg", headers={"Cache-Control": "no-cache"})
+
+
+@app.api_route("/arquivos_raiz/{caminho:path}", methods=["GET", "HEAD"])
+def servir_arquivo_raiz(caminho: str):
+    """Serve arquivos da raiz (efeitos/, musicas/)."""
+    arquivo = RAIZ / caminho
+    if not arquivo.exists() or not arquivo.is_file():
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado.")
+
+    try:
+        arquivo.resolve().relative_to(RAIZ.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+
+    mime_type, _ = mimetypes.guess_type(str(arquivo))
+    return FileResponse(arquivo, media_type=mime_type or "application/octet-stream")
+
+
+class _EditorSempreEmDia(StaticFiles):
+    """Os arquivos do editor com "Cache-Control: no-cache": o navegador confere a cada carregamento se mudou (pela
+    ETag, sem baixar de novo o que está igual). Sem isso ele guardava o js/api.js antigo depois de uma atualização e o
+    editor quebrava com "API.salvarCanal is not a function" (2026-10-15)."""
+
+    async def get_response(self, path, scope):
+        resposta = await super().get_response(path, scope)
+        resposta.headers["Cache-Control"] = "no-cache"
+        return resposta
+
+
+def criar_app(frontend_dir: Optional[str] = None):
+    """Cria e configura o app FastAPI, opcionalmente montando os estáticos do frontend."""
+    if not frontend_dir:
+        padrao = Path("G:/editor-video-dark")
+        if padrao.exists() and (padrao / "index.html").exists():
+            frontend_dir = str(padrao)
+    if frontend_dir and Path(frontend_dir).exists():
+        app.mount("/", _EditorSempreEmDia(directory=frontend_dir, html=True), name="frontend")
+    retomar_criacoes_interrompidas()
+    acordado.vigiar(_ha_tarefa_andando)
+    # a cada 15 min, o que a chave do OpenRouter gastou contra o que a fábrica registrou (relatorios/vazamento.csv)
+    from . import consumo
+    consumo.vigiar(log=print)
+    return app
+
+
+def _ha_tarefa_andando() -> bool:
+    """Criação, render, Corrigir, publicação... andando: o computador não pode dormir (fabrica/acordado.py)."""
+    with TAREFAS_LOCK:
+        return any(t.get("status") in ("processando", "renderizando", "enviando") for t in TAREFAS.values())

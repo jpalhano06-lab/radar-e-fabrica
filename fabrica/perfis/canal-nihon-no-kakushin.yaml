@@ -1,0 +1,29 @@
+# Canal criado no editor (2026-11-03). Herda tudo de documentario.yaml e guarda a voz do canal.
+# Para mudar estilo, diretrizes ou texto fixo da descrição, edite aqui (veja perfis/base-documentario.yaml).
+base: documentario.yaml
+nome: 日本の革新 (Nihon no Kakushin)
+voz:
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). O catálogo do OpenSpeaker
+  # não tem nenhuma das vozes antigas, então a voz foi escolhida de novo: era Koichi Takase - Clear and
+  # Measured, canal de inovação. Escolhida pela descrição, não de ouvido: ouça a prévia no Radar antes de
+  # publicar.
+  # Voz antiga na GenAI Pro: aEdqPekRcUrJjvnAh1Eb (Koichi Takase - Clear and Measured).
+  provedor: openspeaker
+  paga_escolhida: true             # escolhida no Radar: não vira a voz local
+  voice_id: elevenlabs_IaXjZ6RRJ0qG9I8XIOiM
+  nome_da_voz: Ren - Calm Business Narrator
+  idioma_da_voz: ja
+
+imagens:
+  provedor: assinatura
+  provedor_reserva: openrouter
+
+# Estimativa, ainda sem medir esta voz: japonês fala bem menos letras por minuto que os 914 do português.
+# Depois da primeira narração, troque pelo número que a fábrica mostrar.
+ritmo:
+  caracteres_por_minuto: 360
+
+# País do público: as imagens pedem texto, preço e loja de lá, e o Jev reprova os de outro país (2026-11-09)
+lugar:
+  pais: Japan
+  moeda: "¥ (Japanese yen)"
