@@ -1,0 +1,2217 @@
+# Radar de Canais
+
+Produto separado da fábrica (pedido do usuário em 2026-10-13), no modelo do Dotti Finder, **feito do zero**: nada
+de código, texto, marca ou visual de lá. O nome fica em `radar/config.py` (`NOME`), num lugar só, e no
+`extensao/manifest.json`.
+
+Três peças, uma conta:
+
+| Peça | O que faz |
+|---|---|
+| **Site** (`radar/web`, porta 8400) | Radar (canais novos que estão indo bem, por nicho), Top 30, Outliers, Salvos, Achados (os parecidos com os salvos), Administração (contas, planos, cota, garimpo) |
+| **Extensão do Chrome** (`extensao/`) | Em cada miniatura do YouTube: quantas vezes o vídeo fez o normal do canal e as views por hora. Ao lado do vídeo: números, curva de views, canal, capa em tamanho real, copiar título, tags; no Lite, salvar canal, em que língua ninguém fez e canais parecidos. Na página do canal: a análise e os vídeos que passaram do normal |
+| **MCP** (`radar/mcp.py`) | O Radar dentro do Claude e do ChatGPT: 8 ferramentas de leitura (resumo, visões, canais, salvos, acharam, canal, outliers, títulos) |
+
+## Ligar
+
+1. `uv sync` nesta pasta (uma vez).
+2. Dois cliques em **LIGAR-RADAR.bat** (ou `uv run python -m radar servidor`).
+3. Crie a conta no site. **A primeira conta é a administração** (plano Pro).
+4. Extensão: `chrome://extensions` → Modo do desenvolvedor → Carregar sem compactação → pasta `extensao`. Clique no
+   ícone, entre com o mesmo e-mail e senha.
+
+Chaves: `finder/.env` (`YOUTUBE_API_KEY`, `YOUTUBE_API_KEY2`..., `GROQ_API_KEY`...). Rodando dentro da pasta da
+fábrica, o que faltar vem do `.env` da fábrica.
+
+## Como mede
+
+- **Normal do canal**: a **mediana** das views dos 30 vídeos maduros (3 dias ou mais) mais novos, separada entre
+  longos e Shorts (até 3 min). Mediana, para o vídeo que estourou não virar o normal.
+- **Nota de outlier**: views do vídeo ÷ normal do canal. **Views por hora**: views ÷ horas desde a publicação.
+- **Fase**: nascendo (postando há menos de 3 meses), crescendo (os 10 últimos fazem 1,5x os 20 anteriores), estável,
+  caindo (0,6x ou menos), parado (60 dias sem vídeo).
+- **Selo**: lendário (300 mil por vídeo em até 6 meses), épico (100 mil em até 9), raro (30 mil em até 12).
+- **Postando há**: pelo primeiro vídeo quando o canal tem até 50; senão, pela criação do canal (o "+" no site).
+  Antes, o Kurzgesagt (2013) passava por canal de 7 meses e ganhava selo épico.
+- Vídeo medido vale 1 hora, canal 24 horas (`medir.py`). Cada leitura de hora em hora vira um ponto da curva.
+
+## Garimpo (`garimpo.py`)
+
+Uma vez por dia sozinho (`RADAR_GARIMPO_AUTOMATICO=0` desliga), pelo botão da Administração ou
+`uv run python -m radar garimpar [--unidades N]`. Busca os termos de cada nicho (`TERMOS`, mais
+`dados/termos.json`) nos vídeos do último mês, um nicho por vez; cada termo volta depois de 3 dias. Entra no Radar
+o canal criado há até 18 meses, com 3 a 400 vídeos e 10 mil views ou mais por vídeo. O Groq (grátis) dá o nicho e diz
+se o canal é sem rosto (até 3 capas pequenas por pedido: o Qwen do Groq aceita 3 imagens, e a capa média gastava
+6 mil tokens contra o limite de 7 mil por minuto). Vídeo com 5x o normal vai para os Outliers. Depois, cada canal
+salvo procura os parecidos uma vez por semana e eles vão para os Achados de quem salvou.
+
+**Reserva do Groq: o Gemini** (2026-11-03). Quando as 11 chaves do Groq gastam a cota de tokens do dia, o mesmo pedido
+(nicho, rosto, traduções) vai para o Gemini, no plano grátis, revezando as `GEMINI_API_KEY` do `.env` da fábrica
+(`ia._gemini`). Modelo `gemini-3.5-flash-lite` (`RADAR_MODELO_GEMINI`): o 2.5 Flash não aceita mais chave nova e o
+3.8 Flash dava 503 de tão cheio. As capas vão junto em base64. Chave no limite sai da roda pelo `retryDelay` (o do dia,
+1 hora).
+
+**Cota**: 10.000 unidades por dia por chave (volta às 5 h de Brasília). Busca custa 100, medir canal novo uns 3.
+O garimpo usa 60% do que sobrou (`RADAR_COTA_GARIMPO`). As buscas vêm primeiro; as perguntas ao Groq dos canais
+que ficaram sem nicho ou sem a resposta do rosto, por último (2026-10-31: o garimpo do dia 30 ficou 20 horas preso
+nelas, antes da primeira busca, porque 149 canais tinham capas que não existem mais e cada um esperava o limite do
+minuto do Groq; o medir de novo não pergunta mais ao Groq, e pedido recusado não é repetido nas outras chaves). Primeiro teste (2026-10-13): 4 buscas, 522 unidades,
+25 canais no Radar, 114 outliers. Uma chave rende uns 300 canais novos por dia; mais chaves (de outros projetos do
+Google Cloud) rendem mais.
+
+"Em que língua ninguém fez" não gasta cota: o Groq escreve a busca em 9 línguas e a extensão abre a busca do YouTube
+ordenada pelos mais vistos.
+
+## Planos (`config.PLANOS`)
+
+Ainda não é para vender (2026-10-13): toda conta nova abre como Pro e o site não mostra planos nem página de venda. Os planos seguem no código para quando for vender: Grátis (a extensão), Lite (salvar, parecidos, línguas, achados), Pro (tudo).
+Os preços são provisórios. A administração troca o plano e o vencimento de cada conta. **Falta**: pagamento
+(Kiwify ou outro), entrar com o Google, transcrição, "canal monetizado" e publicar a extensão na Chrome Web Store.
+
+## Testes
+
+`uv run python -m pytest tests`: as contas, sem rede.
+
+`node tests/app_js.test.mjs`: o `api()` do painel — a memória curta, a espera para o Radar voltar
+(2s, 4s, 8s, 15s, 30s) e os trilhos de views e inscritos. Sem navegador e sem instalar nada: o trecho do
+`app.js` roda com o `fetch`, o `document` e o `setTimeout` de mentira, então o teste mede quanto ele
+esperaria em vez de esperar.
+
+## Visual do painel
+
+Pedido do usuário em 2026-10-13: abas à esquerda (Descobrir: Radar, Top 30, Outliers; Minha base: Salvos, Achados;
+Ferramentas: Extensão, Administração), **a aba aberta em vermelho** (`--vermelho`, #e5383b) e o **verde** (#b6f23a)
+como cor de referência (números, nota de outlier, nicho escolhido). Cada canal é um cartão largo com as capas dos 3
+vídeos longos que mais renderam (`servidor._vitrine`), com a nota de outlier e a duração em cima da capa. Outliers é uma
+grade de capas.
+
+## Abas (2026-10-13, segunda leva, pedido do usuário: "adicione o possível", com o "para que serve" e filtros)
+
+Cada aba abre com uma caixa verde **"Para que serve"** (o × esconde, "para que serve?" mostra de novo; fica no
+navegador) e o mesmo texto aparece ao passar o mouse na aba. Textos em `AJUDA`, no `app.js`.
+
+| Grupo | Aba | O que faz |
+|---|---|---|
+| Descobrir | Visão geral | números, canais em alta (views por dia), entraram esta semana, vídeos que mais estouraram, nichos |
+| | Canais | o Radar inteiro com o painel de **Filtros** (abaixo) e 9 ordens |
+| | Novos achados | o Radar pela data em que o garimpo achou (hoje, 3, 7, 30 dias) |
+| | Grupos de canais | os subnichos como grupos: tamanho, mediana por vídeo, quantos crescendo; aberto (até 2 canais), em formação, concorrido (8 ou mais) |
+| | Top 30 | por nicho |
+| | Outliers | filtros de nota (3x a 50x), longo ou Short, data de publicação, views, canal pequeno, subnicho; botão "Fazer vídeo deste tema" |
+| Minha base | Salvos, Novidades (vídeos novos dos salvos), Meus outliers (só dos salvos), Achados | |
+| Produzir | Títulos | banco de títulos com 3x ou mais e gerador no estilo do nicho (Groq) |
+| | Pauta para a fábrica | rascunho de roteiro (Groq) em `dados/pautas/`, com o comando `fabrica novo`. Não roda a fábrica sozinho: narrar e gerar imagens continua pedindo confirmação |
+| Ferramentas | Medir canal | @, link do canal ou de um vídeo; "Pôr no Radar" classifica e entra na lista |
+
+**Filtros de canal** (`servidor._filtro_canais`): nicho, subnicho, selo, fase, rosto (com/sem), país, inscritos de/até,
+views por vídeo de/até, quantidade de vídeos, em alta (views por dia mínimas), começou a postar (nos últimos 1, 3, 6,
+12 meses ou entre duas datas), postou por último (3, 7, 30 dias), achado pelo Radar (hoje, 7, 30 dias ou entre datas).
+Os campos de número aceitam "20 mil", "1,5 mi", "10k". O filtro fica guardado no navegador por aba.
+
+**Dados novos**: `velocidade` (views por dia dos vídeos do último mês: a medida de "em alta"), `historico` (uma foto por
+dia de inscritos, views e vídeos de cada canal) e `ganho_7d` (inscritos ganhos na semana). O garimpo mede de novo os
+salvos e os do Radar a cada 20 h (`garimpo.remedir`, até 35% da cota), e aprende buscas novas com os títulos que
+estouraram (`aprender_termos`, tabela `termos_auto`, até 400). Outliers entram no banco a partir de 3x (a tela mostra
+5x por padrão).
+
+**Subnicho**: o Groq recebe os subnichos que já existem e reaproveita um quando serve. Sem isso cada canal ganhava um
+só dele ("Viagem Histórica", "História Documentada") e os Grupos ficavam com 1 canal cada; com a lista, 25 canais
+viraram 13 grupos ("Animais em Conflito" com 6).
+
+## No ar para os sócios (túnel da Cloudflare, 2026-10-13)
+
+Pedido do usuário: mandar para os sócios, pelo túnel (grátis, depende deste computador ligado). A Vercel não serve sem
+reescrever: o banco é um arquivo SQLite (some a cada atualização lá), o garimpo dura 40 min e o relógio do garimpo
+precisa de um programa sempre ligado.
+
+- **Convite**: fora a primeira conta, só cria conta quem tem um link de convite (Administração → Convidar sócio).
+  Cada link vale uma conta; o código não fica no banco, só o resumo dele. "Tirar acesso" apaga a conta.
+- **Senha errada**: 8 erros em 15 min pelo mesmo endereço (o `cf-connecting-ip` do túnel) e espera (429).
+- **Cookie seguro** quando o pedido vem por https (o cloudflared manda `X-Forwarded-Proto`; o uvicorn só confia nele
+  vindo do próprio computador).
+- **Não dorme**: com o servidor ligado, o Windows não entra em suspensão (`RADAR_ACORDADO=0` desliga). A tela apaga.
+- **Extensão para os sócios**: aba Extensão → "Baixar a extensão (.zip)", já apontando para o endereço por onde o site
+  foi aberto (`/api/extensao.zip`).
+- **Cota**: os sócios dividem a cota do YouTube (10 mil por dia por chave). Mais chaves (`YOUTUBE_API_KEY2`...,
+  cada uma de um projeto do Google Cloud) somam.
+
+O túnel deste computador não existia (o editor.bbnews.cc e o mcp.bbnews.cc vêm de outra máquina). Passos no painel da
+Cloudflare: Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared → nome `radar` → Windows → rodar o comando
+`cloudflared.exe service install TOKEN` num PowerShell de administrador → Public Hostname `radar` . `bbnews.cc`,
+tipo HTTP, URL `localhost:8400`. E uma Regra de Configuração para `radar.bbnews.cc` que desliga o "Estou Sob Ataque"
+e a verificação de integridade do navegador, como a do MCP: sem ela, o desafio barra a extensão.
+
+## Simplificado (2026-10-13, quarta leva, pedido do usuário: "muito bagunçado... quero tudo muito simples")
+
+- **Menu de 4 abas que abrem embaixo** (`MENU` no `app.js`): Meu perfil (Meus canais, Salvos, Novidades), Descobrir
+  (Procurar nicho, Em alta, Grupos, Top 30), Ideias (Vídeos que estouraram, Títulos, Roteiro), Ferramentas (Medir
+  canal, Extensão, Administração). A aba aberta e a opção aberta ficam em vermelho. Saíram como abas próprias: Visão
+  geral (virou "Em alta"), Novos achados (filtro "Achado"), Meus outliers (filtro "Só dos meus salvos") e Achados
+  (fim da página de Salvos). As caixas "Para que serve" viraram uma linha cinza embaixo do título.
+- **Meu perfil é a primeira página** (`perfil.py`, tabela `meus_canais`): conectar canal pelo @ ou link (dados
+  públicos, sem senha), totais, um cartão por canal com os 3 últimos vídeos. A página do canal (`#/canal/ID`): gráfico
+  de inscritos (do `historico`), últimos vídeos com nota, **ideias para copiar** (outliers do mesmo subnicho, depois
+  do mesmo nicho, só do banco) e "Buscar mais ideias no YouTube" (o Groq escreve 2 buscas a partir dos vídeos que mais
+  renderam no canal; uns 250 de cota), com "Procurar de novo" que muda o jeito (`perfil.JEITOS`: formato, período,
+  ordem, inglês). Os canais conectados são medidos de novo todo dia, antes dos salvos.
+- **Procurar nicho**: a busca olha nome, nicho, subnicho e o título dos vídeos de cada canal; "Procurar no YouTube"
+  busca na hora (`perfil.procurar`, sem esperar o Groq: nicho e rosto ficam para o garimpo) e o termo entra no garimpo
+  de todo dia ("Procurados"). Teste: "cobras venenosas", 37 canais vistos, 10 novos no Radar.
+- **Filtros só de escolher** (`selects` no `app.js`): nicho, tamanho do canal (pequeno, médio, grande), views por
+  vídeo, idade, quando foi achado, rosto e ordem. O escolhido fica verde; "limpar" volta tudo.
+
+## Studio, roteiro pelo Claude e o "para que serve" de volta (2026-10-14)
+
+- **"Para que serve"** voltou em todas as páginas (`AJUDA` no `app.js`): caixinha verde embaixo do título; o × esconde
+  e o "?" ao lado do título mostra de novo.
+- **YouTube Studio** (`studio.py`): no perfil, "Conectar com o Google" (o mesmo cliente OAuth da fábrica, só leitura:
+  youtube.readonly, yt-analytics.readonly, yt-analytics-monetary.readonly). A página do canal conectado mostra views,
+  horas assistidas, duração média, % assistido, inscritos ganhos e perdidos, impressões e cliques na thumbnail,
+  receita estimada (só canal monetizado), views por dia, os 10 vídeos que mais renderam, fontes de tráfego e países,
+  com 7, 28, 90 ou 365 dias e a comparação com o período anterior (guardado 1 h). **Passo único no Google Cloud**: o
+  endereço de volta `http://localhost:8400/api/youtube/retorno` precisa estar em "URIs de redirecionamento
+  autorizados" do cliente OAuth, e a YouTube Analytics API ativada no projeto. Testado: o Google recusa esse endereço
+  enquanto ele não está cadastrado (o da fábrica, localhost:8080, passa). O login volta pelo `state` (o cookie de
+  127.0.0.1 não vale em localhost). O canal do Studio entra em "Meus canais" sozinho.
+- **Roteiro pelo Claude** (`roteiro_claude.py`, no perfil e em Ideias → Roteiro): título, tempo (3 a 30 min, 150
+  palavras por minuto), língua, projeto e o link do vídeo de referência. A transcrição (`youtube-transcript-api`,
+  legenda manual primeiro, depois a automática, em qualquer língua) vai como base. **Sem legenda não para o pedido**
+  (2026-10-28): vídeo com as legendas desligadas pelo dono (`TranscriptsDisabled`) derrubava a produção inteira em
+  "Parou com erro"; agora o roteiro sai do título, das observações e do estilo do canal, o motivo fica no
+  `roteiro.json` (`base_erro`). Nada muda no site: quem avisa, antes de criar, é a confirmação da extensão. A
+  thumbnail (maxres, depois sd, hq)
+  é copiada para `dados/roteiros/NOME/thumbnail.jpg`, com "Baixar" e "Copiar imagem". Quem escreve é o
+  `claude -p` deste computador, pela assinatura do claude.ai, numa pasta vazia, sem ferramentas e sem a
+  ANTHROPIC_API_KEY no ambiente (com ela o Claude Code cobraria por uso). Roda em segundo plano (`/api/roteiros/tarefa`).
+  Teste: 2 minutos em 26 s, 330 palavras a partir de 3.308 da transcrição. O botão "Fazer roteiro deste tema" dos
+  vídeos leva o link e o título para o formulário. O roteiro de rascunho pelo Groq (pauta) saiu da tela.
+- **Projetos** (`projetos_roteiro`): o estilo de cada canal (tom, público, estrutura), escolhido no formulário e
+  enviado junto. O claude.ai não deixa ler os projetos de lá por fora: as instruções são coladas aqui.
+
+## Trabalho, Explorar, bloquear e as perguntas da primeira vez (2026-10-14, sexta leva)
+
+- **Menu de 3 abas**: Meu perfil (Trabalho, Meus canais, Salvos, Novidades, Preferências), Descobrir (Explorar, Procurar
+  nicho, Vídeos que estouraram, Em alta, Grupos, Top 30), Ferramentas. Saíram a aba Títulos (o "Sugerir títulos" está
+  no Trabalho) e a aba Roteiro (virou o Trabalho). Vermelho mais vivo (#ff1f35) na aba aberta e no botão principal.
+- **Trabalho** (a página inicial): 1) a ideia: título com "Sugerir títulos" (Groq), link do vídeo de referência (mostra
+  a capa e o título dele), tempo, língua, estilo; 2) o roteiro pelo Claude, editável, com a contagem de palavras e de
+  minutos e a thumbnail da referência; 3) **Enviar para a fábrica** (`roteiro_claude.enviar`): `uv run fabrica novo`
+  na pasta da fábrica (com `--sim`, que só pula o aviso de vídeo curto; criar não gasta), `titulo_entrega` no
+  projeto.json e a thumbnail como `thumbnail_referencia.jpg`. Testado: o projeto nasceu com o título, o roteiro e a capa.
+- **Roteiro limpo**: o pedido ao Claude proíbe título de parte e colchete, e `_limpar` tira "[TITULO] ...",
+  "## Parte 2", "Introdução:" e linha curta sem pontuação no fim. Os roteiros antigos foram limpos.
+- **Perguntas da primeira vez** (`gosto.py`, `#/boas-vindas`, depois em Preferências): nichos, línguas, formato, o
+  que nunca mostrar (com rosto vem marcado: canal dark) e 1 a 3 canais de referência (medidos, classificados e com os
+  parecidos indo para Salvos). Valem no Explorar, nos Vídeos que estouraram e nas ideias de cada canal.
+- **Língua do título** (`gosto.lingua`): 3 letras de outro alfabeto já é "outras"; hindi com letras latinas ("Maut Ke
+  Baad...") também. Das 882 ideias da base, 692 passavam antes; hoje passam 619, sem hindi nem bengali.
+- **⊘ em cima de cada vídeo**: não mostrar mais este vídeo, o canal ou o subnicho (tabela `bloqueios`; desfaz em
+  Preferências).
+- **Explorar**: vídeos que estouraram sorteados com peso pela nota, "Mostrar outros" sorteia de novo e "Procurar mais
+  no YouTube" busca um termo sorteado dos nichos da pessoa.
+- **Ideias de um canal** (`gosto.ideias_para`): pelas palavras dos títulos do canal (parecença), mais o subnicho e o
+  nicho, em vez de só o subnicho.
+- **Procurar nicho**: só a caixa, tamanho e idade; o rosto segue as respostas.
+
+## Meu trabalho, painel das ideias salvas e treino do algoritmo (2026-10-14, sétima leva)
+
+- **Sem as perguntas da primeira vez** (pedido do usuário). As respostas antigas não valem mais para a língua: ela é
+  um filtro de escolha em Ideias, Explorar e Vídeos que estouraram (`gosto.por_lingua`; padrão português, inglês e
+  espanhol). A conta tinha marcado "outras" e as ideias vinham em russo.
+- **Menu**: Meu trabalho (Roteiro, Meus canais, Ideias, Treinar algoritmo), Descobrir (Explorar, Procurar nicho,
+  Vídeos que estouraram, Em alta, Grupos, Top 30, Canais salvos, Novidades), Ferramentas (Medir canal, Extensão,
+  Bloqueados, Administração).
+- **Meus canais**: conectar com o Google e, à vista, conectar só pelo @.
+- **Roteiro de até 1 hora** (60 min, uns 9 mil palavras): se o Claude para antes do tamanho, ele continua de onde
+  parou, até 4 vezes (`roteiro_claude.gerar`).
+- **Ideias** (`trabalho.ideias`, `/api/meus-canais/ID/ideias`): uma aba por canal seu, filtros de língua, nota, data,
+  tamanho do canal e ordem (mais parecido, nota, recente, views), e "Buscar mais no YouTube".
+- **Painel da direita "Ideias salvas"** (`ideias_salvas`): o 💡 vermelho na borda abre e fecha em qualquer página;
+  uma aba por canal (e "Geral"); cada ideia com capa, título, link, "Levar para o trabalho" (abre o Roteiro com o
+  vídeo de referência) e ×. "💡 Salvar ideia" em todo vídeo: vai para o canal da aba aberta; senão pergunta qual.
+- **Treinar algoritmo** (`trabalho.plano_de_treino`, tabela `treino`): para cada canal seu, 5 buscas (Groq, guardadas),
+  12 vídeos que estouraram no assunto e até 6 canais. A extensão, com "Treinar para" escolhido no ícone, marca o
+  progresso sozinha (busca feita, vídeo aberto por 1 minuto, canal aberto) e cola o selo **🎯 + ideia** nos vídeos
+  do YouTube que dividem 2 ou mais palavras do assunto do canal (`trabalho.assunto`). A extensão **nunca assiste
+  nada sozinha**: view automática é proibida pelo YouTube e marca a conta.
+
+## Treinamento do algoritmo no site, filtros e aleatório (2026-10-14, oitava leva)
+
+- **Treino no site, não no YouTube** (pedido do usuário; o "YouTube virgem" saiu, com a lista de buscas e a marcação de
+  progresso da extensão). `treinamento.py`, tabela `treinamentos`. Na primeira vez que a pessoa abre um canal dela
+  (Ideias ou a página do canal), em vez das ideias vem o assistente: 1) 1 a 3 canais de referência (medidos e
+  classificados; dá para pular e usar só o canal); 2) vídeos para marcar ✓ Faria ou ✕ Não, 30 por vez, dos canais de
+  referência e dos que estouraram falando do mesmo assunto, sorteados (`candidatos`); 3) com 10 a 20 escolhidos, as
+  palavras ganham peso (as dos recusados ficam negativas), o Groq escreve 5 buscas e o Radar procura no YouTube (uns
+  600 de cota). Teste: 25 canais medidos, 25 ideias novas, e as ideias do canal passaram de "as criaturas mais raras"
+  para as batalhas que foram escolhidas. "Treinar algoritmo" no menu refaz o treino.
+- **As ideias seguem o treino** (`gosto.ideias_para`): soma dos pesos das palavras do título; vídeo que só fala de
+  assunto recusado sai. O selo 🎯 da extensão usa as palavras do treino (`trabalho.assunto`).
+- **Filtros**: nas ideias do canal (também na página do canal) língua, nota, data, formato, tamanho do canal e ordem;
+  no Explorar língua, nicho, nota, data, formato, tamanho do canal e rosto (`gosto.explorar(filtros=)`). O Explorar não
+  usa mais o nicho das respostas antigas (limitava a "Animais" sem mostrar).
+- **🔀 Aleatório em todas as telas**: no servidor (`ordem=aleatorio`: Procurar, Vídeos que estouraram, Ideias) e na
+  tela, embaralhando o que já veio (Em alta, Grupos, Top 30, Salvos, Novidades).
+
+## Acesso livre (2026-10-14)
+
+Pedido do usuário: sem e-mail e senha "por enquanto". Sem sessão, todo pedido vale como a conta da administração
+(`servidor._usuario_livre`; sem nenhuma conta, cria `local@radar`). O site não pede login e o rodapé diz "Acesso livre
+neste computador"; a extensão fala com o Radar sem token. **Só neste computador**: pedido que não vem do localhost, ou
+que traz `cf-connecting-ip`/`X-Forwarded-For` (túnel, proxy), continua precisando de login (testado: 401), e
+`--publico` desliga o acesso livre. `RADAR_ABERTO=0` volta a pedir senha. As contas, os convites e o login continuam no
+código para quando for vender ou dividir com os sócios.
+
+## Início, treino separado e Radar de países (2026-10-14, nona leva)
+
+- **Início** (a primeira página, `#/inicio`): o perfil, os canais da pessoa com o que falta em cada um (treinado,
+  radar de países, Studio, com link para fazer) e o **mapa do app** (`MAPA` no `app.js`: cada parte, o que faz e o
+  link).
+- **Treinar algoritmo separado de Ideias**: a página do treino explica o que é, para que serve e quanto leva, mostra a
+  faixa dos 3 passos (o atual em vermelho) e o estado do canal (treinado em tal dia, com quantos vídeos, as
+  referências e as buscas). Ideias não abre mais o treino sozinha: mostra "seguindo o treino de..." ou o aviso
+  "este canal ainda não foi treinado" com o botão.
+- **Radar de países** (`radar_paises.py`, tabela `radar_projetos`, `#/radar-paises`): um projeto por canal com os
+  países e a língua de cada um (28 países). O **📡** em cima de cada vídeo: tira toda a numeração do título
+  (`sem_numeros`: "Top 10 Supermercados que Faliram em 2024" vira "Supermercados que Faliram em"), adapta a ideia a
+  cada país pelo Groq (`ia.adaptar_ideia`: "grocery chains bankrupt Canada", "... United Kingdom"), busca no YouTube
+  daquele país (regionCode + relevanceLanguage) e diz "⚠ já foi feito" (com os parecidos e as views) ou "✅ ninguém fez
+  ainda". Vídeo que cita outro país não conta (`paises_citados`: "8 Big UK Grocery Chains" não vale para a Austrália).
+  Uns 101 de cota por país; guardado 7 dias. Teste (mercado: Canadá, Austrália, Reino Unido): achou a versão
+  canadense (4.527 views) e a britânica (71.886), em 3 s.
+
+## App enxuto, página do canal e o radar pelo título exato (2026-10-14, décima leva)
+
+- **Radar de países pelo título exato** (pedido do usuário: "buscar o título exato no outro país, só sem os
+  números"): na mesma língua do título vai o próprio título sem números; em outra língua, a tradução fiel
+  (`ia.traduzir_exato`, sem adaptar lugar nenhum), também sem números. Saíram a adaptação da ideia a cada país e o
+  filtro de "vídeo de outro país".
+- **Menu enxuto**: Meu trabalho (Início, Meus canais, Roteiro), Descobrir (Explorar, Procurar nicho, Vídeos que
+  estouraram), Ferramentas (Extensão, Bloqueados, Administração). Em alta, Grupos, Top 30, Salvos, Novidades e Medir
+  canal saíram do menu (os endereços continuam funcionando).
+- **Meus canais**: dois botões grandes, "Trabalhar com um canal" (os canais em cartões, com o que falta em cada um) e
+  "Adicionar canal" (Google ou só o @). Escolher o canal abre **a página do canal** (`#/canal/ID/aba`) com as abas
+  Ideias, Treinar algoritmo, Radar de países (o radar daquele canal) e Métricas (Studio e últimos vídeos). Sem treino,
+  a página abre na aba do treino. Os endereços antigos (`#/ideias-canal`, `#/treino`, `#/radar-paises`) levam para lá.
+- **Início**: faixa vermelha com o "Olá", os dois botões principais e os números; os canais em cartões; "Como
+  funciona" em 6 passos; e o mapa do app em cartões grandes.
+
+## Azul, Alerta e thumbnail no Roteiro (2026-10-14, décima primeira leva)
+
+- **Azul como cor principal** (`--vermelho` no CSS virou #2f6bff, o nome ficou para não mexer em tudo) e o vermelho
+  (`--detalhe`) nos detalhes: avisos, números dos passos, o ⊘, o 💡, a borda das fotos dos canais.
+- **Alerta** (`alertas.py`, Descobrir → Alerta): canal com menos de 4 mil inscritos, sem rosto, dos EUA (país EUA ou
+  sem país, e títulos em inglês: um canal "EUA" com títulos em russo ficou de fora) e 20 mil ou mais por vídeo ou um
+  vídeo com 100 mil ou mais. Os novos vêm primeiro, com o selo "novo"; abrir a página marca como vistos
+  (`alertas_vistos`). No menu, o Alerta fica com um **ponto verde pulsando** quando há canal novo (conferido ao abrir e
+  de 5 em 5 minutos). Hoje: Moments survival (963 inscritos, um vídeo com 228 mil) e Rare Kind (2.220, 272 mil).
+- **Thumbnail no Roteiro** (`thumb.py`, tabela `thumb_projetos`): ao lado da ideia, a thumbnail do vídeo de referência;
+  "Montar o prompt" descreve a capa pelo modelo de visão gratuito (guardado) e monta o prompt do projeto escolhido
+  (campos {titulo}, {referencia}, {canal}), com "Copiar prompt" e "Abrir no Gemini". Projetos de thumbnail por canal ou
+  para todos, como os estilos do roteiro. O Roteiro ganhou o "Para qual canal?". A extensão que cola o prompt no
+  Gemini fica para depois.
+
+## Visual da Apple e cores do app (2026-10-14)
+
+- Fonte do sistema, fundo cinza-claro com cartões brancos, cantos grandes, sombra suave, menu de vidro fosco e botões
+  em pílula. As cores vêm de variáveis no fim do `estilo.css` (`--acento` é a cor de destaque, que pinta tudo).
+- Botão **Cores** no canto de cima, à direita: 10 cores prontas, uma cor livre e o modo Claro ou Escuro. Fica guardado
+  no navegador de cada pessoa (`radar:cor` e `radar:tema`).
+- A aba da borda direita mostra o nome "Ideias salvas" do lado de fora, com a contagem.
+
+## Botão Radar em cada vídeo e abas de canal na direita (2026-10-14)
+
+- Cada vídeo tem **📡 Radar** entre "Salvar ideia" e "Trabalho". Ele procura o título, sem os números, traduzido para
+  a língua de cada país, e desenha um radar: verde perto do centro = ninguém fez ainda, vermelho fora = já fizeram
+  (forte com 100 mil views ou mais, médio com 20 mil, fraco abaixo). Embaixo, um cartão por país; clicar mostra os
+  vídeos achados. Canal sem radar próprio usa 11 línguas padrão (EUA, Brasil, Espanha, França, Alemanha, Itália,
+  Polônia, Turquia e, desde 2026-11-03, Holanda, Japão e Coreia do Sul; japonês e coreano são comparados por pares de
+  letras, já que não separam as palavras como as línguas latinas), `projeto_id` 0 em `radar_paises.conferir`. Cada país gasta uns 101 de cota; fica guardado 7 dias.
+- A borda direita tem uma aba por canal, com a foto e o nome escrito de pé; clicar abre as ideias salvas daquele canal.
+
+## 🎯, inscrever no algoritmo, placar por país e cores (2026-10-14)
+
+- **🎯 em cada vídeo**: curtida para o algoritmo de um canal seu ("quero ideias assim"). As palavras do título ganham
+  peso 2 nas ideias daquele canal (`radar/alvos.py`, tabela `alvos`, somadas em `treinamento.pesos`). Clicar de novo desfaz.
+- **+ Inscrever** (no dono de cada vídeo e nos cartões de canal): o canal inteiro entra no algoritmo; as palavras dos 15
+  vídeos mais vistos dele pesam 0,4 e os vídeos dele que estouram sobem 2 pontos nas ideias. Ao inscrever, o canal é
+  medido em segundo plano (tabela `canais_inscritos`). Fora da página de um canal, o site pergunta qual canal ensinar.
+- Passar o mouse mostra a explicação curta (`data-dica`).
+- **Oportunidade por país** no lugar do radar circular (que ficava igual ao do concorrente): nota de 0 a 100 por país
+  (livre 100, menos 8 por vídeo quase igual, no mínimo 70; feito fraco 55; médio 30; forte 10), em barras, com a
+  melhor aposta em destaque.
+- Cores: principal e secundária (`--acento`, `--acento2`), aparência clara, cinza ou escura; botões sempre pintados
+  (texto branco); barra colorida à esquerda dos blocos (principal nos de trabalho, secundária nos de descoberta).
+
+## Correção do radar de países e ideias novas (2026-10-14)
+
+- O radar dizia "ninguém fez" no Brasil para "15 Bizarre Animals from Papua...", que já existia em português. Três causas:
+  a busca ia com a frase inteira traduzida (o YouTube devolvia outra coisa); a conta de parecido media o título achado
+  e não a ideia; e só os 15 primeiros resultados eram olhados. Agora: busca pelas palavras do assunto
+  (`palavras_da_busca`), conta pela ideia com a raiz das palavras (`mesma_ideia`, 60% = mesma ideia, 40% = parecido),
+  vídeo em outra língua não conta (`na_lingua`) e 50 resultados por país (a busca custa 100 de cota com 15 ou com 50).
+  Casos em `tests/test_radar_paises.py`.
+- Nas ideias do canal, o Aleatório saiu: o **🔄 Buscar ideias novas** procura no YouTube pelo que a pessoa ensinou ao
+  algoritmo (🎯, treino e canais inscritos, `perfil._sementes`) e mostra as novas em cima. Cada clique busca de outro jeito.
+- O 🎯 fica ao lado do Inscrever, na linha do canal. Os enfeites que eram vermelho fixo seguem a cor secundária.
+
+## Radar de países: segunda correção e o 🎯 no treino (2026-10-14)
+
+- "15 Rarest and Most Beautiful Cat Breeds..." dava o Brasil como livre, e nos EUA os pássaros ("15 Rare Birds So
+  Beautiful You Won't Believe They're Real") contavam como a mesma ideia. Agora a comparação (`mesma_ideia`):
+  - pela raiz sem plural nem gênero (`_raiz`: gato e gatos, raras e raros);
+  - palavras de 3 letras contam ("cat", `palavras`);
+  - palavra de isca (`ISCA`: believe, real, mundo, bonitos, raros...) vale metade;
+  - o mesmo número do título (o 15) soma 0,2, só quando o assunto já bate pela metade. A busca segue sem números.
+- O 🎯 e o + Inscrever também entram no **Treinar algoritmo** do canal (`alvos._no_treino`): o vídeo curtido vira
+  escolhido e o canal inscrito vira referência; desmarcar tira.
+
+## O radar de países saiu do site e foi para a extensão (2026-10-14)
+
+- No site, cada 📡 gastava ~800 da cota (uma busca de 100 por país) e a busca da API via só 50 resultados, numa ordem
+  diferente da do YouTube. A cota de 10.000 acabava com 8 cliques mais o garimpo.
+- Agora o **🌍 Oportunidade por país** fica no painel do vídeo na extensão (0.3.0). O servidor traduz o título
+  (`radar_paises.preparar`, Groq, guardado) e a extensão abre a busca do YouTube de cada país
+  (`/results?search_query=...&gl=BR&hl=pt`), lendo o `<script id="yt-initial-data">` da página. O servidor julga os
+  resultados com as mesmas regras (`radar_paises.julgar`). Não gasta cota e funciona com a cota do dia acabada.
+- **Três modos** (2026-11-03, no jeito do "Método Malandro" da extensão Dotti Finder, estudada com o REA), escolhidos
+  em botões na vista do Método Fantasma e lembrados no `chrome.storage` (`fantasmaModo`):
+  - **Raiz**: o título traduzido para cada língua; o lugar do título continua nele.
+  - **Adaptado ao país**: o Groq reescreve o título trocando o lugar (e o povo, as cidades, os estados) pelo país de
+    cada língua ("Supermercados do Canadá que faliram" vira "Supermarkets in the United States that went bankrupt");
+    título sem lugar ganha o país ("Animais bizarros do Brasil que..."). `ia.regionalizar`, guardado em
+    `troca-radar:<modo>:<título>`.
+  - **Premium**: só os países de língua inglesa (`radar_paises.PREMIUM`: EUA, Reino Unido, Canadá, Austrália, Nova
+    Zelândia, Irlanda), onde o RPM é mais alto: o título em inglês, com o país trocado pelo de cada um; o país do
+    próprio título fica fora.
+  - Com o país trocado, o vídeo achado só conta se falar do país (as "marcas" que o Groq dá: "USA", "American"...): um
+    vídeo dos EUA achado na Austrália não diz que a Austrália já fez. Se o título original já cita o país, ele fica
+    sem troca.
+- Regras do placar (`radar_paises.julgar`), para os três modos: cada país tem duas buscas, a normal e a ordenada por
+  views (`&sp=CAMSAhAB`, acha o vídeo grande que a relevância esconde); não contam o mesmo canal do vídeo aberto nem
+  vídeos de mais de um ano (`velho`, nas 11 línguas); "fraco" é o achado com menos de 5% das views do vídeo aberto
+  (sem elas, o corte fixo de 20 mil).
+- Quando a busca termina, cada país já mostra o vídeo que foi julgado igual (o de mais views), sem precisar clicar;
+  clicar no país mostra todos os achados.
+- Saíram do site: o botão 📡 dos vídeos, a aba Radar de países do canal e a etiqueta "radar" dos canais.
+  O código antigo (`conferir`, `/api/radar-paises/*`) ficou, sem botão.
+
+## Saíram as ideias para os nossos canais (2026-10-14)
+
+- Pedido do usuário: "ideias de vídeos para nossos canais vamos retirar, vamos deixar apenas os tokens para nichos".
+  A cota do YouTube fica para achar nichos (garimpo, Procurar nicho, Alerta, Explorar).
+- Saíram do site: a aba Ideias e a aba Treinar algoritmo do canal, o 🎯, o + Inscrever e o 🔄 Buscar ideias novas.
+  A página do canal ficou só com os números, os últimos vídeos e as métricas do Studio. As rotas antigas
+  (`#/ideias-canal`, `#/treino`) levam para o canal. O código do treino e dos alvos ficou no servidor, sem botão.
+- Ficaram: o 💡 Salvar ideia e o painel da direita (não gastam cota e levam ao Roteiro).
+
+## Garimpo focado em CPM alto e sem lixo (2026-10-14)
+
+- Antes: 20 nichos em português, inglês e espanhol, sem país. Dos 1.687 canais vistos, 1.546 foram descartados e só
+  uns 9 serviam ao Alerta (História, Animais e Vida Selvagem).
+- Agora (`garimpo.TERMOS` e `CPM`): 15 nichos dark de CPM alto ou médio (finanças, economia, negócios, tecnologia,
+  direito, ciência primeiro), só em inglês e no YouTube dos EUA (`regiao=US`, `idioma=en`). Saíram desenho, contos,
+  boxe, futebol, religião, mitologia e curiosidades. Canal de fora de US/GB/CA/AU/NZ/IE nem é medido.
+- Cada termo guarda quanto rendeu (`buscas_feitas.vezes`, `total`, `zeros`): os que trazem canal vão primeiro, e o que
+  deu 0 em 2 buscas seguidas fica 30 dias de lado. Termos aprendidos só nos nichos da lista e nunca em pt ou es.
+  As procuras da pessoa ("Procurados") seguem sem país.
+
+## Nichos por CPM e engajamento, e o filtro de risco (2026-10-14)
+
+- `garimpo.NICHOS`: 19 nichos com (CPM mínimo, máximo, engajamento 1 a 3), das pesquisas públicas de 2026. Entraram
+  carros, imóveis, mistério e religião (CPM baixo, mas audiência fiel). `prioridade` = CPM médio com até 50% a mais
+  pelo engajamento; cada rodada dá mais buscas a quem tem prioridade maior (finanças 3, direito 2, religião 1).
+- `radar/risco.py`: pelos títulos, marca canal reaproveitado (compilação, clipes, reação, música acelerada), feito em
+  série (80% dos títulos no mesmo molde), infantil ou sensível. Esses canais não entram no Radar pelo garimpo nem no
+  Alerta. Dos 145 canais do Radar, 5 seriam marcados. Testes em `tests/test_risco.py`.
+
+## Regras de mercado para todas as procuras (2026-10-14)
+
+- `radar/mercado.py`: países de língua inglesa (EUA, Reino Unido, Canadá, Austrália, Nova Zelândia, Irlanda), com os
+  EUA em 2 de cada 3 buscas (`regiao`), e os nichos irrelevantes (`IRRELEVANTES`: CPM baixo; e subnicho de histórias
+  narradas, menos em religião, crimes reais, história, mistério e guerra, onde a história é real).
+- Vale no garimpo (nicho fora da lista entra com prioridade 8, só os irrelevantes não), no Procurar nicho (termo em
+  português ou espanhol é traduzido para o inglês), no Alerta (EUA primeiro) e em todas as listas (`gosto.Filtro`).
+- Limpeza feita: 31 canais saíram do Radar (irrelevantes ou com risco); ficaram 114.
+
+## Criar: Roteiro com o canal, Thumbnail com o Claude e o Assistente (2026-10-15)
+
+- Menu: Meu trabalho (Início, Meus canais), **Criar** (Roteiro, Thumbnail), Descobrir, Ferramentas.
+- **Produção do canal** (`radar/producao.py`, tabela `canais_config`, card na página do canal): perfil da fábrica (a
+  voz), estilo do roteiro, tempo, língua, estilo da thumbnail e IA de imagem. Sem nada salvo, o perfil da fábrica com
+  o mesmo `nome:` do canal entra sozinho (João o Lobo → canal-joao-o-lobo, voz Davi Andrei).
+- **A língua do canal é a da voz dele** (`producao.lingua_da_voz` / `conferir_lingua`, 2026-11-17): o `idioma_da_voz`
+  do perfil da fábrica manda, e gravar outra língua no canal ou pedir um vídeo do canal em outra língua dá erro, com
+  o jeito certo no recado (escolher antes uma voz naquela língua). A língua vale por cima das instruções do agente:
+  o Claude escreve nela e o título vem traduzido para ela. Foi assim que o canal japonês 日本の革新, com "inglês"
+  gravado sem querer no passo a passo, fez os dois primeiros vídeos em inglês. Na primeira pergunta do passo a passo
+  a língua de agora virou cartão, para passar dela não exigir clicar em português, inglês ou espanhol.
+- **Roteiro**: escolher o canal preenche estilo, tempo e língua e mostra a voz; o envio à fábrica já marca o perfil dele.
+  "Salvar como padrão do canal" guarda as escolhas. A thumbnail saiu daqui para a aba própria (botão 🖼 Fazer a thumbnail).
+- **Thumbnail**: o pedido em cima ("tire o texto"), o canal, o estilo e a IA; o Claude escreve o prompt
+  (`producao.prompt_da_thumb`, com a descrição da referência pelo modelo de visão grátis). ChatGPT abre com o prompt
+  escrito (`?q=`) e a thumbnail de referência copiada para colar; Gemini abre com o prompt copiado.
+  `/api/thumb/imagem/ID` traz a thumbnail pelo próprio site (para poder copiar).
+- **Assistente** à direita do Roteiro e da Thumbnail: o Claude, com o canal dele à parte (os dados do canal vão
+  junto); atalhos de regionalizar, mais chamativo, inglês e descrição; a conversa fica no navegador, por canal.
+
+## Correção: Roteiro como antes e a aba Título (2026-10-15)
+
+- O usuário não quis a aba Thumbnail separada nem o Assistente no Roteiro. O Roteiro voltou ao layout de antes, com a
+  thumbnail à direita (mais larga, `main` até 1680 px); dentro dela, o pedido, o estilo do canal, o ✨ Criar o prompt
+  com o Claude e o Enviar para o Gemini ou ChatGPT. O canal ainda puxa a voz, o estilo e o tempo.
+- Nova aba **Título** (Criar → Título, `tituloTela`): o link e o título do vídeo (a extensão vai mandar para cá
+  depois), o chat com o Claude ocupando a direita, o botão "usar" em cada título sugerido (o que está entre aspas,
+  4 palavras ou mais) e **Levar para o roteiro**, que abre o Roteiro com o título, o link, o canal e a thumbnail.
+  Conferir no YouTube se o título já foi feito é manual.
+
+## Sem a aba Título; ChatGPT na lateral; tudo ajustável no Roteiro (2026-10-15)
+
+- A aba Título saiu (o usuário não gostou). Menu: Meu trabalho = Início, Meus canais e Roteiro (a thumbnail dentro dele).
+- **ChatGPT na lateral**: o ChatGPT e o Gemini bloqueiam ser abertos dentro de outro site (iframe), então a aba
+  verde "ChatGPT" na borda direita abre o ChatGPT de verdade numa janela encostada no lado direito da tela
+  (`abrirLateral`, sempre a mesma janela "radar-lateral"), já logado na conta da pessoa. O Enviar da thumbnail usa ela.
+- **No Roteiro**: "+ Adicionar um canal novo" na lista de canais (mede pelo @ ali mesmo) e "⚙ ajustar tudo", que abre
+  a produção inteira do canal (voz, estilos, tempo, língua, thumbnail, IA) com o Salvar.
+
+## Organização de produção, Acompanhar, Resultados e o envio que cola sozinho (2026-10-15)
+
+- Menu no modelo do Robô do Dotti (sem copiar o visual): Início; **Produção** (Produzir = Roteiro, Acompanhar,
+  Resultados); Descobrir; **Configuração** (Canais, Extensão, Bloqueados, Administração).
+- **Canal** só com o que é do roteiro: língua, voz (perfil da fábrica) e **agente de roteiro** (o antigo "estilo").
+  Criado em Configuração → Canais, e também dá para criar e ajustar no Produzir. Saiu o "Sugerir títulos".
+- **Acompanhar** e **Resultados** (`radar/fabrica_api.py`): leem o editor da fábrica (porta 8080, com o
+  FABRICA_TOKEN do .env da fábrica, que fica só no servidor). Acompanhar atualiza a cada 5 s e tem ▶ Produzir /
+  ↻ Continuar (a rota "retomar" da fábrica: primeiro a estimativa, e só com o sim da pessoa produz). Resultados mostra
+  o custo real de cada vídeo (por categoria e por minuto), o total, ▶ Assistir (o final.mp4 pelo Radar) e 📁 Abrir
+  pasta (a da entrega). No Produzir, depois de enviar à fábrica, há o ▶ Produzir agora.
+- **Enviar para o ChatGPT/Gemini com o prompt e a thumbnail**: com a extensão 0.4.0, o site guarda o envio
+  (`/api/envios`, 10 min, uma vez só) e abre a página com #radar-envio=ID; `extensao/colar.js` pega o prompt e a
+  imagem e cola na caixa de mensagem (evento de colar; reserva: o campo de arquivo). `extensao/site.js` avisa o site
+  que a extensão existe. Sem a extensão, segue o jeito antigo.
+
+## Resultados por canal, perguntas do canal e menos botões (2026-10-15)
+
+- Resultados agrupados por canal (o canal vem do `nome:` do perfil da fábrica do vídeo), com o gasto de cada canal.
+- A produção do canal virou perguntas, uma por vez, só na primeira vez (língua, voz, agente de roteiro); depois
+  é uma linha simples com "editar". No Produzir, canal sem configuração abre as perguntas sozinho.
+- Sem abas ao lado dos vídeos: "💡 Ideias" e "💬 ChatGPT" viraram botões pequenos no canto de cima, junto do Cores.
+  Os botões dos cartões de vídeo ficaram pequenos e discretos.
+
+## Canal ligado à fábrica: vozes com prévia, agente e tempo (2026-10-15)
+
+- Menu de volta à organização do vídeo do usuário: Meu trabalho (Início, Canais, Roteiro, Acompanhar, Resultados),
+  Descobrir (Alerta, Explorar, Procurar nicho, Vídeos que estouraram), Ferramentas (Extensão, Bloqueados, Administração).
+- A configuração do canal ficou maior e com 4 perguntas: língua; **voz** (a biblioteca da GenAI Pro pela fábrica,
+  `/api/fabrica/vozes` → `GET /api/vozes/genaipro` da fábrica, com ▶ para ouvir a prévia; escolher chama
+  `POST /api/canais` da fábrica, que cria perfis/canal-NOME.yaml com a voz, e o Radar guarda esse perfil);
+  **agente de roteiro** (com "Criar um agente novo" ali mesmo); **tempo dos vídeos**.
+
+## Roteiro em passo a passo (2026-10-15)
+
+- `trabalho()` virou 5 passos com a faixa em cima (como o "Como funciona" do Início): 1 Referência (link e título,
+  com "usar o título da referência"); 2 Canal e agente (o canal traz voz, língua, agente e tempo; canal novo ou sem
+  configuração abre as perguntas ali; agente, língua e tempo podem mudar só neste vídeo); 3 Roteiro (o Claude escreve,
+  depois o editor); 4 Thumbnail (Sim / Não, pular; o sim abre o painel com o prompt do Claude); 5 Enviar (perfil da
+  fábrica do canal, Enviar e ▶ Produzir agora). Ao lado, sempre: o ponto de partida (a thumbnail da referência) e a
+  configuração deste vídeo. "Abrir" num roteiro feito começa no passo 3.
+- A configuração do canal, depois de feita, é um cartão grande com as 4 respostas e o Editar.
+- Os cartões de vídeo perderam a barra colorida da esquerda.
+
+## Sem barras coloridas e a identidade escura com marrom-dourado (2026-10-15)
+
+- As "abas" que o usuário pedia para tirar eram as barras coloridas na esquerda dos cartões: saíram de todos
+  (cartões, blocos, avisos, perguntas, resultados, vídeos) e do título das páginas. Não recolocar.
+- Identidade padrão: tema escuro com o marrom-dourado `#a2845e` (`IDENTIDADE` no app.js), aplicada uma vez a quem
+  já usava (marca `radar:identidade-2`); o botão Cores continua trocando.
+
+## Produzir centralizado, 4 passos, sem fazer thumbnail (2026-10-15)
+
+- Saiu o passo da thumbnail (o prompt do Claude e o envio ao Gemini/ChatGPT ficam no código, sem botão). Ao lado
+  fica só a thumbnail da referência, com Copiar e Baixar.
+- `trabalho()`: coluna central de 1180 px, título "Produza seu próximo vídeo", os 4 números (fábrica ligada,
+  produzindo agora, prontos, roteiros) e 4 passos: Canal e conteúdo (o canal configura tudo, com o cartão grande dele,
+  e o link e o título), Ajustes (só se quiser mudar), Roteiro e Revisão (enviar e ▶ Produzir). Roteiros feitos ficam
+  recolhidos embaixo.
+
+- (2026-10-15) Passo 1 do Produzir: primeiro o link e o título; depois o canal em cartões (foto, nome, voz e língua,
+  ou "ainda não configurado", e o Adicionar canal), no lugar da lista. A coluna do centro tem 900 px e o ponto de
+  partida fica preso no canto direito da tela quando ela tem 1760 px ou mais (abaixo disso, vai para baixo).
+
+## Sem Ajustes, Resultados com filtro e arrastar, menu fechado e botões que mudam o fundo (2026-10-15)
+
+- Produzir em 3 passos (Canal e conteúdo, Roteiro, Revisão): o agente, a língua e o tempo vêm só do canal.
+  O ponto de partida ficou maior (390 px), mais para dentro e preso no canto em telas de 1860 px ou mais.
+- Resultados: filtro por canal (chips em cima) e arrastar o cartão para o bloco ou o chip de outro canal
+  (`/api/resultados/{nome}/canal`, tabela `resultado_canal`, vale por cima do canal do perfil da fábrica).
+  Os canais do Radar aparecem mesmo vazios, para receber vídeos.
+- Menu: começa só com os três grupos (Meu trabalho, Descobrir, Ferramentas); clicar abre as opções (`menu-aberto2`).
+  O grupo em que a pessoa está fica com o fundo da cor.
+- Regra dos botões: selecionado ou com o mouse em cima, muda o FUNDO para a cor do app e a letra fica branca. A cor
+  da letra nunca muda sozinha (menu, chips, botões, cartões de canal, opções, passos).
+
+## Resultados em linhas, shorts, publicado e temas (2026-10-15)
+
+- Resultados: centralizado (1100 px), abas de canal em cima (dá para arrastar o vídeo para elas), e cada vídeo numa
+  linha: capa, título, canal, data e duração, ✓ Publicado (do youtube.json da fábrica, ou "Marcar como publicado" com
+  o link, tabela `resultado_publicado`) com as views e curtidas (`/api/resultados/views`, 1 de cota a cada 50), os
+  shorts ▶ 1 ▶ 2 ▶ 3 (shorts/S01.mp4, `/api/producoes/{nome}/shorts/{sid}`, abre em pé) e o custo à direita.
+- Cores: sem a cor secundária (a mesma cor em tudo); cinza mais escuro; tema Preto e branco (fundo preto, botões
+  brancos com letra preta).
+- Na página do canal, a conexão com o YouTube virou um passo a passo explicado.
+
+## A página do canal: painel, agenda, descrição e shorts, concorrentes (2026-10-15)
+
+- `radar/canal_painel.py` e `/api/canal-painel/{canal}` (a "fila do canal" o usuário não quis):
+  - Painel: inscritos, views por vídeo, gasto na fábrica dos vídeos prontos do canal e custo por mil views (dos
+    publicados), e os 5 vídeos que mais renderam.
+  - Agenda: vídeos por semana e dias; aviso quando o último vídeo passou de 1,5 vez o intervalo da agenda.
+  - Descrição e shorts: `publicacao.texto_fixo` e `shorts.ativo/quantidade` gravados no perfil canal-*.yaml da
+    fábrica pelo Python da própria fábrica (o Radar não tem yaml); nunca no perfil base.
+  - Concorrentes: até 5 por canal (pelo @, medidos com uns 3 de cota); 🔥 quando um vídeo deles fez 3x o normal nos
+    últimos 14 dias.
+
+- (2026-10-15) Página do canal: saíram a agenda de postagem e a descrição e shorts (o código do perfil da fábrica
+  ficou, sem botão). No lugar, **Prontos para postar** (`canal_painel.para_postar`: os vídeos prontos do canal ainda
+  não publicados, com o título, a descrição e as tags do publicacao.json da fábrica): 📤 Postar no YouTube abre a
+  tela de enviar vídeo do YouTube Studio do canal (studio.youtube.com/channel/ID/videos/upload), abre a pasta da
+  entrega e copia o título; Copiar descrição e tags; ✓ Já postei marca com o link. Concorrentes na coluna da direita.
+
+- (2026-10-15) Prontos para postar: cada vídeo numa linha com a thumbnail grande (300 px, clica e assiste), os
+  shorts ao lado (cartões em pé com o quadro do próprio short, clica e assiste), Assistir, Copiar título, Copiar
+  descrição, Postar no YouTube e, no canto, ✓ Postei tudo: marca o vídeo e os shorts como postados sem pedir link
+  (`resultado_publicado.video_id = "-"`, que os Resultados mostram como ✓ Publicado sem link e sem views).
+
+- (2026-10-15) Preto e branco: o fim do estilo.css tem um bloco "preto e branco: gerado" com a letra preta para todo
+  seletor que tem fundo var(--acento|verde|detalhe) (refazer o bloco quando entrar botão novo com fundo da cor);
+  os botões de contorno ficam com a letra clara. Conferido em 9 telas: nenhum texto da mesma cor do fundo.
+- Prontos para postar: embaixo do "Postei tudo", uma linha para o vídeo e uma para cada short, com 📤 Postar (Studio
+  na tela de enviar, pasta da entrega, título do item copiado) e ✓ Postei / desfazer (tabela `resultado_postado`).
+  O vídeo só sai da lista quando ele e todos os shorts estão postados.
+
+## Sócios pela internet, só olhando (2026-10-15)
+
+- Endereço pensado: radar.bbnews.cc, um nome a mais no túnel da Cloudflare do editor, apontando para localhost:8400.
+  Quem vem pelo túnel sempre faz login (o túnel traz o cabeçalho cf-connecting-ip); conta nova só por convite e já
+  abre tudo (plano pro). Os convites ficam em `finder/convites-socios.txt` (fora do Git).
+- `dono_da_fabrica`: produzir, enviar para a fábrica, trocar a voz do canal e gravar no perfil da fábrica só para a
+  administração. "Abrir pasta" recusa quem vem de fora (abriria no computador da fábrica). O resto (Descobrir,
+  Resultados, Acompanhar, assistir, roteiro) eles usam. A cota do YouTube e a assinatura do Claude são as do dono.
+
+- (2026-10-15) Página do canal em duas colunas: à direita, fixo, o **Desempenho do último vídeo** no modelo do card do
+  Studio (`studio.ultimo_video`, `/api/canal-painel/{canal}/ultimo`, guardado 15 min): views, comentários, curtidas,
+  posição entre os últimos 10 (2 de cota) e, com o canal conectado ao Studio, impressões, taxa de cliques da
+  thumbnail e duração média (Analytics, filtro video==ID; a API precisa estar ativada no projeto do Google).
+- No cartão da configuração do canal, "editar o agente" (ou "criar um agente") abre o nome e as instruções do agente ali.
+
+## O que o Robô do Dotti tinha e o Radar ganhou (2026-10-18)
+
+Pedido do usuário: "acrescentar tudo que tem no Robô Dotti que falta no nosso Radar, como a quantidade de IA e todo o
+processo", a janela de criar vídeo e "uma aba lá embaixo para as APIs". Feito do zero, no visual do Radar. Desenho em
+`docs/superpowers/specs/2026-10-18-robo-no-radar-design.md`, plano em `docs/superpowers/plans/2026-10-18-robo-no-radar-a-d.md`.
+Menu: Meu trabalho ganhou **Custos**; Ferramentas ganhou **Integrações** (só a administração).
+
+- **Integrações** (`radar/integracoes.py`, `#/integracoes`): saldo de cada serviço (OpenRouter e Kie pela API deles,
+  GenAI Pro pela fábrica, a cota do YouTube de hoje; Groq, Pexels e Pixabay grátis; Gemini com "Informar saldo") e um
+  cartão por chave: testar (uma chamada barata, guardada 1 h), trocar, acrescentar (YouTube, Groq, Gemini e Pexels
+  aceitam várias) e remover. A tela só recebe os 4 últimos caracteres. As do Radar ficam no `.env` onde já estão (chave
+  nova vai para o `.env` do Radar); as da fábrica vão pela rota dela (`POST /api/config/chaves`), que só aceita os nomes
+  que conhece: o OpenRouter (`OpenRouter_key`), as chaves extras numeradas e remover são gravados direto no `.env` da
+  fábrica e valem quando ela reinicia (a tela avisa). O `.env` guarda os comentários e o fim de linha. Recusa quem vem
+  pelo túnel.
+- **Nova produção** (botão no topo ou **Alt+N**; o Ctrl+N o Chrome não deixa): título, referência (opcional), canal
+  em chips (traz agente, idioma e tamanho), estilo do roteiro com o "Ideal para…" (campo novo do agente), idioma,
+  tamanho em **caracteres** com os atalhos de 8 a 30 min (pela velocidade medida da voz do canal; 5,9 caracteres por
+  palavra), "O Claude escreve" ou "Já tenho o roteiro", nicho, observação, e "Parar para eu revisar". À
+  direita, a prévia com o custo provável (média de US$/min dos vídeos entregues do canal). **Salvar na Entrada** guarda
+  sem gastar; **Criar e começar** é o sim para gastar. O Produzir de 3 passos continua.
+- **Fila** (`radar/fila.py`, tabela `producoes_fila`): entrada → na fila → escrevendo → sua vez (revisão) → enviando →
+  produzindo → entregue, ou erro. Um **vigia** no servidor (a cada 20 s) escreve o roteiro (não ocupa vaga), manda para a
+  fábrica e chama a produção já confirmada quando há vaga: o limite "N ao mesmo tempo" (1 a 8, padrão 2, no topo do
+  Acompanhar) conta os vídeos da fila e os da fábrica rodando fora dela. Fábrica desligada só faz esperar; servidor
+  reiniciado no meio devolve o pedido para a fila.
+- **Postar no dia marcado** (`radar/agendar.py`, tabela `agendamentos`, `POST /api/fila/ID/agendar`, 2026-11-17): o
+  pedido da fila pode sair marcado para subir no canal. Sem dia, sobe assim que fica pronto; com dia (ISO na hora do
+  canal) sobe privado com o `publishAt`, e o YouTube publica sozinho com o Radar e o computador desligados. O vigia
+  da fila cuida disso a cada volta e o Acompanhar mostra "sobe em …" no pedido. **Para subir, o canal precisa estar
+  conectado na fábrica** (`http://127.0.0.1:8080/api/youtube/conectar`, um login do Google por canal: o token fica
+  preso ao canal escolhido na tela de consentimento); sem isso fica o erro no pedido e o Radar tenta de novo a cada
+  15 min, então conectar o canal já faz o vídeo subir sozinho.
+- **Acompanhar novo**: à esquerda os blocos Precisa de você, Produzindo, Na fila, Entrada e Parados na fábrica (busca
+  e canal); à direita o vídeo com o anel, a etapa e as abas **Acompanhamento** (as 6 etapas com o tempo de cada uma,
+  do "Tempo por etapa" da fábrica), **Diagnóstico** (`radar/diagnostico.py`: de onde vieram as cenas, real × imagem de IA
+  × Animation IA, pelo `midia.fonte` do `cenas.json`; confere com a linha "Origem" da fábrica, 86/71/51 no vídeo dos
+  gatos; e o log com filtro e Baixar log: erro que a fábrica contornou, "seguindo com…", conta como aviso), **Arquivos**
+  (assistir, legenda .srt, pasta) e **Tags e descrição** (da fábrica, com Copiar e Gerar). Sua vez: o roteiro para ler,
+  salvar e aprovar. Confirmações na própria página. Aviso no computador quando um pedido fica pronto, para na revisão
+  ou dá erro.
+- **Custos** (`radar/custos.py`, `#/custos`): total do período, média por vídeo e por minuto, por provedor, por tipo e
+  por canal, e a lista com o detalhe. O total vem da rota `/custos` da fábrica (o mesmo dos Resultados): o
+  `custos_reais.json` só tem narração e imagens; texto, visão e o juiz a fábrica soma pelos `modelos_de_texto`.
+- O "máximo de IA" na Nova produção saiu (pedido do usuário): a Parte E não será feita; a contagem real × IA do
+  Diagnóstico continua.
+- **Ajustes de tela** (pedido do usuário): o Início sem o "Olá" e sem os números, com os canais em cartões grandes
+  (foto, inscritos, língua e voz, Abrir canal e + Fazer vídeo); na página do canal, o **Prontos para postar** logo
+  abaixo do cartão do agente; o Roteiro centralizado e maior (até 1180 px, letra 16 px), com a barra Voltar/Próximo
+  presa embaixo da tela.
+
+## Descobrir para achar nicho: filtros grandes, créditos do YouTube (2026-10-19)
+
+- **Menu**: "Canais" saiu de Meu trabalho. A página de cada canal (`#/canal/ID`) continua, aberta pelo Início (que
+  fica marcado no menu), e o "+ Adicionar canal" do Início segue igual.
+- **Filtros grandes** em todas as páginas que têm filtro (`.selects` no `estilo.css`): a linha ocupa a largura toda,
+  em grade, com caixas de 50 px de altura e letra de 15 px; no celular, 2 por linha.
+- **Aleatório** saiu do Explorar (mudar um filtro já sorteia outra leva) e do Vídeos que estouraram (a ordem
+  "Aleatório" continua no filtro de ordem). O 🔀 do Procurar nicho ficou.
+- **Painel dos créditos do YouTube** nas 4 páginas do Descobrir (`painelCota` e `GASTOS` no `app.js`): fica preso ao
+  lado, com a cota de hoje (livre, usado, total, chaves) e quanto cada ação daquela página gasta (busca no YouTube 100
+  a 250; filtrar, salvar e levar ao Roteiro 0). Lê a rota nova `GET /api/cota` (qualquer conta; a `/api/admin/cota`
+  é só do admin) e se atualiza depois de cada busca no YouTube. Abaixo de 1000 px vai logo depois do título.
+- **Vídeos que estouraram**: 8 vídeos por vez (duas linhas de 4), com "← Anterior" e "Próximo →" presos embaixo à
+  direita da tela no PC (no celular, no fim da lista) (`/api/outliers` aceita `por`, até 60).
+  Ficaram só 4 filtros: língua, nota, data e formato (saíram nicho, tamanho do canal, "só dos meus salvos" e ordem;
+  vale a maior nota).
+- **Cartão de vídeo do Descobrir** (`cartaoVideoGrande`, no Explorar e no Vídeos que estouraram), no jeito do niche
+  finder: capa grande (hqdefault), 4 por linha numa tela de PC, a foto do canal ao lado do título, o nome do canal,
+  views e data, e as pílulas de views por hora e inscritos. Sem fundo de cartão; Salvar ideia e Trabalho embaixo.
+- **Gastar tudo agora** (quadro "Créditos do YouTube" no pé do menu, em todas as páginas): mostra a cota livre de
+  hoje e, para o admin, o botão que roda `garimpo.gastar_tudo` (`POST /api/cota/gastar`). Primeiro roda o garimpo com
+  100% da cota livre (o automático usa 60%); se os termos acabarem antes (cada um só volta depois de 3 dias), faz
+  procuras com termos sorteados dos nichos e jeitos diferentes (`perfil.procurar`) até sobrar menos que uma busca.
+  Enquanto roda, o quadro mostra "Garimpando… X de Y" e se atualiza a cada 5 s. O garimpo de todo dia continua igual.
+  Com o mouse em cima, o botão explica o que faz; ao apertar, abre uma janela no meio da tela (`janelaGastar`) com
+  quantos créditos serão usados, o que o garimpo faz, quanto leva e que as procuras no YouTube param até as 5 h,
+  com "Sim, gastar tudo" e "Cancelar".
+  Embaixo dos créditos, "🕑 Garimpo automático: hoje às 22:39" (23 h depois do último, `ultimo_garimpo` no
+  `/api/cota`), com a explicação no mouse: roda sozinho com 60% da cota, só com o Radar ligado, não recupera o dia.
+- **A extensão guarda os vídeos que estouraram**: `medir.medir_videos` (o que a extensão chama para cada miniatura
+  que aparece no YouTube) põe na tabela `outliers` todo vídeo com 3x o normal do canal ou mais. Eles aparecem no
+  Vídeos que estouraram e nas sugestões dos canais. O canal não entra no Radar por isso (continua sendo o garimpo).
+- **Página do canal mais curta**: saíram o Painel do canal (números e "Os que mais renderam"), os Concorrentes, o
+  Desempenho do último vídeo, as métricas do Studio e a caixa de conectar ao Studio (e o código delas). Ficaram o
+  cartão do canal, a configuração, os Prontos para postar e os últimos vídeos. Embaixo, **Sugestões para este
+  canal**: 8 vídeos que estouraram do banco, do subnicho do canal (ou do nicho, ou de tudo, se não tiver nada), com
+  Anterior e Próximo; não gasta cota. O "← voltar" leva ao Início.
+
+## Extensão 0.5.0: garimpar enquanto navega, sem cota (2026-10-19, fase 1)
+
+Pedido do usuário: tirar o selo das miniaturas e trazer o que o Dotti Finder tem de bom, na nossa versão (só as
+funções; nada de código, texto ou visual de lá). Fase 1 de 3 (2: painel do vídeo com capa, transcrição, tags e
+"Levar ao Roteiro"; 3: dados do canal, monetização, Alt+S e canais novos na página inicial).
+
+- **Sai o selo** da nota e das views por hora em cima de cada miniatura (ele pedia à API: 1 de cota a cada 50 vídeos
+  e uns 3 por canal novo). O 🎯 do treino continua.
+- **Leitor da página** (`extensao/ler.js` + `extensao/leitor.js`, este no world MAIN, antes da página): lê os
+  vídeos do `ytInitialData` e das respostas do `/youtubei/v1/` que o próprio YouTube recebe (busca, início,
+  sugeridos, canal, rolagem): id, título, canal, views, data (de "há 3 dias"), duração. Entende o jeito antigo
+  (`videoRenderer`) e o novo (`lockupViewModel`, com o texto completo no `accessibilityLabel`), em português, inglês
+  e espanhol, com as abreviações ("1,2 mi", "12K", "há 7 h"). Só lê; não muda nenhuma resposta.
+- O `content.js` junta e manda ao Radar (`POST /api/ext/vistos`, `radar/pagina.py`): o vídeo entra no banco (o que
+  já existe só atualiza as views; a data exata da API fica), uma leitura por hora vira a curva, e com o canal
+  conhecido sai a nota; 3x ou mais vai para o Vídeos que estouraram. Canal que o Radar não conhece: a extensão baixa
+  a página de vídeos dele (`/channel/UC.../videos`, 6 por vez, 1,2 s entre um e outro) e manda
+  (`POST /api/ext/canal-lido`): sai o normal do canal (a mesma mediana do `metricas.base`) e, se passar nas regras do
+  garimpo (10 mil por vídeo, 3 a 400 vídeos, até 18 meses, inglês/português/espanhol, sem risco), o canal entra no
+  Radar e o Groq diz o nicho e o rosto depois. Sem saber o primeiro vídeo (mais vídeos do que a página mostra), só
+  entra canal de até 100 mil inscritos, e sem o selo Raro/Épico. Canal lido só é lido de novo depois de 7 dias.
+- **Resumo da busca**: em cima dos resultados, se o nicho está aberto (🟢 canal pequeno estourando, 🟡 estoura em
+  canal maior, ⚪ parado), com vídeos lidos, média e mediana de views, quantos dos últimos 30 dias, quantos com 3x e
+  quantos em canal de até 10 mil inscritos. As notas chegam conforme os canais são lidos.
+- **Vídeos desta página** (botão no canto de baixo): uma janela com tudo que a página mostrou, para ordenar (nota,
+  views, views por dia, canal menor, mais novos) e filtrar (só longos, só canal pequeno, últimos 30 dias). A página
+  do YouTube não muda.
+- **Esconder os Shorts**: no ícone da extensão (prateleiras, cards e o atalho do menu). O ícone também mostra o que
+  foi lido hoje (`GET /api/ext/hoje`): vídeos lidos, quantos estouraram e canais novos no Radar.
+- Teste com páginas de verdade (busca em português e a página de vídeos de um canal): 20 de 20 vídeos com canal,
+  views, data e duração; 3 canais lidos; notas de volta; a cota não mudou. `tests/test_pagina.py`.
+- O painel do vídeo aberto e o da página do canal ainda usam a API (ficam para as fases 2 e 3).
+
+## Extensão 0.6.0: o vídeo aberto (2026-10-19, fase 2)
+
+- **Painel do vídeo sem cota**: os números vêm do player da própria página (`movie_player.getPlayerResponse()`, pedido
+  pelo `content.js` ao `leitor.js` por postMessage): views, duração, tags, descrição e a **data exata** de publicação
+  (a do `microformat`, guardada em UTC). A nota sai do `POST /api/ext/vistos`; o canal, a curva e o "salvo" do
+  `GET /api/ext/painel/{id}` (só o banco). Canal que o Radar não conhece é lido pela página dele na hora. Saíram as
+  curtidas e os comentários (eram da API).
+- **Abas**: Números (nota, views, por hora, publicado, duração, curva, cartão do canal), **Capa** (tamanho real,
+  abrir e copiar), **Transcrição** e **Tags** (copiar). A transcrição sai do botão "Mostrar transcrição" do próprio
+  YouTube: o `leitor.js` clica nele, lê a resposta do `get_transcript` no fetch e fecha o painel do YouTube. Pedir
+  direto ao `get_transcript` dá 400 ("Precondition check failed") e a legenda do player (`timedtext`) vem vazia
+  (testado em 2026-10-19). Cada trecho tem o tempo, que leva o vídeo até ali; "Copiar a fala inteira".
+- **✍️ Levar ao Roteiro**: abre o Radar em `#/trabalho?ref=ID&titulo=...` e o Roteiro já começa com o vídeo de
+  referência. **🖼️ Print do cartão**: monta uma imagem 1280×930 (capa, duração, título, canal, views, idade e a nota)
+  e copia para colar com Ctrl+V. A capa vem pelo `background.js` (`i.ytimg.com` nas permissões), para o canvas poder
+  ser copiado. Continuam: Salvar ideia, Copiar título, Oportunidade por país, Salvar canal e Canais parecidos.
+- **🧪 Provar capa e título** (botão no canto, na página inicial e na busca): escolhe a imagem, o título e o nome do
+  canal, e o cartão aparece como o primeiro vídeo da página, do mesmo tamanho dos outros, só na tela da pessoa (nada
+  é enviado). O × no cartão tira.
+- Conferido no Chrome do usuário (YouTube em tema escuro): painel com as 4 abas, capa 1280 px, 29 tags, print do
+  cartão copiado, e o cartão do "Provar" como o primeiro da página inicial, com 700 px como os outros. As cores do
+  tema escuro do YouTube (`html[dark]`) foram acertadas no `content.css`.
+
+## Extensão 0.7.0: canais (2026-10-19, fase 3)
+
+- **Página do canal no YouTube sem cota**: a faixa embaixo do cabeçalho vem do banco (`GET /api/ext/canal-dados/{id}`,
+  `pagina.canal_dados`); o canal da página vem do `leitor.js` (o último que a página mostrou). Canal que o Radar não
+  conhece (404) é lido pela página de vídeos dele antes. Mostra o cartão do canal, as **views dos últimos 30 vídeos**
+  (barras, mais forte quando estourou; o título e a nota no mouse), os **inscritos por dia** (do `historico`, quando o
+  Radar viu o canal em dias diferentes), os que passaram do normal, Salvar canal e Canais parecidos.
+  O `/api/ext/canal/{ref}` (que media pela API) ficou sem uso pela extensão.
+- **Monetização** (colunas novas `canais.anuncios` e `canais.membros`): anúncio no player do vídeo aberto
+  (`adPlacements`/`playerAds`) marca o canal "💰 com anúncios"; o botão "Seja membro" (no cabeçalho do canal ou no dono
+  do vídeo) marca "⭐ tem membros". Só se marca o sim: quem tem YouTube Premium não recebe anúncio, e a falta do botão
+  não prova nada. Aparece no cartão do canal (painel do vídeo e página do canal).
+- **Alt+S** (`commands` no manifest; troca em `chrome://extensions/shortcuts`): salva no Radar o canal do vídeo aberto
+  ou da página do canal, com um aviso rápido embaixo da tela. A página também ouve o Alt+S (o atalho do Chrome fica com
+  uma extensão só, e o Dotti Finder também usa Alt+S). Com o Dotti ligado, o Alt+S vai para ele: desligue o Dotti ou
+  troque o atalho em `chrome://extensions/shortcuts`.
+- **🔥 Canais novos em alta** no topo da página inicial do YouTube (`GET /api/ext/em-alta`, `pagina.em_alta`): os 12
+  canais do Radar que começaram há até 3 meses e mais fazem views por vídeo, com foto, views por vídeo, inscritos e
+  há quanto tempo começaram. O × esconde até o dia seguinte. `tests/test_pagina.py`.
+- Conferido no Chrome do usuário: a fileira de 12 canais em alta no início do YouTube e a faixa da página do
+  @NatGeo (30 barras, os que passaram do normal) sem gastar cota.
+
+## Extensão 0.8.0: filtros e menu no jeito do Dotti (2026-10-19)
+
+Pedido do usuário (com prints do Dotti Finder): "crie um igual o do Dotti Finder, falta os filtros, falta tudo". Mesma
+organização, código e estilo nossos.
+
+- **Janela de filtros** (botão 📊 Vídeos desta página): à esquerda, **Atalhos** (Canal pequeno que estourou, Rápidos
+  agora, Desta semana, Os mais vistos), **Filtrar** com faixas de duas pontas para **inscritos** (0 a 5M+) e **views**
+  (0 a 20M+), **Publicado** (Tudo, 1 hora, Hoje, 7 dias, 30 dias, 1 ano) e **Esconder Shorts**; em cima, "20 de 20
+  vídeos", **Carregar mais vídeos** (rola a página do YouTube, que traz mais) e **Baixar planilha** (CSV com título,
+  canal, inscritos, views, views por hora, outlier, dias, duração e link); **Ordenar** por YouTube (a ordem da
+  página), Mais novos, Inscritos, Views, Views/h e Outlier; a grade com a capa, o canal, os inscritos, as views, a
+  idade, a nota e o VPH; embaixo, quantos ainda estão sem inscritos (o Radar lendo os canais). A janela acompanha o que
+  chega enquanto está aberta.
+- **Botão Radar embaixo do vídeo** (na linha do Gostei/Compartilhar), com o menu: Este vídeo, Capa, Transcrição,
+  Oportunidade por país, Levar ao Roteiro, Salvar ideia, Copiar o título e Print do cartão. Cada item abre a aba ou
+  aperta o botão do painel ao lado (`data-acao`).
+- **Tema escuro**: os botões do painel estavam escuros no fundo escuro; agora claros (`html[dark] .radar-botao`).
+
+## Extensão 0.9.0: Língua Livre e o painel enxuto (2026-10-19)
+
+- Pedido do usuário (print riscado): saíram do painel do vídeo a aba Tags, a linha de números do vídeo (views, por
+  hora, publicado, duração), o cartão com os números do canal e o "Salvar canal" (continua no Alt+S e na página do
+  canal). Na aba Números ficaram a nota e a curva.
+- **🗺️ Língua Livre** (a nossa versão do "Método Malandro" do Dotti, com outro nome): uma aba no painel com o botão
+  grande; traduz o título, procura no YouTube de cada país (sem cota, como a antiga "Oportunidade por país", que saiu)
+  e mostra a barra de progresso em pedaços (um por língua, colorido no fim: verde ninguém fez, amarelo feito mas
+  fraco, laranja já fizeram, vermelho já fizeram e foi bem), "Livre em …" com as línguas livres, quantas livres e a
+  grade das línguas com a bandeira; clicar numa língua mostra os vídeos achados e a busca.
+- **Formato dos botões** como no print: abas em faixa de largura igual, botão grande vermelho de largura toda e as
+  ações em duas colunas (o "Levar ao Roteiro" na largura toda).
+
+## Extensão: Capa principal e Método Fantasma (2026-10-19)
+
+- **A Capa é a aba principal** (a aba Números saiu): a capa menor à esquerda e, à direita, os números em quadrados
+  com ícone (como os do Dotti): o "quantos x" em vermelho, views (com a idade), por dia, normal do canal, inscritos e
+  duração. A curva de views e o "Print do cartão" saíram (pedido do usuário).
+- **Transcrição**: dois botões, "Copiar sem tempos" (o texto corrido) e "Copiar com tempos" (`[0:04] texto`, uma
+  fala por linha).
+- **Língua Livre virou Método Fantasma** (aba, botão e menu), com um fantasminha verde neon como marca. Nada de radar
+  (seria cópia do Dotti): um anel verde enche a cada língua procurada, o fantasminha flutua no meio com um brilho que
+  respira, e no fim ele dá um pulo e mostra quantas línguas estão livres; cada língua ganha a cor do que achou.
+- **Fantasminha embaixo do vídeo**, ao lado do botão Radar, com aro verde: cresce com o mouse em cima; no clique sai
+  um fantasminha por país, cada um levando a bandeira dele por cima do vídeo (caminhos diferentes, um depois do
+  outro, crescendo e sumindo lá em cima; `voarFantasmas`), e abre ali mesmo a janelinha do Método Fantasma, presa ao
+  botão e abrindo para cima (fica no `<body>`, posicionada por conta: dentro da fileira do YouTube saía no lugar errado) (a mesma busca do painel:
+  fica guardada em `FANTASMA`, e as duas vistas se atualizam juntas). O selo conta as línguas procuradas (vermelho) e,
+  no fim, as livres (verde). "Ver os vídeos de cada língua" abre a aba do painel, onde clicar numa língua mostra os
+  vídeos achados.
+- **Botões em 3D, sem emoji**: ícones de traço em SVG (`ICONES`/`icone()`/`botao()` em `content.js`). O Método
+  Fantasma é o botão vermelho no topo; os outros ficam em preto.
+- **Menu do botão Radar** com os mesmos ícones em quadradinhos, o Método Fantasma em vermelho e uma linha separando as
+  abas das ações.
+- **Radar e fantasminha à direita do título do vídeo** (o espaço vazio embaixo do player): `ytd-watch-metadata #title`
+  vira flex e ganha a `.radar-titulo-botoes`; sem o título, os botões voltam para a fileira de botões.
+- **Os fantasminhas crescem durante o voo todo** (de 0,6x a 3,6x) até sumirem lá em cima.
+- **Filtros no alto do YouTube**, ao lado da busca (`ytd-masthead #center`), com o número de vídeos lidos: aparece em
+  toda página com vídeos, a página inicial também, e abre a janela de filtros (atalhos, inscritos, views, publicado,
+  ordenar, carregar mais e planilha). Sem a barra do YouTube, o botão fica solto no canto da tela como antes.
+- **Depois (mesmo dia):** à direita do título ficava apagado; Radar e fantasminha foram para o **meio da fileira de
+  baixo do título** (`#top-row`, logo depois do `#owner`, entre o canal e o curtir), **maiores** (`.radar-grandes`:
+  Radar com 44px e aro verde, fantasminha com 46px). Sem essa fileira, voltam para o lado do título.
+- **Janela de filtros no tamanho da do Dotti** (pedido do usuário: a nossa ficava pequena no meio): 88% da largura e
+  90% da altura da tela (antes até 1400px), coluna da esquerda com 290px, 4 vídeos por linha, letras maiores (títulos
+  16px), ícones de traço no lugar dos emojis (atalhos, filtros, ordenar, botões do topo), botões vermelhos em 3D e um
+  interruptor no "Esconder Shorts".
+
+## Extensão: página do canal com Analisar nicho, Canais Parecidos e Vídeos do Nicho (2026-10-19)
+
+- **Selo de quantas vezes o normal** (filtros, Vídeos do Nicho, análise do canal): abaixo de 6x fica apagado, de 6x
+  verde e de 15x vermelho (`corNota`).
+- **A faixa solta embaixo do cabeçalho do canal saiu.** No lugar, junto do Inscrever-se, o botão vermelho **Analisar
+  nicho** com o fantasminha verde: no clique os fantasminhas voam e abre a análise embaixo do cabeçalho (fase,
+  monetização, Salvar canal, 4 quadrados com inscritos / normal por vídeo / vídeos / postando há, os gráficos e os
+  vídeos que passaram do normal).
+- **Abas do Radar junto das abas do YouTube**: **Canais Parecidos** (cartões com foto, normal por vídeo, inscritos e
+  fase; `/api/ext/parecidos`) e **Vídeos do Nicho** (os vídeos longos que passaram de 2x o normal nos canais
+  parecidos no último ano, do maior estouro para o menor; `/api/ext/nicho-videos/{canal}` → `garimpo.videos_do_nicho`,
+  vídeos do banco, só os parecidos podem gastar cota e ficam guardados 7 dias). Abrir uma esconde o conteúdo do
+  YouTube; clicar numa aba do YouTube volta.
+- **Depois (mesmo dia), a pedido do usuário:** a análise ficou como a do Dotti, explicada. Uma caixa embaixo do
+  cabeçalho do canal com o botão **Analisar nicho** dentro (à esquerda) e o resumo à direita ("Bom para tirar ideias
+  de títulos · Maturidade · 309 dias"). Aberta: o veredito com a força (forte/morno/fraco agora, pelos últimos 10
+  vídeos que passaram do normal) e o porquê; os dias postando com "melhor hora / ainda dá / tarde para entrar /
+  saturado" e quantos dias faltam para a próxima fase; e o gráfico **Como um nicho nasce e morre** (Teste de
+  mercado até 14 dias, Decolagem até 2 meses, Corrida por espaço até 4 meses, Maturidade até 14 meses, Saturação),
+  com a foto do canal na curva. Os números, os gráficos e os vídeos que estouraram ficaram num "ver mais". As abas
+  Canais Parecidos e Vídeos do Nicho entram logo depois da última aba do YouTube (Playlists), e a seção delas fica
+  no lugar do conteúdo do YouTube (antes ia para o fim da fileira e ficava torta).
+- **Dias postando errados em canal antigo (corrigido):** o Canada Insight foi criado em 2014 mas começou a postar há
+  309 dias; o Radar mostrava 4633 dias (Saturação). Com mais vídeos do que a página mostra, o primeiro vídeo vinha da
+  data de criação do canal. Agora a página do canal (`canal-dados`) anda a lista de envios uma vez
+  (`youtube.primeiro_envio`, 1 unidade por 50 vídeos, até 2.000 vídeos), guarda a data como exata e refaz a fase e o
+  selo; as releituras do canal (página e API) não apagam mais essa data.
+- **Canais Parecidos em linhas:** cada canal parecido numa linha, o cartão dele à esquerda e os 5 vídeos longos que
+  mais renderam no último ano ao lado (até 2026-11-12 eram os mais novos, e o vídeo de hoje com 2 views ocupava o lugar), com capa, views, idade e o selo de quantas vezes o normal (`/api/ext/parecidos` agora traz
+  `videos` de cada um, do banco: `garimpo.ultimos_videos`). A caixa do nicho entra logo acima das abas, na largura
+  toda, e a seção das abas também ocupa a largura toda (antes encolhiam no meio da página). Se o servidor do Radar
+  estiver aberto desde antes desta versão, as abas avisam para reiniciar o `LIGAR-RADAR.bat`.
+- **Régua de 100 mil views** (como a do Dotti) na análise do nicho: o texto conta quantos vídeos do canal passaram de
+  100.000 views, e a força (forte/morno/fraco agora) é quantos dos 10 mais novos passaram disso.
+
+## Extensão: atalhos, concorrentes do nicho e o LIGAR-RADAR que fecha o antigo (2026-10-19)
+
+- **Atalhos** (na página do YouTube): **Alt+S** salva o canal, **Alt+G** é o fantasminha (Método Fantasma no vídeo,
+  Analisar nicho no canal), **Alt+R** leva o vídeo ao Roteiro, **Alt+V** abre os filtros dos vídeos da página. Alt+F e
+  Alt+D ficam com o Chrome (menu e barra de endereço). As teclas aparecem no menu do Radar e no texto dos botões.
+- **Concorrentes do nicho** na análise do nicho (`/api/ext/concorrentes/{canal}` → `garimpo.concorrentes`): os canais
+  parecidos, quantos postaram no último mês, quantos estão crescendo, quantos canais novos (até 6 meses) já fazem 10
+  mil por vídeo, os 6 maiores e a **nota do nicho de 0 a 10** (até 5 pela procura, até 3 pelos novos que deram certo,
+  até 2 pelo espaço): 7+ fácil de entrar, 4+ dá para entrar com um bom título, abaixo nicho lotado. Procurar os
+  parecidos gasta cota, então só com o botão "Medir os concorrentes" — se já foram procurados (7 dias), vem direto.
+- **LIGAR-RADAR.bat** fecha o Radar que estiver ouvindo na porta 8400 antes de ligar o novo (um servidor antigo
+  esquecido aberto deixava a página com o código velho).
+- **$ da monetização ao lado do nome do canal** (como o do Dotti): verde = monetizado, cinza riscado = sem anúncio.
+  Quando o Radar ainda não sabe, a extensão abre o vídeo mais novo do canal (sem cota) e olha a marca `yt_ad` que o
+  próprio YouTube põe nos dados do player (1 = vídeo com anúncio); o resultado vai para o banco (`canais.anuncios`).
+
+## Extensão 0.10.0: números do seu canal, do YouTube Studio (2026-10-19)
+
+- **`studio.js`** roda dentro das páginas do YouTube Studio (world MAIN), com o login da própria pessoa, e pede ao
+  Studio os números do canal do mesmo jeito que o Studio pede (`yta_web/get_cards`; formato em
+  `docs/studio-tempo-real.md`): as views hora a hora das últimas 48 h (a cada minuto) e, a cada 15 min, os 365 dias de
+  views, tempo assistido e ganhos estimados (em dólar). O **`studio-ponte.js`** guarda no `chrome.storage.local`
+  (`numerosCanal`); nada vai para o servidor do Radar.
+- **No alto do youtube.com**, ao lado do Criar: o botão com **1h · 48h · 7d · 30d** (1h = a última hora completa; 7d
+  e 30d = a soma dos últimos dias, como o Dotti). Ele abre os cartões com gráfico: views da última hora, 48 horas,
+  7 dias, 30 dias, tempo assistido e ganhos estimados de 12 meses, "Atualizado há X minutos" e "Abrir o Analytics".
+  Sem números ainda, o cartão pede para abrir o Studio uma vez.
+- **"Hoje" no cartão Em tempo real do Studio**: as views desde a meia-noite, ao lado das 48 horas.
+- Os números só se atualizam com uma aba do Studio aberta (é o jeito seguro: o pedido sai da própria página do Studio).
+- Conferido no Chrome do usuário (Canada Insight): 1h 2.564, 48h 75.893, 7d 324.727, 30d 459.268, 183 mil h, iguais
+  aos do Dotti. Ganhos e tempo assistido usam o total que o Studio dá (somar os dias dava 1 centavo a mais). O "Hoje"
+  fica numa linha própria embaixo do "Últimas 48 horas" (no canto de cima ficava em cima do "Hoje" do Dotti). O
+  Chrome precisa liberar o acesso da extensão ao studio.youtube.com (site novo na 0.10.0).
+
+## Extensão 0.12.0: ajuda para publicar no YouTube Studio (2026-10-20)
+
+Pedido do usuário: "adicionar a extensão na hora de postar o vídeo com anúncios e tudo". Combinado: **só um painel de
+ajuda** (a extensão não clica, não preenche e não publica nada), com título, descrição, tags, monetização e anúncios,
+questionário de anunciantes, público e visibilidade, achando o vídeo **pelo nome do arquivo**.
+
+- **`extensao/publicar.js`** (no studio.youtube.com, num shadow root para o CSS do Studio não entrar): na tela de
+  upload (`?d=ud`, `ytcp-uploads-dialog`) ou de edição do vídeo aparece o botão **Radar · ajuda para publicar**. Ao
+  escolher ou arrastar o arquivo, o painel abre sozinho. Ele mostra o título (com a contagem de 100), os títulos do
+  teste A/B, a descrição (5.000), as hashtags que faltam na descrição, as tags separadas por vírgula até caber nos 500
+  caracteres, o comentário fixado e **Baixar a legenda (.srt)**. Embaixo vem a lista do que marcar em cada etapa
+  (Detalhes, Monetização e anúncios, Adequação para anunciantes, Elementos, Verificações e Visibilidade), com caixinhas
+  de feito. O mid-roll usa a duração do vídeo (só a partir de 8 min) e sugere as viradas de capítulo. O "Conteúdo
+  alterado ou sintético" segue o `sintetico` da fábrica. O questionário diz para marcar "Nenhuma das opções acima" só
+  se for verdade.
+- **O vídeo pelo nome do arquivo** (`radar/publicar.py`): compara o nome sem acento nem extensão com o .mp4 da entrega
+  (`entrega_pc.json`, que usa o título), o título do kit, o `titulo_entrega` e o nome da pasta. Primeiro procura um
+  nome igual e depois um que contenha o outro. Com `final.mp4` ou um nome que não diz qual é o vídeo, ele não chuta:
+  mostra a lista dos vídeos da fábrica com kit (ou deixa digitar o nome).
+- **Rotas**: `GET /api/ext/publicar?arquivo=` (kit e lista), `GET /api/ext/publicar/{nome}` e
+  `GET /api/ext/publicar/{nome}/legenda`. Leem o `publicacao.json` da pasta do projeto, então funcionam com a fábrica
+  desligada.
+- Para usar: em `chrome://extensions`, clique no ↻ do Radar de Canais e recarregue a aba do Studio (F5).
+
+## Nova produção em passos, também no alto do YouTube (2026-10-19)
+
+- **No site** (`novaProducao` em `radar/web/app.js`): o passo **1 · O vídeo** tem só o título, o vídeo de
+  referência, o **agente do roteiro** (o do canal, com o botão **Editar**) e o "Parar para eu revisar o roteiro".
+  Quem não aperta Editar já cria com o Claude escrevendo no agente do canal. O passo **2 · Editar o roteiro** tem o
+  resto (canal, agente, idioma, roteiro colado ou do Claude, tamanho, nicho e observação). O último canal usado fica
+  lembrado; a escolha de canal só aparece no passo 1 quando ainda não tem canal.
+- **Na extensão**: o botão vermelho **Nova produção** no alto do YouTube, entre a busca e os números do canal, abre a
+  mesma janela em dois passos (as mesmas rotas: `/api/meus-canais`, `/api/projetos`, `/api/producao/{canal}`,
+  `/api/roteiros/ritmo`, `/api/fila/estimativa`, `/api/titulo-do-video` e `POST /api/fila`). Num vídeo aberto, o link
+  dele já vem como referência. No fim, "Ver no Acompanhar" abre o site.
+- **Agente obrigatório e a lista de confirmação, na extensão** (2026-10-28, pedido do usuário: "aqui você é obrigado
+  sempre a selecionar o agente que você quer… e a opção de criar sem a transcrição não tem que ser pedida, é
+  automático"). Na janela da extensão, e só nela:
+  - **O agente é escolha obrigatória**: a janela abre sem agente escolhido (antes já vinha com o do canal), o select
+    fica destacado em vermelho enquanto ninguém escolhe e o envio não passa sem ele. Embaixo, um botãozinho **"usar o
+    agente padrão de CANAL: NOME"** preenche com o do canal ("Padrão do Claude (sem agente)" quando o canal não tem).
+  - **3 · Confirmar**: um passo novo, a lista do que vai ser feito item por item — título, canal, agente, idioma e
+    tamanho, vídeo de referência, o que acontece depois de escrever e o custo. O que falta fica vermelho, o que é só
+    aviso fica amarelo. O botão do rodapé virou **"Revisar e criar →"** nos passos 1 e 2 e **"✓ Confirmar e criar"**
+    no 3: nenhum roteiro começa sem passar por essa lista.
+  - **Sem legenda não é pergunta**: `/api/titulo-do-video` passou a dizer se o vídeo tem legenda
+    (`roteiro_claude.tem_legenda`), e a lista avisa ali mesmo que o roteiro vai sair do título. Nada para por causa
+    disso e nada é perguntado.
+  - **YouTube bloqueado não é "sem legenda"** (2026-11-10, extensão 0.45.1): o YouTube passou a recusar a leitura
+    da legenda feita deste computador (`RequestBlocked`, "Sign in to confirm you're not a bot"), e `tem_legenda`
+    chamava isso de "sem legenda" — a confirmação avisava "Sem legenda" de vídeo com legenda e o roteiro saía só do
+    título. Agora `tem_legenda` devolve `None` quando não deu para conferir; quando a referência é o vídeo aberto, a
+    extensão lê a fala pelo navegador (o mesmo jeito da aba Transcrição) e manda no pedido (`transcricao_ref`, até
+    80 mil letras, fora da lista do Acompanhar). O roteiro usa essa fala quando a leitura do Radar falha.
+- **Canais Parecidos voltou ao lugar** (2026-11-10, extensão 0.45.2): a linha de cada parecido ganhou os botões
+  Salvar canal / Parecidos deste como terceiro item, mas a grade continuava com 2 colunas — os botões caíam na
+  coluna larga e os vídeos iam parar espremidos embaixo do cartão, na coluna de 210 px. Agora a grade tem áreas
+  nomeadas: cartão e botões empilhados à esquerda, vídeos na coluna larga.
+- **Botão PT de volta nos cartões** (2026-11-10, extensão 0.45.3): o YouTube trocou as classes BEM dos cartões novos
+  (`yt-lockup-metadata-view-model__title`) por camelCase (`ytLockupMetadataViewModelTitle`), e o botão PT parou de
+  achar o título. O seletor `TITULO` do content.js aceita os dois jeitos. O selo de vezes o normal não sumiu por isso:
+  ele só aparece com o Radar ligado na 8400, que dá a nota.
+- **Faixa do canal não trava mais em "Radar: recarregue a página"** (2026-11-10, extensão 0.45.4): o leitor
+  respondia o canal com o `ultimoCanal` (que pode ser o de uma página anterior) ou o `ytInitialData` (o da primeira
+  página aberta). Quando os dois estavam velhos, o painel do canal desistia e sumiam Canais Parecidos, Vídeos do
+  Nicho e o resto. Agora vem primeiro do `ytd-page-manager.getCurrentData()`, que é sempre a página da tela.
+- **Publicar no Studio: cada etapa com o seu botão** (2026-11-10, extensão 0.45.5): na tela "Ad suitability"
+  aparecia o "Ligar e colocar" dos anúncios e o recado do Detalhes (crianças, IA, tags). O `etapaAtual()` lia o
+  rótulo "Monetization" da barra de etapas — que aparece em todas as telas — como título da tela, e "Ad suitability"
+  não estava entre os nomes conhecidos. Agora a etapa vem da que está marcada como atual na barra (`ytcp-stepper`),
+  a procura por texto ignora a barra, e o recado é apagado quando a etapa muda.
+- **Vídeos: os filtros que a tela Outliers do 1of10 tinha** (2026-11-10): aberta com o REA, a 1of10 filtra por
+  duração, nota máxima e views ÷ inscritos (o `subs_score` dela). A tela Vídeos ganhou os três, a ordem "Views por
+  inscrito", o trilho de inscritos do canal e a pílula "Nx os inscritos" no cartão. O resto da 1of10 o Radar já tinha:
+  nota, views, data, aleatório, esteira (os marcadores dela), pastas (os rastreadores), capas e canais parecidos.
+- **LIGAR-RADAR.bat abre o navegador só quando o Radar responde** (2026-10-19): depois que ele passou a fechar o Radar
+  antigo, o navegador abria antes do servidor novo subir (uns 5 s) e mostrava "não é possível acessar este site",
+  parecendo que o Radar não ligava. Agora uma espera escondida tenta o endereço a cada segundo (até 90 s) e abre o
+  navegador quando ele responde.
+
+## Extensão 0.13.0: a publicação se preenche sozinha, e o × para tirar um canal (2026-10-22)
+
+Pedido do usuário: "adicionar estas opções das imagens na extensão, quanto mais agilizar o trabalho melhor", com a
+descrição indo sozinha ao escolher o vídeo e a barra de ajuda saindo. Combinado: **a extensão clica e avança** — só o
+botão Publicar continua sendo da pessoa.
+
+- **`extensao/publicar.js` virou automação** (a lista de "o que marcar em cada etapa" saiu): ao escolher o vídeo da
+  fábrica (ou ao arrastar o arquivo, que acha o vídeo pelo nome), a extensão já **escreve o título, a descrição e as
+  tags** na tela de Detalhes e marca "Não, não é conteúdo para crianças". Escreve do jeito que a pessoa escreveria
+  (`focus` + `insertText`), que é o que o Polymer do Studio entende; os campos são `#title-textarea #textbox`,
+  `#description-textarea #textbox` e `#tags-container input` (abrindo o "Mostrar mais" antes).
+- **Um botão vermelho por etapa**, no canto de baixo, perto do Avançar do Studio: **Preencher e pular** (Detalhes),
+  **Anúncios ligados e pular** (Monetização: liga a monetização, marca todos os tipos de anúncio e avança),
+  **Colocar N anúncios** (espaços intermediários), **Responder "nada disso" e pular** (marca "Nenhuma das opções",
+  envia a classificação e avança) e **Pular esta etapa** (Elementos e Verificações). Na Visibilidade não tem botão.
+- **Anúncios no meio do vídeo**: no painel dá para escolher *um a cada X minutos* (padrão 1) ou *uma quantidade bem
+  dividida*. Ele anda com o player (`video.currentTime`) e clica no "espaço de anúncio" em cada tempo, mostrando o
+  andamento. Muito perto um do outro o YouTube pode não usar — 1 a 3 minutos costuma passar.
+- **As etapas são achadas pelo texto da tela** (pt-BR e inglês), não por posição: quando um botão não é achado, o
+  painel diz o que fazer à mão em vez de clicar errado.
+- **× para tirar um canal** (`ligarTirarCanal` em `radar/web/app.js`): sempre à vista no canto de cada cartão de
+  **Seus canais** (Início) e de cada quadradinho da tela **Canais**, com janela de confirmação com o nome do canal.
+  Usa o `DELETE /api/perfil/canais/{id}` que já existia: sai do Radar com a configuração de produção, o canal no
+  YouTube não é tocado e dá para adicionar de novo depois.
+- Para usar: em `chrome://extensions`, clique no ↻ do Radar de Canais e recarregue a aba do Studio (F5).
+
+## Extensão 0.14.0: descrição no modelo do canal, horário e tela final (2026-10-22)
+
+Pedidos do usuário no mesmo dia, olhando a publicação de verdade: "não quero aquele tipo de descrição... mais
+padronizado, só mudando para o tema do vídeo, sem spoilers, apenas uma sinopse"; o horário de postar com fuso; a tela
+final padrão; e "o painel você pode remover".
+
+- **Modelo da descrição, por canal** (escolha do usuário: fica no Radar, não na fábrica, para valer também nos vídeos
+  já prontos). Na página do canal, o bloco **🧾 Modelo da descrição**: um texto só, com `{titulo}`, `{sinopse}`,
+  `{canal}`, `{hashtags}` (e `{tags}` e `{capitulos}` para quem quiser). **Sem a lista de capítulos**, que era o que
+  entregava o vídeo inteiro na descrição da fábrica. O botão **Usar o modelo sugerido** traz um pronto na língua do
+  canal (título, sinopse, "sobre o canal", aviso legal, hashtags). Guardado em `canais_config.modelo_descricao`
+  (`producao.PADRAO`); vazio = a descrição da fábrica, como era.
+- **Quem é o canal do vídeo** (`publicar.perfil_do_projeto` + `producao.canal_do_perfil`): o `projeto.json` da fábrica
+  guarda o caminho do perfil (`perfis/canal-uk-market.yaml`); o Radar acha o canal que usa esse perfil (pelo que está
+  salvo ou pelo nome) e pega o modelo dele. `GET /api/ext/publicar` e `/api/ext/publicar/{nome}` já devolvem a
+  descrição montada, mais `canal` e `modelo` (se o canal tem modelo salvo).
+- **A sinopse** é o `resumo` que a fábrica escreve (2 ou 3 frases do que o vídeo mostra), agora exposto no kit.
+- **Horário de postar** (na etapa Visibilidade): escolha o fuso do público (EUA Leste, Brasil, Reino Unido…) e a hora
+  de lá; a extensão mostra "lá agora" e a hora que isso vira no Studio (a do seu computador), e o botão **Colocar o
+  horário** marca Programar e preenche a data e a hora. A conta usa `Intl` com o fuso IANA, então pega horário de
+  verão sozinho (17:00 em Nova York = 18:00 em Brasília no teste).
+- **Tela final do último e pular** (etapa Elementos): clica em "Importar do vídeo", escolhe o vídeo mais recente e
+  salva. Se a janela não abrir do jeito esperado, ele diz para escolher à mão em vez de clicar errado.
+- **O painel saiu**: ficou só o botão vermelho da etapa, com uma **setinha** ao lado que abre o vídeo escolhido, os
+  anúncios (um a cada X minutos ou uma quantidade), a legenda e o comentário fixado.
+- Para usar: em `chrome://extensions`, clique no ↻ do Radar de Canais e recarregue a aba do Studio (F5). O Radar
+  precisa ser religado (LIGAR-RADAR.bat) para as rotas novas valerem.
+
+## O tempo do vídeo passa a cair dentro de 1 min 30 s (2026-10-22)
+
+Pedido do usuário: "o Radar sempre gera roteiro, mas dificilmente acerta o tempo do vídeo pedido; sempre que gerar um
+roteiro ele tem de ver o resultado que deu o vídeo, para saber se está acertando ou errando. A margem de erro tem que
+ser no máximo de um minuto e meio para cima ou para baixo, e ele vai melhorando a cada pedido."
+
+O ajuste já existia (`radar/tempo.py`, 2026-10-18), mas errava feio. Medindo os 10 vídeos entregues: pediu 15 e saiu
+23,2; pediu 16 e saiu 19,5; pediu 15 e saiu 11,3. Dois motivos, os dois corrigidos:
+
+- **A medida dependia da fábrica ligada.** `_duracoes()` só sabia o tempo pela API da fábrica; com ela desligada o
+  Radar não media nada, caía nas 150 palavras por minuto do padrão e estourava nas vozes lentas (as de inglês falam
+  umas 135). Agora a duração vem **do disco** (`alinhamento.json` da pasta do projeto, mais a abertura do
+  `render/linha.json`, que é vídeo sem narração), com a API só de reserva. O resultado de cada vídeo também fica
+  gravado no `roteiro.json` (`medido`), então o histórico sobrevive à pasta do projeto sair do computador.
+- **A conta aprendia a coisa errada.** O ppm era *palavras escritas ÷ minutos*, e o Claude escreve mais do que se
+  pede (de 0 a 27% a mais nos vídeos medidos): o excesso se repetia em todo vídeo. Agora quem dimensiona o pedido é o
+  **`ppm_alvo` = palavras PEDIDAS ÷ minutos entregues**, que engloba a voz e a mania do Claude de esticar. O `ppm`
+  continua sendo mostrado como o ritmo real da voz. Para o João o Lobo: ppm 215, ppm_alvo 205; para o UK MARKET,
+  ppm 136 e ppm_alvo 105.
+- **A escrita parava cedo demais**: o laço de continuação aceitava faltar 15% (2 min num vídeo de 15). Agora o que
+  pode faltar é medido em minutos de narração, dentro da margem (`tempo.MARGEM_MIN`).
+- **O acerto aparece na tela** (`ritmo.acerto`): na hora de escrever o roteiro, "🎯 4 de 5 dos últimos vídeos desta
+  voz ficaram dentro de 1,5 min do tempo pedido · erro médio +1,2 min · pior: pediu 15 e saiu 18,8 min". No "por
+  quê?" vem a lista vídeo a vídeo, em verde quem ficou dentro e em vermelho quem passou.
+- `tests/test_tempo.py`: mede do disco somando a abertura, conta o que ficou fora da margem, encolhe o próximo pedido
+  e guarda o resultado no roteiro.
+
+## Extensão 0.15.0: abinha, ChatGPT e o agente no painel do YouTube (2026-10-22)
+
+Pedido do usuário: "o Claude que abre na lateral com dois cliques tem que ter uma abinha para mostrar ele, e quero o
+ChatGPT também; o Claude ali eu queria que desse para ter acesso a projeto e tudo".
+
+- **A abinha** (`.radar-claude-abinha`): uma lingueta na beirada direita do YouTube, sempre à vista, que abre o
+  painel. Os dois cliques com o botão direito e o Alt+C continuam funcionando; ela some enquanto o painel está
+  aberto.
+- **Duas abas no painel, Claude e ChatGPT.** No Claude continua o chat do Radar (`/api/assistente`, pela assinatura),
+  que sabe qual página está aberta.
+- **O agente (o "projeto") no Claude**: um seletor no alto do painel com os seus agentes de roteiro — que é onde
+  moram as instruções dos projetos do claude.ai. O escolhido vai no `projeto_id` do `/api/assistente` e as
+  instruções entram no contexto (`producao.assistente`), valendo por cima das regras gerais. A escolha fica
+  guardada.
+- **O claude.ai e o ChatGPT de verdade abrem numa janela ao lado.** Os dois mandam `X-Frame-Options: SAMEORIGIN`
+  (conferido), então não dá para pôr nenhum dos dois dentro do YouTube. A extensão abre a janela encostada na
+  direita e **cola** a pergunta com o título e o endereço da página; quem aperta enviar é a pessoa, como já era no
+  envio para o ChatGPT e o Gemini. O texto vai pelo `chrome.storage.local` (`radarColar`, vale 2 minutos) e quem
+  cola é o `colar.js`, que agora roda também no `claude.ai` (com o seletor da caixa do ProseMirror) e está no
+  `host_permissions`.
+- Para usar: em `chrome://extensions`, clique no ↻ do Radar de Canais e recarregue a aba do YouTube (F5).
+
+## Extensão 0.24.0: o horário de postar sai de cena (2026-10-24)
+
+Pedido do usuário: "remova da extensão esse colocar o horário" e, logo depois, tirar também o ajuste no Radar. Quem
+agenda o vídeo na etapa **Visibilidade** volta a ser a pessoa, à mão, no próprio Studio.
+
+- **Na extensão** (`extensao/publicar.js`): saíram o botão **Colocar o horário**, a conta do fuso (`deslocamento`,
+  `quandoPostar`, `colocarHorario`) e os campos `fuso`/`hora_postar` que vinham no kit. A etapa Visibilidade deixou de
+  ser reconhecida: nessa tela a barra do Radar some em vez de ficar ancorada no rodapé sem botão nenhum.
+- **No Radar**: a linha **Fuso do público do canal** + **Hora de postar, lá** saiu do bloco 📤 Publicação na página do
+  canal (`radar/web/app.js`), junto com o `producao.FUSOS`, os dois campos do `producao.PADRAO` e a validação deles, e
+  os dois campos do `padrao` do kit (`GET /api/ext/publicar`). O bloco ficou só com o anúncio a cada X minutos e a
+  tela final.
+- Para usar: em `chrome://extensions`, clique no ↻ do Radar de Canais e recarregue a aba do Studio (F5). O Radar
+  precisa ser religado (LIGAR-RADAR.bat).
+
+## MCP e a lista de funções numa fonte só (2026-10-24, madrugada)
+
+Pedido do usuário: clonar o Dotti Finder "com tudo, tudo igual até a extensão", trabalhando a noite toda. O Radar
+já nasceu assim, no modelo deles e feito do zero, então a noite foi gasta em cima do que **faltava** — não num
+produto novo e não copiando nada de lá. O levantamento novo está no `docs/analise-dottifinder.md`, seções 8 e 9: a
+extensão deles por dentro (pelo pacote público da loja, lido com o REA), os preços, e o plano de 22/10 conferido
+item por item — 20 dos 28 itens já estavam feitos.
+
+### O MCP: o Radar dentro do Claude e do ChatGPT (`radar/mcp.py`)
+
+A única porta que o Dotti tem e o Radar não tinha. Eles vendem por cota de pergunta (50 por semana no Grátis, 150
+por dia no Lite, 300 por dia no Pro) e a extensão deles liga o conector sozinha no `claude.ai`. Aqui ficou um
+servidor **stdio** que fala com o Radar deste computador pela própria API HTTP — de propósito: as regras de filtro,
+de plano e de cota moram no servidor, e o MCP não pode ter uma segunda versão delas para desencontrar.
+
+    claude mcp add radar -- uv run python -m radar mcp
+
+**Oito ferramentas, todas de leitura.** Nada aqui mede canal, garimpa ou grava: o que gasta a cota do YouTube
+continua sendo escolha da pessoa, no painel.
+
+| Ferramenta | O que responde | Rota |
+|---|---|---|
+| `radar_resumo` | as contagens da base: canais analisados, no Radar, vídeos lidos, nichos, novos da semana | `/api/resumo` |
+| `radar_visoes` | as perguntas prontas, com rótulo e dica (para saber que recorte pedir) | `/api/visoes` |
+| `radar_canais` | a lista de canais, com `visao`, nicho, país, média mínima, inscritos, meses e ordem | `/api/radar` |
+| `radar_salvos` | a base da pessoa | `/api/salvos` |
+| `radar_acharam` | a colheita: os parecidos que cada canal salvo trouxe, e por causa de quem | `/api/achados` |
+| `radar_canal` | um canal por dentro: normal por vídeo, fase, raridade, últimos vídeos com nota, histórico, parecidos | `/api/perfil/canal/{id}` |
+| `radar_outliers` | os vídeos que estouraram | `/api/outliers` |
+| `radar_titulos` | os títulos que mais trazem views | `/api/titulos` |
+
+Três cuidados que mudaram o resultado, os três achados rodando de verdade contra o Radar ligado:
+
+- **A resposta tem de caber no contexto de quem perguntou.** Cada item leva só os campos de decisão e no máximo 25
+  itens (`LIMITE`). O `videos` da linha do canal ficou **de fora**: ele vem com a lista inteira de vídeos e 25
+  canais viravam 22 KB de resposta — agora são 8,8 KB, e quem quer os vídeos de um canal chama o `radar_canal`.
+- **No Windows a saída saía na página de código do DOS** e "história" chegava quebrado no Claude. O laço do stdio
+  reajusta a entrada e a saída para UTF-8.
+- **A base da pessoa usa `/api/salvos` e `/api/achados`**, não `/api/radar?salvos=1`: a rota do Radar exige o
+  recurso `radar` (Pro) e daria 402 para quem é Lite, justamente no que é dele.
+
+Erro em português, com a saída: Radar desligado diz "ligue ele (dois cliques em LIGAR-RADAR.bat)"; 402 repete o
+plano que o servidor pediu; 401 manda entrar na conta. `RADAR_MCP_BASE` troca o endereço e `RADAR_MCP_COOKIE` leva
+a sessão quando o Radar está aberto para a rede (`--publico`).
+
+`tests/test_mcp.py` (19): o catálogo no formato que o Claude lê, nome que não repete, **nenhuma ferramenta que
+escreve**, o aperto de mão, aviso sem resposta, método que não existe, ferramenta que não existe, o que falta dito
+antes de sair pedindo, booleano que vira 1, o id que não vaza para a query, o cookie, a resposta enxuta, a lista de
+vídeos do canal que não vem na lista de canais, os três erros e o laço do stdio ignorando lixo.
+
+### A lista de funções da extensão numa fonte só (`radar/funcoes.py`)
+
+Item 14 do plano. A tela Extensão era texto escrito à mão, a tela Planos listava recursos e a extensão sabia das
+suas funções por conta própria: três listas para desencontrar. Agora são **32 funções** com `chave`, `nome`,
+`desc`, `onde` aparece e o `recurso` que a abre — e só isso: quem decide o preço continua sendo o `config.PLANOS`.
+
+- `GET /api/ext/funcoes` devolve a lista com o plano de cada função e, para quem pediu, se está liberada.
+- A tela **Extensão** monta sozinha: "32 funções dentro do YouTube, 26 delas no plano Grátis", os passos de
+  instalar e os cartões agrupados por onde a função aparece (em cima do vídeo, no painel, na página do canal, na
+  busca, no Studio). A função que o plano da pessoa não abre fica apagada, com a etiqueta do plano.
+- A tela **Planos** ganhou "N das 32 funções da extensão" por plano, da mesma fonte.
+- `tests/test_funcoes.py` (13): chave que não repete, todo recurso em algum plano, o plano de cada função é o mais
+  barato que abre o recurso (a mesma conta do 402), cada plano abre o que deve, plano escrito errado vale como
+  Grátis, planos cumulativos, a rota pede conta e responde com o plano de quem pediu.
+
+Para comparar: o Dotti anuncia 29 funções, 19 grátis.
+
+**Falta** (do plano de 22/10): o item 5 (grupo vazio sumir sozinho), o 9 (trilho em vez de campo numérico, só um
+feito) e conferir o 13 e os 21–24. E, se o MCP for virar produto, a cota de perguntas por plano — hoje ele é
+local e livre.
+
+## O pagode no Faceless Outliers, e o Radar só de canal dark (2026-10-25)
+
+"os dotti finder pesquisa canais melhores que o nosso, me explica pq, queremos canal dark que explodiu, mas o nosso
+esta trazendo pagode e musica".
+
+**Estava certo, e a causa não era a busca.** Os termos do garimpo são todos dark e em inglês; nenhum de música. O
+pagode entrava por outra porta, na **tela**, não na procura.
+
+A extensão guarda todo canal que a pessoa vê enquanto navega no YouTube — é o "ler os vídeos sem gastar cota". Esses
+canais ficam no banco com `no_radar=0`: nunca passaram pelo garimpo, então estão **sem nicho, sem rosto sabido e sem
+medida de verdade**. Eram 13.658 canais no banco para 420 no Radar.
+
+A lista de vídeos (`/api/outliers`) lia a tabela `outliers` juntando com `canais` **sem conferir o `no_radar`**. Daí:
+
+- o corte dos nichos que pagam pouco (`mercado.irrelevante`) não pegava nada, porque o nicho estava vazio;
+- o corte do rosto não pegava nada, porque `sem_rosto` estava nulo;
+- e a nota, que é views ÷ o normal do canal, ficava **gigante**: o "normal" de quem foi visto de passagem sai de
+  um ou dois vídeos. "Guns N' Roses — November Rain" marcava **50.025x**. Como a tela ordena por nota, o lixo
+  encabeçava a lista.
+
+Na base do usuário: dos 4.400 vídeos que a tela trazia, **2.736 (62%) eram de canal fora do Radar**, e os **25
+primeiros eram todos** — Guns N' Roses, pagodepontocom, Péricles, Grupo Di Propósito, Música Multishow, MTV.
+
+O mais incômodo: **o `c.no_radar=1` já existia na tela de Títulos**, com um comentário que diz "e o topo virava clipe
+de pagode". O conserto foi feito lá e nunca levado para a lista de vídeos, que é a tela que a pessoa usa.
+
+- **A lista de vídeos passa a cortar por `c.no_radar=1`**, como as outras. 62% da lista era lixo.
+- **Canal com rosto não entra mais no Radar** (`garimpo._completar`). O rosto só é sabido depois de medir, então o
+  canal é medido e só então fica de fora — a medida não se perde. `sem_rosto` nulo (o Groq não respondeu) continua
+  entrando: não sabido não é o mesmo que tem rosto. Na base de hoje, 74 dos 420 canais do Radar têm rosto.
+
+Oito testes no `tests/test_so_dark.py`, com o caso real: um "pagodepontocom" com normal de 1.200 e um vídeo de 21
+milhões de views, que sem o corte encabeça a tela e com ele não aparece.
+
+## Tudo no meio da tela, cinco capas por canal e Títulos fora do menu (2026-10-25)
+
+- **A tela estava colada na esquerda.** O `main` tinha `max-width: 1280px` e nenhuma margem automática, e um
+  `main { max-width: 1680px; }` escrito para o Roteiro valia para **todas** as telas — então em monitor largo o
+  Niche Finder nunca chegava ao limite e não havia folga para centralizar. A largura de 1680 passa a valer só para
+  o Roteiro (`body[data-tela="trabalho"]`, com o `rota()` marcando a tela no `body`), e o resto centraliza com
+  `margin-inline: auto`. Medido a 1600 px: 1280 de conteúdo, com folga igual dos dois lados.
+- **Cinco capas por canal** em vez de três (`servidor.VIDEOS_DO_CARTAO`): com três não dá para ver o padrão do
+  canal, que é para o que se olha. A grade cai para 4 abaixo de 1500 px e para 3 abaixo de 1180 px.
+- **Títulos saiu do menu**, a pedido. A tela continua de pé em `#/titulos` e o gerador de títulos segue no Roteiro,
+  que é onde ele é usado.
+
+## Niche Finder numa caixa só, o painel de cota fora e as tags que faltavam (2026-10-25)
+
+Quatro pedidos do usuário, com as telas na mão.
+
+- **O painel de créditos da direita saiu.** Ele repetia o quadro que já existe na barra lateral e comia 290 px de
+  largura em toda tela do Niche Finder (`.com-cota` era uma grade de `1fr 290px`). Saíram o `painelCota`, o
+  `GASTOS`, a `atualizarCota` e o CSS deles. Quanto custa cada coisa continua na **Administração**, em
+  "Onde foi hoje", que é onde ficam os números de verdade — o painel só repetia a tabela de preços.
+- **A busca virou uma caixa.** As visões, o campo de procurar, os filtros, os trilhos e as marcas moravam soltos
+  na página, cada tela espaçando de um jeito. Agora vão todos dentro de `.busca-caixa`: fundo de painel, borda,
+  cantos arredondados e 18–22 px de ar nas laterais. Dentro dela o campo e os selects ficam um tom acima
+  (`--painel2`), senão sumiriam no fundo da própria caixa. Está nas quatro telas do Niche Finder que têm filtro —
+  **Canais** (visões + procura + filtros + trilhos), **Faceless Outliers** (procura + filtros + trilho + marcas),
+  **Grupos de canais** e **Títulos**. A aba **Acharam para você** não tem filtro nenhum hoje, então não ganhou
+  caixa: ela é só a lista do que chegou.
+- **No Perfil, "Roteiro" virou "Produzir"**, que é o nome do botão que a tela já usa ("▶ Produzir"). O botão
+  **Levar ao Roteiro** dos vídeos continua com esse nome: ele fala do que você vai fazer lá, não da aba.
+- **Extensão 0.25.0 — as tags.** As tags moram atrás do "Mostrar mais" dos Detalhes, e eram o campo que mais
+  falhava: o painel clicava uma vez, esperava 700 ms fixos e **desistia calado** se o Studio ainda estivesse
+  desenhando a seção. Agora `abrirAsTags()` insiste até o campo aparecer (de 150 em 150 ms, até 5 s) e o rótulo
+  tem as quatro formas que a tela usa conforme a conta: Mostrar mais, Mais opções, Show more, More options.
+  Quando ainda assim não dá, ele **diz**: "não abriu o Mostrar mais a tempo" ou "a fábrica não mandou nenhuma
+  para este vídeo" — antes, tags sem campo e vídeo sem tags davam no mesmo silêncio.
+
+**E nada disso apareceu na tela.** As quatro mudanças estavam no disco e o servidor as mandava, mas o
+`index.html` pede `/web/app.js?v=104` — um número escrito à mão. O `app.js` mudou três vezes sem que o 104
+subisse, então o navegador continuou usando o arquivo que já tinha guardado: a tela de ontem, sem erro nenhum
+na cara de quem usa. O `/web` também não manda `Cache-Control`, então o navegador decide sozinho quanto tempo
+guardar e nem pergunta ao Radar. Agora a rota `/` monta o index na hora e põe no `?v=` o minuto em que o
+`app.js` ou o `estilo.css` mudou — mexer no painel já é subir a versão, não existe mais número para esquecer —
+e o index vai com `no-store`, senão ele mesmo ficaria guardado e a versão nova não chegaria a ninguém. Dois
+testes no `test_abertura.py` cobram as duas coisas.
+- **O recado virou lista.** Em vez de uma frase corrida, o painel mostra o que marcou e o que não marcou:
+  `✓ título · ✓ descrição · ✓ não é para crianças · ✓ 15 tags · ✓ uso de IA: sim`, e o que está com ✗ fica com
+  você. É o "assinalar" do pedido: a pessoa confere a tela batendo o olho.
+
+Conferido com o Radar ligado, no navegador: as quatro telas montam a `.busca-caixa` com os filhos certos, nenhuma
+tem mais o `#painel-cota`, e o menu do Perfil mostra Produzir. Para a extensão: `chrome://extensions` → ↻ no Radar
+de Canais → F5 na aba do Studio.
+
+## Melhor horário para postar, do próprio canal (2026-10-25)
+
+Pedido depois de abrir a **vidIQ Vision 3.233.0 com o REA**. Na extensão deles o "Melhor Horário para Publicar"
+pede `vidiq.getHistograms` e desenha uma matriz 7 x 24 em 8 faixas de 3 horas. Mas o `select` da consulta faz isto:
+se o servidor devolve a matriz **toda zerada** (sem dado daquele canal), a curva passa a sair de `B6t(videoId)` —
+uma matriz fixa escrita no código (`TAt.activity`, picos genéricos às 15 h e às 19 h) com um ruído de ±15% semeado
+por um hash de `${videoId}-${dia}-${hora}`. Determinística, então não oscila entre recarregamentos; guardada três
+dias no `best-time-to-post-store`, então parece estável; marcada `isPlaceholderData`, com um aviso que só aparece
+para quem é Pro e diz apenas que "a precisão vai melhorar". É o recurso travado no plano `pro` e exige autenticar
+o canal.
+
+O Radar faz a conta de verdade, de graça, em `radar/horarios.py`:
+
+- **De onde sai**: as `leituras` que o `medir.py` já guarda (views acumuladas de cada vídeo). A diferença entre
+  duas leituras vizinhas é o quanto aquele vídeo rendeu naquelas horas — ou seja, quando o público aparece.
+- **As primeiras 24 h de cada vídeo ficam de fora.** O pico de estreia diz a hora em que o canal **postou**, não a
+  hora em que o público assiste; contando a estreia o histograma recomendaria de volta o horário já usado e
+  pareceria certeiro sem nunca ter medido nada.
+- **Cada vídeo pesa 1**: a fatia é dividida pelo total do próprio vídeo antes de somar, senão um vídeo que estourou
+  viraria sozinho o "melhor horário" do canal.
+- **Buraco de mais de 6 h entre leituras é descartado**: par de 24 h diz o total do dia, não a hora.
+- **Sem dado, o Radar diz que não sabe.** Abaixo de 8 vídeos e 200 horas de curva, `suficiente` é falso, `pico` é
+  nulo e a tela escreve o que falta. Número inventado é pior que número nenhum — é exatamente o que a vidIQ faz.
+
+**O limite da fonte, medido no banco**: dos 127.834 pares de leituras vizinhas, só **3%** estão a 6 h ou menos um
+do outro; 73% estão a 13-36 h e 23% a mais de 36. O vídeo só é lido de hora em hora enquanto alguém passa por ele,
+e o canal inteiro é relido uma vez por dia. Por isso o histograma só fecha nos canais que a extensão visitou muito.
+A fonte boa para o canal da própria pessoa já existe e está sem uso: o `extensao/studio.js` busca as views **hora a
+hora das últimas 48 h** na análise do Studio, com o login dela e sem cota — guardando esses pontos a cada passagem,
+em semanas sai um 7 x 24 denso. Fica como próximo passo.
+
+Onde aparece: na **página do canal** no site (própria ou de terceiro), com as 8 barras, as abas de dia da semana e
+o pico; e na **extensão**, na etapa de Visibilidade do Studio — que é onde se agenda e onde o `publicar.js` não
+tinha etapa nenhuma. Lá o cartão só mostra: nessa etapa quem agenda e quem aperta Publicar continua sendo a pessoa.
+A etapa é reconhecida pelo elemento `ytcp-video-visibility-select`, não pelo texto "Visibilidade": o stepper do
+Studio mostra o rótulo de todas as etapas em todas as telas.
+
+Conferido no navegador, com o banco real: Tinocando TV fecha em **21 h às 23 h59 (36,8%)** com 28 vídeos e 387 horas
+de curva, e a curva sobe a tarde inteira; o canal João o Lobo (19 vídeos, 158 horas) mostra o aviso de que ainda
+não dá para dizer. `tests/test_horarios.py` cobre as contas (12 testes). O painel do Studio não foi visto num
+upload de verdade — só o endereço que ele chama. Para a extensão: `chrome://extensions` → ↻ no Radar de Canais.
+
+## A ajuda de postagem que faltava, a extensão que não cai e a descrição sem a lista de imagens (2026-10-25)
+
+Quatro coisas que o usuário cobrou de uma vez: a parte da postagem que o **Dotti Finder** faz e o Radar não fazia,
+a tela de Publicação do Radar que "não faz sentido", a lista de onde vêm as imagens saindo da descrição, e a
+extensão que vive "desligando" — mais a transcrição que às vezes buga.
+
+### Primeiro: a extensão do Dotti, lida no disco
+
+Na vez anterior a análise foi feita na **vidIQ** (`pachckjkecffpdphbpmfolblodfkgbhl`), e ali a ajuda de postagem é
+quase toda inventada — a curva de melhor horário é uma matriz escrita no código. O concorrente que importa aqui é
+outro, e está instalado: `lpnjnahgabpibeaeocmflhdfhocpdkmi`, **Dotti Finder 3.2.21**. A ajuda de postagem deles
+mora em dois arquivos:
+
+- `studio_envio.js` — liga a monetização e responde "nada disso" no questionário, avança a etapa, guarda a escolha
+  para repetir sozinha, e **comprime a capa que passa de 2 MB** (encolhe em degraus de 1920/1280/960/640 e desce a
+  qualidade do JPEG até caber, devolvendo o arquivo no próprio campo do Studio).
+- `studio_ia.js` — **descrição com IA** a partir do título, **tags com IA**, capítulos tirados da legenda, e as
+  horas de mais views do canal com a "hora em que sai lá" no fuso do público.
+
+Batendo com o `publicar.js`, o Radar já fazia mais que eles em quase tudo (detalhes, anúncios de um aperto,
+questionário, tela final, uso de IA, melhor horário medido). Faltavam duas, e são as duas que entraram agora.
+
+### Capa acima de 2 MB
+
+O YouTube recusa capa maior que 2 MB e só diz que o arquivo é grande; a pessoa ia abrir um editor de imagem e
+voltar. Agora a extensão vê a imagem escolhida no campo da capa e, se passar do limite, mostra o cartão com o
+tamanho e um botão: encolhe, salva em JPEG até cair abaixo de 1,95 MB (folga para o Studio não recusar no limite) e
+já põe o arquivo no campo. A imagem no computador não muda. Conferido no navegador com uma capa de 4000x2250 e
+29,5 MB de ruído: saiu **1,18 MB em 1920x1080**, na primeira qualidade da escala.
+
+### Descrição e tags para o vídeo que não é da fábrica
+
+O vídeo que sai da fábrica já chega ao Studio com título, descrição, tags e capítulos prontos — para esse, rascunho
+de IA seria pior que o que ele já tem, e o botão não aparece. Quem não tinha nada era o vídeo gravado fora da
+fábrica: o painel dizia só "título e descrição ficam com você". Agora, nos Detalhes, ele oferece duas coisas, pela
+rota `POST /api/ext/escrever` (plano grátis, `radar/publicar.py`):
+
+- **Escrever a descrição**: de 2 a 4 frases do que o vídeo mostra, na língua do título, e o rascunho entra **em
+  cima** do que já estava no campo — embaixo costuma estar o texto fixo do canal, que não se joga fora.
+- **Sugerir as tags**: de 12 a 20 termos de busca, já cortados no teto de 500 caracteres do campo (`tags_que_cabem`),
+  sem repetir e sem número nem hashtag na frente.
+
+Quem escreve é o **Claude Code que já está instalado** (o mesmo do Roteiro): nada de chave nova, nada de cota do
+YouTube. Se o vídeo já tiver legenda, ela entra no pedido; vídeo recém-enviado ainda não tem, e isso não é erro —
+segue só com o título. Nada é publicado: o texto vai para o campo e quem lê, muda e aperta Publicar é a pessoa.
+
+### A lista de onde vêm as imagens saiu da descrição
+
+Era a fábrica que punha: o `creditos.txt` do projeto ia inteiro no meio da descrição de todo vídeo
+(`fabrica/publicacao.py`). Saiu. O `creditos.txt` continua sendo escrito na pasta do projeto, para conferir de onde
+veio cada imagem quando precisar — o que não acontece mais é essa lista sair publicada embaixo do vídeo. Com os
+créditos fora, o corte no teto de 5.000 caracteres também parou de precisar do aviso "créditos completos no
+arquivo". (Essa parte é no repositório da fábrica, não no do Radar.)
+
+### A tela Publicação do Radar, explicada
+
+Ela não publica nada, e isso não estava escrito em lugar nenhum. Agora a primeira linha diz o que ela é: o lugar
+onde ficam guardadas **as escolhas que a extensão repete** na tela de enviar vídeo do Studio (monetização e
+anúncios, tela final, uso de IA, título/descrição/tags do vídeo da fábrica), e que quem aperta Publicar é a pessoa.
+O texto do rodapé também parou de prometer os créditos que não vão mais.
+
+### A extensão parando sozinha
+
+Eram três coisas diferentes, e nenhuma dizia o que havia acontecido:
+
+- **O Chrome desliga o service worker** e a primeira mensagem depois disso se perde. Agora o pedido que não chega é
+  repetido (`content.js`), e no `background.js` o próprio `fetch` tenta três vezes, com pausa crescente.
+- **O Radar reiniciando** devolvia 502/503/504 ou nem respondia, e a página ficava sem números até o F5. Esses
+  códigos passaram a contar como "não chegou": espera e pede de novo. A janelinha da extensão também reconfere
+  sozinha a cada 3 s enquanto o Radar não responde, em vez de pedir para fechar e abrir.
+- **A extensão recarregada** (`chrome://extensions`, atualização) deixa a página órfã: `chrome.runtime.id` fica
+  vazio e nada mais funciona, calado. Agora aparece o aviso na tela dizendo para apertar F5 — a única coisa que
+  religa. O mesmo guarda-chuva entrou no `claude.js` e no `colar.js`.
+
+### A transcrição que bugava
+
+Dois defeitos, os dois na espera:
+
+- O `content.js` esperava **15 s** por qualquer resposta do `leitor.js`, mas a transcrição pode ligar a legenda do
+  player (até 10 s) e depois tentar o painel do YouTube (até 12 s): 22 s. Estourava o tempo e a aba escrevia **"Este
+  vídeo não tem transcrição"** — mentira. Agora o teto é por pedido (25 s para a transcrição), as esperas de dentro
+  couberam em 6 s e 7 s, e o que falha diz "não consegui ler agora" com um botão de **tentar de novo**. Só o acerto
+  fica guardado; o erro não gruda no vídeo.
+- Abrir a aba e a janelinha do menu ao mesmo tempo disparava **dois pedidos**, que ligavam e desligavam a legenda do
+  player um por cima do outro. Agora é um pedido por vídeo de cada vez, e quem espera a legenda é uma lista em vez
+  de um lugar só.
+
+"Este vídeo não tem legenda, nem automática" passou a ser dito **só quando o player não tem trilha nenhuma**.
+
+Testado: `tests/test_escrever_publicacao.py` (6 testes: o teto do campo de tags, a limpeza do que o Claude manda,
+a fala entrando no pedido) e os 221 do Radar passando. A rota foi chamada de verdade: tags e descrição saíram em 6 s
+para um título do UK MARKET. Os 4 testes que falham em `tests/app_js.test.mjs` já falhavam antes desta mudança (são
+do 503 do site). O painel do Studio não foi visto num upload de verdade — só a conta da capa, rodada no navegador.
+Para a extensão: `chrome://extensions` → ↻ no Radar de Canais (versão 0.27.0).
+
+## Curva da vida, nichos em tabela e títulos recomendados (2026-10-25)
+
+Pedido do usuário com duas telas do Dotti Finder na mão: a faixa "como um nicho nasce e morre" e a lista de nichos em
+tabela, mais os "títulos recomendados". **Não deu para entrar no Dotti para mexer**: o Claude in Chrome não está
+conectado (`list_connected_browsers` devolve vazio), e o site deles é atrás de login — entrar com a senha do usuário
+não se faz. O que deu para ler foi a extensão deles instalada no disco (`regra_tipo.js`, `cracha.js`), onde as
+etapas estão escritas, e as próprias telas das imagens. A regra da casa continua: **a ideia é deles, a conta e as
+palavras são nossas** — nada copiado.
+
+### A tela Canais agora tem três visões
+
+Uma faixa com três botões em cima da lista: **Canais** (a lista de sempre), **Curva da vida** e **Por nicho**. Os
+filtros de cima valem nas três, e o modo vai no endereço (`#/base?modo=vida`), como todo filtro do Radar.
+
+**Curva da vida** (`radar/nichos.py`, `/api/nichos/vida`): cada canal cai numa das cinco etapas pela idade de quem
+posta — o tempo desde o `primeiro_video`, que é o que diz se ainda dá para entrar.
+
+| Etapa | Quanto tempo postando | Veredito |
+|---|---|---|
+| Testando | até 30 dias | Janela aberta |
+| Decolando | 1 a 3 meses | Janela aberta |
+| Disputando | 3 a 6 meses | Já tem fila |
+| Firme | 6 meses a 2 anos | Tarde para entrar |
+| Veterano | mais de 2 anos | Tarde para entrar |
+
+O veredito é **da etapa**, não do canal: diz o que significa, para quem procura onde entrar, achar muita gente ali.
+Cada etapa mostra quantos canais tem, a barra na proporção, e a **média de views do mês** — a soma das views dos
+vídeos que cada canal publicou nos últimos 30 dias, dividida só por **quem publicou**. Canal parado não entra nessa
+média, senão ela viraria uma conta sobre quem desistiu. Clicar numa etapa abre a lista filtrada por ela.
+
+As faixas são **coladas** (fim exclusivo): a idade vem em dias quebrados, e com 0-30 e 31-90 o canal de 30 dias e
+meio sumia da conta. Conferido no banco real: as cinco etapas somam 343, que é o total de canais da lista, sem
+sobra nem falta. A etapa clicada manda `idade_min`/`idade_max` nos mesmos dias (÷ 30,44), senão a faixa dizia 34 e
+a lista abria com 35.
+
+**Por nicho** (`/api/nichos/tabela`): uma linha por nicho com canais, **tráfego típico**, crescendo, parados, views
+no mês e público. Tráfego típico é a **mediana** do normal por vídeo, não a média — um canal gigante no meio de
+pequenos faria o nicho parecer o que ele não é (Geopolítica: 2 canais, 1,7 mi típico; Crimes Reais: 47 canais,
+41 mil). O botão abre a lista naquele nicho, e o select de cima acompanha.
+
+Onde ficamos diferentes do Dotti de propósito: a coluna **DEMANDA** com o botão "medir" deles não entrou. Medir
+demanda de nicho gasta cota do YouTube e nós não temos uma conta de demanda que não seja chute — o que o Radar
+mede de verdade é o que está na tabela. Se virar útil, o lugar dela já está aberto.
+
+### Títulos recomendados
+
+A tela de Títulos saiu do menu de manhã, a pedido do usuário, e voltou de tarde no mesmo dia — porque agora ela abre
+com **⭐ Recomendados para os seus canais**: os títulos que estouraram (5x o normal ou mais) **nos nichos dos canais
+dele**, pelo `meus=1` novo do `/api/titulos`. Com os dois canais cadastrados, a lista sai em Animais e Economia e
+em mais nada. Sem canal, ou com canal sem nicho, o bloco diz isso em vez de mostrar uma lista qualquer fingindo que
+é para você. No menu ela chama-se **Títulos que funcionam**, que é o que ela entrega.
+
+Não é previsão, e o texto na tela diz isso: o Radar não sabe o que vai funcionar amanhã, sabe o que já funcionou no
+mesmo assunto.
+
+### De quebra
+
+A rota `/api/nichos` tinha uma função chamada `nichos`, que tapava o módulo `nichos` novo importado no topo do
+`servidor.py` — as duas rotas novas davam 500 (`'function' object has no attribute`). A função virou
+`nichos_da_base`; o endereço não mudou, porque quem manda nele é o `@app.get`.
+
+Testado: `tests/test_nichos.py` (9 testes: as bordas das etapas com dias quebrados, a média só de quem publicou, a
+mediana contra o canal gigante, nicho sem ninguém, base vazia) e os 236 do Radar passando. Conferido no navegador
+com o banco real: as duas visões desenhando e o bloco de recomendados com 12 títulos em Animais e Economia. E as
+cinco etapas batem uma a uma com a lista que elas abrem — 34, 68, 67, 144 e 30, faixa e lista com o mesmo número.
+
+## A tela travada dos Vídeos e as quatro formas da curva da vida (2026-10-25)
+
+Dois pedidos do usuário com a tela de **Vídeos** (Faceless Outliers) aberta na frente.
+
+### Travar 10 na tela
+
+A lista de Vídeos rolava sem fim embaixo do núcleo de busca: ele olhava vinte capas, rolava, carregava mais vinte e
+perdia o lugar — e não tinha onde pôr de lado o vídeo que queria rever no fim da sessão. O botão **📌 Travar 10 na
+tela**, ao lado de "Buscar vídeos novos no YouTube", muda a tela inteira enquanto estiver ligado:
+
+- **Dez de cada vez, parados.** A lista para de crescer: pede `por: 10` ao `/api/videos` e troca "Carregar mais" por
+  **← Anterior / Próximo →**, com `11–20 de 1.353` no meio e `página 2 de 136` na contagem. As setas ← e → do
+  teclado viram a página também (o ouvinte sai sozinho quando a tela sai do ar, e não atrapalha quem está digitando
+  na busca). Cada virada volta ao topo do bloco: a imagem fica travada no mesmo lugar, só o conteúdo muda.
+- **O núcleo de busca recolhe.** A `busca-caixa` some e no lugar dela fica uma aba, **🔍 Abrir a busca e os
+  filtros**, que abre e fecha com um clique. Os filtros continuam valendo (estão no endereço, como sempre); só não
+  ocupam mais meia tela enquanto ele olha as capas.
+- **Separar para ver depois.** Cada vídeo ganha um **⇥ Separar** ao lado de "Salvar ideia", e a capa também pode ser
+  **arrastada** para a bandeja de cima. O que está na pilha fica apagado na grade e com ✓ Separado, para ele não
+  separar duas vezes nem reler o mesmo vídeo. Na bandeja, cada item tem capa, título, canal, a nota e um ✕.
+
+A pilha vive **só nesta janela**, como ele pediu em maiúsculas: não vai para o banco nem para o endereço, e fechar a
+aba apaga. É a mesa de trabalho de uma sessão de garimpo, não um arquivo — para guardar de verdade continuam lá o
+🔖 da esteira (no canto da capa, que grava no servidor) e o 💡 Salvar ideia. O texto da bandeja diz isso.
+
+Soltar a tela devolve tudo: 24 por página, "Carregar mais" e a busca aberta. A pilha, se tiver alguma coisa, fica à
+vista.
+
+### A curva da vida, de quatro jeitos
+
+A **Curva da vida** (em Canais) tinha um desenho só — as cinco barras. Agora tem uma faixa de formas em cima, e os
+quatro desenhos saem dos **mesmos números** do `/api/nichos/vida`; nenhum recalcula nada:
+
+| Forma | O que mostra |
+| --- | --- |
+| **Barras** | o de sempre: a altura diz quantos canais estão na etapa |
+| **Faixa inteira** | uma régua só, cada etapa com a sua fatia em % do nicho, e a legenda embaixo |
+| **Funil** | uma linha por etapa, do começo da vida ao fim, com a barra, o número e o veredito lado a lado |
+| **Tabela** | canais, quantos postaram no mês, quantos estão crescendo, views/mês e veredito, tudo comparável |
+
+E o clique numa etapa mudou de destino: antes trocava de tela e levava para a lista de **canais** daquela etapa;
+agora abre, **aqui embaixo**, os **vídeos** que estouraram nos canais dela — os 12 de maior nota, 5x o normal do
+próprio canal, com o nicho do filtro junto. Ir para os canais virou um botão dentro do bloco ("Ver os canais desta
+etapa"), ao lado de "Fechar". A forma escolhida e a etapa aberta ficam no endereço (`vida_forma`, `vida_etapa`): o
+link reabre a tela do mesmo jeito.
+
+Para isso o `/api/videos` ganhou o parâmetro **`etapa`**, que filtra pela idade de **quem posta** (o
+`canais.primeiro_video`), não pela idade do vídeo, usando a mesma faixa de dias que a faixa contou —
+`nichos.limites()` é a única fonte dos cortes, para a contagem da etapa e a lista que ela abre nunca divergirem.
+Chave que não existe (endereço velho, nome torto) não vira filtro nenhum em vez de virar lista vazia.
+
+Testado: `tests/test_nichos.py` (11 testes, dois novos para os limites das etapas) e os 238 do Radar passando. No
+navegador, com o banco real: travar mostrou 10 de 1.353 em "página 1 de 136", Próximo levou a 11–20, separar e
+arrastar encheram a pilha, a aba reabriu a busca e soltar voltou para os 24; as quatro formas desenharam e
+"Testando" abriu 72 vídeos de canais com menos de 30 dias de casa. Os quatro testes que já falhavam no
+`tests/app_js.test.mjs` antes desta leva (os do 503) continuam falhando — nada aqui mexeu nesse trecho.
+
+## A barra de carregamento da fábrica, na barra de tarefas do Windows (2026-10-25)
+
+Pedido do usuário: ver a produção andando sem abrir o Radar toda hora — do jeito que o Chrome faz quando está
+baixando um arquivo, com o ícone na barra de tarefas enchendo. **Nenhuma página de navegador consegue isso**:
+quem pinta a barra de tarefas é o Windows, pelo `ITaskbarList3`, e só para um programa com janela própria. (A
+primeira tentativa foi inventar contorno dentro do navegador — barra no canto do site, janela, aplicativo
+instalável. Tudo isso foi jogado fora: não era o que o usuário pediu.)
+
+Então é um programa: `radar/barra.py`, `python -m radar barra`, ou o **`BARRA-DA-FABRICA.bat`** na raiz, que o
+abre pelo `pythonw` (o Python sem a janela preta — só a janelinha aparece).
+
+- Uma janelinha de 260×96 com a **porcentagem em verde** e o título do vídeo embaixo. O ícone dela é o ponto
+  verde do Radar, desenhado em código — sem isso a barra de tarefas mostra a pena do tkinter, que não diz nada.
+- O título da janela vira `62% · Fábrica`, que é o que aparece ao passar o mouse no botão da barra de tarefas.
+- **Minimize e esqueça**: o botão continua lá e a barrinha continua enchendo.
+- De 10 em 10 segundos ele pergunta ao `/api/acompanhar`. Pedido vindo de `127.0.0.1` já entra como a
+  administração pelo acesso livre do Radar (`_usuario_livre`), então o programa **não precisa de login nem de
+  token** — e nada no servidor mudou por causa disto.
+- Vários vídeos ao mesmo tempo: a barra é uma só, então ela mostra a **média** — o quanto falta para a leva
+  inteira acabar — e a linha de baixo vira "3 vídeos · 88% · 54% · 12%". Quem quiser o de cada um abre o
+  Acompanhar.
+- Nada produzindo = sem barra nenhuma. Parado ou com erro = barra vermelha e "Parou: <título>". Radar
+  desligado = barra amarela e "O Radar está desligado".
+
+O `ITaskbarList3` não tem função solta: é um objeto COM, e as funções dele vêm numa tabela, por posição. O
+`BarraDaTarefa` chama na mão pelo `ctypes` — 3 é o `HrInit`, 9 o `SetProgressValue`, 10 o `SetProgressState` —,
+então **não entrou dependência nenhuma** no projeto. A janela que tem o botão na barra de tarefas não é a que o
+tkinter entrega no `winfo_id()`, e sim a mãe dela (`GetParent`); pintar a de dentro responde `S_OK` e não
+desenha nada.
+
+**Como o Windows 11 desenha isso** (e o que atrapalhou na hora de conferir): ele **não** enche o ícone de verde
+como o Windows 10 fazia. Ele pinta uma **linha fina embaixo do ícone**, do comprimento da porcentagem, na cor de
+destaque do sistema (azul, aqui) — e vermelha quando o estado é de erro. À primeira vista é igualzinho ao
+risquinho de "aplicativo aberto" que todo ícone tem, e foi por isso que a primeira conferida deu "não
+funcionou". O teste que resolveu foi pintar 100% em vermelho: a linha ficou vermelha e larga, sem dúvida
+nenhuma. Depois, 62% e 15% lado a lado mostraram o comprimento mudando com o número. Não dá para mudar nem a
+cor nem a grossura: isso é do Windows.
+
+Testado no computador do usuário, com o `ITaskbarList3` respondendo `S_OK` em todas as voltas: 62% desenhou a
+linha quase do tamanho do ícone, 15% virou um tracinho, 100% em vermelho ficou vermelho, e a janela mostrou
+"62%" com o título do vídeo e o ponto verde no lugar da pena. Com a fábrica vazia (o caso real na hora do
+teste), a barra some e a janela diz "Nada sendo produzido agora", que é o certo.
+
+## A descrição pronta antes do vídeo, e o agente que a escreve (2026-10-28)
+
+Pedido do usuário: *"quando gerar o roteiro no Claude quero que já gere uma descrição... vou criar um projeto que
+será para a criação de descrição; a descrição será criada enquanto o vídeo está sendo feito"*.
+
+**O que estava errado.** Quem escrevia a descrição era a fábrica, no `publicacao.json` de cada projeto — e esse
+arquivo só existe **depois** de narrar, gerar as imagens e montar o vídeo inteiro. Entre mandar o roteiro e o
+vídeo ficar pronto passam horas, e nesse meio-tempo a extensão no YouTube Studio não achava nem o projeto: ela
+procura pastas que já tenham `publicacao.json`. Quem chegava com o `.mp4` na mão via "não achei este vídeo na
+fábrica: título e descrição ficam com você".
+
+**O que mudou.** O Claude escreve a descrição **no mesmo minuto do roteiro** — ele acabou de ler o texto todo, que
+é a melhor fonte que existe para isso. O novo `radar/descricao.py` pede sinopse, tags e hashtags em JSON, limpa o
+que vem (tag repetida sai, tag grande demais sai, hashtag ganha o `#` que faltava) e guarda em `descricao.json`, ao
+lado do `roteiro.txt`. Falhar ali não derruba o roteiro: o erro fica no `roteiro.json` e a tela de Revisão oferece
+"Escrever de novo".
+
+**Agentes de descrição.** A tela de Agentes agora tem duas listas: *de roteiro* e *de descrição*. O agente de
+descrição é a mesma coisa que o de roteiro — as instruções de estilo que você cola de um projeto do claude.ai —,
+só que valem para a sinopse, as tags e as hashtags. Sem nenhum, valem as regras do Radar. Com um só, ele é usado
+sozinho; com vários, você escolhe na tela do Roteiro. No banco é a coluna `tipo` de `projetos_roteiro`
+(`roteiro` ou `descricao`), e os agentes que já existiam continuam todos de roteiro.
+
+**Como chega ao Studio.** Ao enviar o roteiro para a fábrica, o `descricao.json` vira `publicacao_radar.json`
+dentro da pasta do projeto, já com a descrição montada: a sinopse, o rodapé fixo do canal (do perfil da fábrica,
+como sempre) e as hashtags. A partir daí:
+
+- `publicar.py` acha o projeto por **esse** arquivo também, não só pelo `publicacao.json` — então a extensão
+  encontra o vídeo com ele ainda sendo feito.
+- No kit, o texto do Radar **ganha** do da fábrica (descrição, sinopse, tags e hashtags). Os capítulos, a legenda
+  e a duração continuam vindo da fábrica, que é quem os tem.
+- O kit passou a dizer de onde veio o texto (`origem`: `radar` ou `fabrica`), e a extensão diz isso no recado:
+  "A descrição, as tags e as hashtags vieram do Radar, escritas junto com o roteiro".
+
+**Todo vídeo vai com descrição** (pedido do usuário em 2026-11-17: "coloque sempre descrição para o Claude criar e
+ir com o vídeo"). São três camadas, porque falhar uma vez não pode deixar o vídeo pelado:
+
+- Junto com o roteiro, o Claude tenta `roteiro_claude.TENTATIVAS_DESCRICAO` (3) vezes.
+- No envio para a fábrica, se ainda faltar, o Radar escreve ali mesmo antes de a fábrica começar o vídeo.
+- Na hora de postar, `descricao.garantir` lê o `publicacao_radar.json` do projeto e, faltando, escreve pelo roteiro
+  guardado e leva. **Sem descrição o vídeo não sobe**: fica o recado no pedido e o Radar tenta de novo em 15 min.
+- Postando pelo Radar (`agendar`, teste do canal), a descrição, o título e as tags vão **no próprio pedido** de
+  publicar (`fabrica_api.youtube_publicar(titulo=…, descricao=…, tags=…)`), porque a fábrica, sozinha, sobe com o
+  `publicacao.json` dela — o molde dela, que pode até sair "sem modelo" quando a chamada falha.
+
+**O que já era assim e continua.** Nos Detalhes, a extensão marca sozinha **"Não, não é conteúdo feito para
+crianças"** e **"Uso de IA: Sim"** (os vídeos da fábrica são feitos com IA), além de escrever título, descrição e
+tags. Isso não mudou — o que faltava era a descrição existir a tempo.
+
+## O título traduzido para a língua do vídeo, e o agente CANAL DE TESTE (2026-10-29)
+
+Pedido do usuário: "o título lá pode ser em português, porém sempre terá a tradução automática pra língua que vai
+ser falada".
+
+- **`roteiro_claude.traduzir_titulo`**: na Nova produção o título pode ser escrito em português. Quando o roteiro é
+  feito (pelo Claude ou colado), o título é traduzido para a língua do pedido, pelo `claude -p --model haiku` (a
+  assinatura, sem custo por uso). O Claude já escreve o roteiro para o título traduzido. No `roteiro.json` ficam
+  `titulo` (o traduzido, que vira o `titulo_entrega` da fábrica e o título da descrição) e `titulo_original`.
+- Título já na língua certa (português, inglês e espanhol, pelo `gosto.lingua`) nem chama o Claude. Tradução que
+  falha ou volta estranha (várias linhas, comprida demais) deixa o título como veio: o vídeo não para por isso.
+- Testado com o Claude de verdade: "Por que os gatos dormem 16 horas por dia?" virou "Why Do Cats Sleep 16 Hours a
+  Day?" e "Waarom slapen katten 16 uur per dag?". Testes em `tests/test_titulo_traduzido.py`.
+- **Agente CANAL DE TESTE** (id 8, criado direto no banco pela rota `POST /api/projetos`): o primeiro vídeo de um
+  canal novo, só para ver se o canal é confiável. De 2 a 3 minutos, na língua escolhida na Nova produção, com assunto
+  universal que dá para mostrar só com vídeo de banco grátis (Pexels/Pixabay), sem polêmica e sem dinheiro.
+
+## Extensão 0.31.0: o canal já traz o agente, e o 🧪 Canal de teste (2026-10-29)
+
+Pedido do usuário: "se eu já escolhi o canal João o Lobo, já tem que ir pro projeto; o único que terá que escolher
+é realmente o canal de teste, porque ele é genérico". Desfaz a escolha obrigatória do agente de 2026-10-28.
+
+- **Os canais sempre à vista no passo 1** da Nova produção da extensão, e escolher um canal já escolhe o agente dele
+  (o select continua lá para trocar). Saiu o botãozinho "usar o agente padrão de…" e o "(escolha obrigatória)".
+- **🧪 Canal de teste**: um chip a mais, para o primeiro vídeo de um canal novo. Vem com o agente CANAL DE TESTE e
+  3 minutos, e pede a **língua do vídeo**; a **voz** é um perfil da fábrica que fala essa
+  língua (o primeiro já vem escolhido). A língua usada fica lembrada.
+- **Sempre de 2 a 3 min** (0.31.1, pedido do usuário): na janela só existem os atalhos de 2 e 3 min, e a fila
+  (`fila.minutos_do`) prende o roteiro do Canal de teste entre 2 e 3 min, venha o tamanho que vier.
+- `GET /api/fila/teste`: o id do agente CANAL DE TESTE e as línguas que têm voz na fábrica, com os perfis de cada.
+- O pedido da fila aceita `perfil` (`fila.perfil_do`): o Canal de teste vai sem `canal_id`, e o perfil escolhido vale
+  para o ritmo do roteiro e para criar o projeto na fábrica.
+- Para usar: reinicie o Radar (LIGAR-RADAR.bat) e, em `chrome://extensions`, clique no ↻ do Radar de Canais e
+  recarregue a aba do YouTube.
+
+## Um erro da fábrica num pedido não para mais a fila (2026-10-30)
+
+A fila ficou parada: a fábrica da porta 8080 era a de outra pasta (`tiplabs\backend-editor`, ligada à mão), que só
+tinha projetos de teste antigos, e o `POST /api/projetos/NOME/retomar` do primeiro da fila voltava "Projeto não
+encontrado". O pedido voltava para a fila a cada 20 s e os de trás nem o roteiro começavam.
+
+- **`fabrica_api.FabricaDesligada`** (filha de `SemFabrica`): só a fábrica fora do ar — porta muda (`httpx.HTTPError`)
+  ou chave recusada (401). Qualquer outro erro dela segue como `SemFabrica`, que é erro sobre o que foi pedido. Quem
+  pega `SemFabrica` (o site, as Integrações, o painel do canal) continua pegando os dois.
+- **O vigia da fila** (`fila.passo`) só termina a volta na `FabricaDesligada`: aí o pedido espera, sem erro, e a fila
+  espera com ele. Um erro da fábrica sobre o projeto vira o erro daquele pedido ("Tentar de novo" reaproveita o
+  projeto, sem pagar outro) e a volta segue para os próximos, inclusive os roteiros, que nem dependem da fábrica.
+- Se a fábrica certa voltar e retomar o vídeo por fora, o pedido sai do erro sozinho (a regra 1b, de 2026-10-27).
+- **Qual fábrica está na porta 8080**: a de `RADAR_FABRICA` (`fabrica-videos`) é a que o Radar enche de projetos. O
+  `LIGAR-TIPLABS` de outra pasta rouba a porta e o Radar não acha nada; o vigia do `fabrica-videos` não religa, porque
+  a intrusa responde no `/api/saude`. Testes em `tests/test_fila.py`.
+
+## As imagens de IA pela assinatura do ChatGPT (2026-11-01)
+
+O Robô do Dotti passou a deixar a pessoa gerar as imagens pela assinatura do ChatGPT, em vez da chave de API. Agora
+o Radar e a fábrica fazem o mesmo. É o mesmo caminho que o roteiro já usava com o Claude (`claude -p` pela
+assinatura do claude.ai): quem entra aqui é o **Codex deste computador**, logado com `codex login` na conta ChatGPT.
+
+- **Quem gera é a fábrica**, então o login e a geração moram nela: `fabrica/chatgpt_assinatura.py` lê
+  `~/.codex/auth.json` (nunca a `OPENAI_API_KEY`, que cobraria por fora), renova o token sozinho e pede a imagem na
+  mesma porta que o Codex usa (`chatgpt.com/backend-api/codex/responses`, com a ferramenta `image_generation` e o
+  `gpt-image-2`). **Não é API pública**: a OpenAI pode mudá-la sem aviso, e por isso nada depende dela.
+- **O perfil do canal escolhe**: `imagens.provedor: assinatura` liga, e `imagens.provedor_reserva` (padrão
+  `openrouter`) guarda quem atende se o limite acabar **no meio de um vídeo** — as imagens que faltam saem pela
+  chave de API, o vídeo nunca para. Sem login nenhum, a reserva assume desde a primeira imagem, com aviso no log.
+- **No Radar**, na *Configuração do canal*, entrou **🖼 Quem gera as imagens de IA**: assinatura do ChatGPT ou chave
+  de API. A escolha é gravada direto no perfil da fábrica (como o rodapé), em um lugar só.
+- **Integrações › Conexões da conta** mostra o cartão do ChatGPT: a conta ligada, o plano e quanto já foi usado das
+  duas janelas que o ChatGPT conta (5 horas e semana). Elas vêm nos cabeçalhos de cada pedido e ficam em
+  `chatgpt_limites.json` na fábrica, para a tela não precisar gerar nada só para saber.
+- **Custo**: imagem pela assinatura entra nos Custos como **US$ 0,00** (`custos.preco_da_imagem`); o que gasta é o
+  limite da assinatura.
+- Rotas novas: `GET /api/chatgpt/estado` na fábrica e no Radar; a assinatura também aparece em
+  `GET /api/imagens/provedores` da fábrica. Testes em `tests/test_imagens_assinatura.py`.
+
+### Trocar a conta do ChatGPT e a escolha de cada canal em Integrações (2026-11-02)
+
+Pedido do usuário: "em Integrações tem que ter a opção de mudar o ChatGPT para a conexão" e "poder integrar outra
+conta de ChatGPT".
+
+- **Outra conta**: o Codex nem está instalado neste computador, então o Radar faz o mesmo login que o `codex login`
+  (`radar/chatgpt_conta.py`): **Conectar outra conta** abre `auth.openai.com` numa aba (PKCE, o client_id do Codex,
+  `prompt=login` para dar para escolher outra conta), a OpenAI volta para `http://localhost:1455/auth/callback` (a
+  porta é fixa porque é a que o Codex registrou) e o login novo vai para `~/.codex-fabrica/auth.json`, que a fábrica
+  lê a cada imagem. A conta de antes, com o limite usado dela, vai para `~/.codex-fabrica/contas-radar/` e volta com
+  **Usar esta**. Rotas `/api/integracoes/chatgpt/{contas,conectar,cancelar,usar,esquecer}`, só no computador da fábrica.
+- **Cada canal**: o cartão lista os perfis da fábrica com o seletor *Conexão do ChatGPT* / *Chave de API* (o mesmo
+  `imagens.provedor` da Configuração do canal) e os botões **Todos pela conexão** / **Todos pela chave de API**, que
+  só mexem nos perfis `canal-*`; os modelos (documentário, meditação…) ficam num "ver mais".
+- Testes em `tests/test_chatgpt_conta.py`, inclusive a volta da OpenAI de ponta a ponta com o código simulado.
+- **A pasta do login é só da fábrica** (`~/.codex-fabrica`, ou `FABRICA_CODEX_HOME`), mudança do mesmo dia: no
+  `~/.codex` ela dividia o login com o Robô do Dotti, que usa o Codex deste computador. Trocar a conta no Radar trocava
+  a do Dotti junto (de manhã ele pegou uma conta grátis, que não gera imagem), e os dois renovando o mesmo login
+  fizeram a OpenAI revogá-lo (`token_revoked`): o Dotti caiu na chave paga da OpenAI, sem crédito, e parou de fazer
+  vídeo. Agora cada um tem a sua conta: a da fábrica se liga em **Conectar outra conta**, a do Dotti com o
+  `codex login` dele. A fábrica (`fabrica/chatgpt_assinatura.py`) lê a mesma pasta; a versão do Codex continua vindo
+  do `~/.codex`.
+
+### O agente excluído no Claude sai do Radar (2026-11-02)
+
+A extensão agora manda também `vistos`, o uuid de todo projeto que achou no claude.ai (arquivados também). Os
+agentes ligados a um projeto que não está ali voltam em `faltando`, e a extensão abre cada um direto no claude.ai:
+só o que dá **404 em todas as organizações** vai para `POST /api/ext/projetos-claude/excluidos` e sai do Radar. Uma
+lista que veio pela metade não apaga nada, e a extensão antiga (sem `vistos`) também não.
+
+**Todos os agentes, não só os ligados (2026-11-12, extensão 0.45.6).** Pedido do usuário: "todos os agentes quando
+removidos do Claude devem ser excluídos do Radar também". FILIPINAS, COLOMBIA e INSETO nunca tinham sido ligados a
+um projeto, e a regra acima só via os ligados: ficavam para sempre. Agora a extensão manda também `orgs` (as
+organizações que leu inteiras) e, com elas, o agente de roteiro que não se liga a projeto nenhum sai do Radar na
+mesma leitura. O Radar vira o espelho do Claude: um agente criado só no Radar também sai na próxima leitura (a cada
+meia hora). Ficam o **CANAL DE TESTE**, que mora só no Radar (a fila usa ele), e os agentes de descrição. Uma lista
+vazia agora também conta (apagou todos no Claude: todos os ligados vão para a conferência do 404).
+
+## O roteiro é conferido antes de sair, e a margem passa a ser de 1 minuto (2026-11-01)
+
+Pedido do usuário: "o Radar tá entregando vídeos com a duração errada, tem que conferir e colocar algo que sempre
+confira o resultado e regule pra acertar cada vez mais. O vídeo de 30 min saiu com 17, o máximo de erro é 1 minuto."
+
+Nos 32 vídeos medidos até aqui, **19 estavam fora de 1 minuto**, com erro médio de 2,2 min e o pior com 8,2
+(pediu 15, saiu 23,2). O ajuste de 2026-10-22 acertava quantas palavras *pedir*, mas essa era uma aposta feita
+**antes** de escrever: nenhuma conta olhava o roteiro pronto. Daí os dois lados do erro:
+
+- **Faltando.** O laço de continuação desistia depois de 4 voltas e parava de vez quando uma continuação voltava com
+  menos de 50 palavras. Um pedido de 30 min que parasse em 3.700 palavras saía como vídeo de 17 minutos, sem aviso.
+- **Sobrando.** Nada cortava. 15 min pedidos saíram com 23,2, 22,8 e 21,7 minutos.
+- **A reserva por língua cruzava vozes incompatíveis.** A mesma língua tem voz de 134 e voz de 215 palavras por
+  minuto: sem medida da voz nova, dimensionar 30 min pela voz lenta dá **17 minutos** de vídeo na voz rápida.
+- **Vídeo curto e vídeo longo entravam na mesma mediana.** Um de 3 min e um de 30 min da mesma voz não medem a mesma
+  coisa, e a mediana pulava de 120 para 182 palavras por minuto no mesmo canal.
+
+O que entrou:
+
+- **A margem é de 1 minuto** (`tempo.MARGEM_MIN`, era 1,5).
+- **`tempo.conferir()`**: a conta que diz quantos minutos **este** roteiro vai dar, no ritmo real da voz, quantas
+  palavras faltam ou sobram, e se cabe na margem.
+- **`roteiro_claude._conferir_tamanho()`**: a conferência roda **sempre**, logo depois de o Claude escrever e antes
+  de o roteiro poder ir para a fábrica. Falta, o Claude continua de onde parou; sobra, o Claude **condensa o roteiro
+  inteiro** (corta o que repete, mantém o gancho, os assuntos na ordem e o fechamento). Até 6 voltas. Uma volta que
+  piora não entra — fica sempre a melhor — e uma volta fraca não desiste mais do roteiro: ele tenta de novo.
+  O que aconteceu em cada volta fica em `conferencia` no `roteiro.json`.
+- **O erro da previsão é medido** (`medido.erro_previsao_min`): o tempo que a conferência previu contra o vídeo que a
+  fábrica entregou. É esse número que tem de ir a zero, porque o erro de tamanho do roteiro a conferência já corrige
+  antes de enviar. Ele aparece no acerto da voz como `erro_previsao_medio`.
+- **A base aprende por tamanho parecido** (`tempo._parecidos`) e **a língua só serve de reserva entre vozes que falam
+  parecido** (até 20% de diferença). Vozes que discordam mais do que isso não servem uma para a outra: fica o padrão,
+  e a tela diz que a voz ainda não tem medida.
+- **Na tela de Revisão**, embaixo do roteiro: "6.480 palavras · 30,0 min de narração (216 palavras por minuto)" e,
+  quando passa da margem, o aviso vermelho "⚠ Fora da margem de 1,0 min: você pediu 30 min e o roteiro dá 17,0 min
+  (-13,0 min). Acrescente umas 2.795 palavras." A conta atualiza enquanto você edita o texto. Antes essa linha usava
+  as 150 palavras por minuto fixas, e dizia "17 minutos" num roteiro que ia dar 30.
+- `tests/test_conferencia_tempo.py`: a conta da conferência, o roteiro curto continuado até caber, a continuação
+  fraca que não desiste, o roteiro comprido condensado, a volta que piora e não entra, o erro da previsão medido
+  contra o vídeo entregue, a voz lenta que não dimensiona a rápida e o vídeo curto que não puxa o longo.
+- O Radar precisa ser religado (LIGAR-RADAR.bat) para a conferência valer.
+- **Japonês e chinês (2026-11-04).** Eles não separam palavras com espaço, e o Radar contava por espaço: a limpeza
+  apagava todo parágrafo japonês como se fosse título, e 4.500 letras pareciam 30 palavras. Agora
+  `roteiro_claude.contar_palavras()` conta duas letras como uma palavra (300 letras por minuto, a conta do agente do
+  canal), o pedido ao Claude fala em caracteres nessas línguas, e vídeo narrado no alfabeto errado não entra na
+  medida do ritmo da voz. Testes em `tests/test_roteiro_japones.py`.
+
+## Animações (Ferramentas > Animações)
+
+Pedido do usuário em 2026-11-07: cada ferramenta é uma página, como no Higgsfield. A página mostra a galeria de estilos
+da fábrica e, se a pessoa quiser, o **Personalizar**: cores, fundo, letras e quais animações podem entrar. A prévia é a
+própria animação tocando no navegador, sem gravar nem gastar.
+
+- **Guardar com um nome:** fica no banco do Radar (`radar/estilos_animacao.py`), por pessoa, e aparece na Nova produção.
+- **Na Nova produção:** o campo Animações vale só para aquele vídeo. Vai no pedido da fila, e `fila.passo` manda à fábrica
+  antes de produzir. "Padrão do canal" não manda nada.
+- **Padrão do canal:** grava no `perfis/canal-*.yaml` da fábrica; vale para os próximos vídeos. Canal sem perfil próprio
+  precisa escolher a voz primeiro.
+- **Conferir:** a mesma conferência da gravação, uns 40 s, grátis. A cena que reprova na produção volta para a foto.
+- Tudo passa pelo servidor do Radar: a chave da fábrica nunca chega ao navegador. Quem confere e aplica é a fábrica
+  (`fabrica/ajustes_animacao.py`, com as regras no CLAUDE.md dela).
+
+
+## Extensão 0.46.0: Canal de teste de 5 min sem narração (2026-11-12)
+
+Pedido do usuário: "canal de teste no radar tem que ter a opção de 5 min também, porém não narra nada e não usa IA,
+só usa base de imagem e vídeos de graça; a língua será só para os motions".
+
+- **Na Nova produção**, o 🧪 Canal de teste ganha dois chips: **Narrado · 2 a 3 min** (o de antes) e **5 min · sem
+  narração**. No sem narração a língua é "Língua dos textos na tela (motions)" (português, inglês, espanhol e as que
+  têm voz) e não há voz para escolher.
+- **A fila** (`fila.criar`): `sem_narracao` só vale sem canal; força `ia: sem` e `avatar: sem`, tira `ia_pct`,
+  `video_ia` e `footage_real`, e escolhe o perfil da fábrica pela língua (`sem-narracao` em português,
+  `sem-narracao-en` nas outras). `fila.minutos_do` dá sempre 5 min, e o pedido ao Claude leva "MODO SEM NARRAÇÃO".
+- **Na fábrica** (`roteiro_claude.ajustes_do_video`): `ia.ativa: false`, `video_ia.fracao: 0`, `garimpo.ligado: false`,
+  e no perfil `narracao_no_video: false`, sem legenda e sem avatar. A voz do computador só mede o tempo das cenas.
+- **A fábrica não tirava a voz**: o perfil `sem-narracao` dizia que o vídeo saía sem ela, mas `render._trilha` sempre
+  misturava a `narracao.wav`. Agora, com `narracao_no_video: false`, ela entra com volume 0 (repositório
+  fabrica-videos, `tests/test_narracao_no_video.py`).
+- **A regra** está no agente CANAL DE TESTE (id 8, no banco): a seção "Vídeo de 5 min sem narração" — umas 750
+  palavras, frases curtas e visuais que viram cenas de banco grátis e textos na tela, nada que só faça sentido ouvido.
+- Testes em `tests/test_fila.py::test_canal_de_teste_de_5_min_sem_narracao`. Para usar: reinicie o Radar e a fábrica,
+  e dê ↻ na extensão em `chrome://extensions`.
+
+
+## Extensão 0.46.1: o painel novo de estatísticas do Studio e a receita do último dia (2026-11-12)
+
+Pedido do usuário: "o youtube atualizou esta página e agora nossa extensão não funciona, arruma ela e coloca ali no
+dinheiro sempre o valor último recebido".
+
+- **O que quebrou:** o Studio trocou o painel (`analytics/hub_overview`, "Channel insights"). O `yta_web/get_cards`
+  que o `studio.js` usava passou a voltar os cartões com `isFailed` e `statusCode: 7` (sem permissão), e o título
+  "Last 48 hours" virou "48 hour views". O "Hoje" sumiu e as 48 horas pararam de chegar ao youtube.com e ao horário
+  de postar.
+- **Agora:** o `studio.js` pede a tela como o próprio Studio, `youtubei/v1/browse` com `browseId`
+  `FEanalytics_hub_channel_overview` (ou `..._revenue`) e `params` = protobuf `{200: {1: {2: "UC..."}}}` em base64.
+  As 48 horas saem do cartão com gráfico de barras de hora em hora; o "Hoje" vai no cartão cujo título é o desse
+  cartão (vale em qualquer idioma). O pedido antigo fica como reserva.
+- **Receita do último dia:** no cartão Receita estimada (painel e aba Receita) entra a linha verde com o valor do
+  dia mais recente que já tem número no gráfico diário da aba Receita, escrito na moeda da página (ex.: R$459.74 ·
+  10 de nov). Se esse dia ainda está na faixa "processando" do Studio, a linha avisa. Relê a cada 15 min e volta
+  sozinha quando o Studio redesenha o cartão.
+- Os ganhos de 12 meses (`ano()`, ainda no `get_cards`) não foram mexidos.
+- Para usar: dê ↻ na extensão em `chrome://extensions` e recarregue o Studio.
+
+
+## Extensão 0.46.2: o agente do roteiro é sempre escolhido na hora (2026-11-13)
+
+Pedido do usuário: "quero que a parte do agente sempre tenha que escolher… sempre que vou pedir na extensão já tem
+um selecionado". Um vídeo da Coreia tinha saído com o agente da Austrália: o canal lembrado (Aussie Tech) já
+trazia o agente dele, e o pedido passou sem ninguém olhar.
+
+- **Nova produção (extensão):** o select "Agente do roteiro" abre sempre em "— escolha o agente —", também quando
+  o canal já vem lembrado, quando se troca de canal e no Canal de teste. Ele fica vermelho e o envio não passa sem
+  escolha (a trava de 2026-10-28 continua). Isso desfaz o "o canal já traz o agente" de 2026-10-29.
+- Embaixo do select, a dica diz qual é o agente do canal ("O agente deste canal é X, mas a escolha é sempre sua").
+- **3 · Confirmar:** se o agente escolhido não for o do canal, a linha do agente fica amarela, com "Não é o agente
+  deste canal (X). Confira se é esse mesmo."
+- Para usar: dê ↻ na extensão em `chrome://extensions`.
+
+
+## Visual minimalista no Radar inteiro, Meu dia no menu e no YouTube (extensão 0.48.0, 2026-11-14)
+
+Pedido do usuário: "gostei daquela identidade visual minimalista, quero no Radar inteiro"; o Meu dia embaixo do
+Perfil; o Meu dia no lugar do Claude no YouTube ("pode retirar o Claude"); e o menu da esquerda sai quando se entra
+numa aba e só volta com o mouse no canto esquerdo.
+
+- **Visual (`estilo.css`, bloco do fim):** o do Meu dia. Fundo `#0d0f14`, painéis `#151820` com fio `#262b36` e sem
+  sombra, letra do sistema (as fontes do Google saíram do `index.html`), botões redondos e o vermelho `#ff0000` de
+  acento. `IDENTIDADE` (app.js) virou vermelho; a chave `radar:identidade-3` troca a cor uma vez, depois vale o Cores.
+- **Menu da esquerda:** fica escondido; aparece com o mouse no canto esquerdo (a faixa `#beirada-menu`, com um
+  risquinho vermelho no meio) e some ao escolher uma aba ou tirar o mouse. No celular continua o botão Menu.
+- **Meu dia no Radar:** Perfil → Meu dia (`#/meu-dia`). A tela é a da extensão, num quadro: o `site.js` põe o
+  endereço em `data-radar-dia` e o `dia.html` está em `web_accessible_resources`. Sem a extensão 0.48, a tela avisa.
+- **YouTube:** o painel do Claude e do ChatGPT saiu (`claude.js`/`claude.css` apagados). No lugar, `painel-dia.js`:
+  a abinha vermelha **Meu dia** na beirada direita, que abre o Meu dia num painel (com "Abrir em aba"). Abre também
+  por dois cliques com o botão direito e pelo Alt+C. Com `?embutido=1`, o `dia.html` esconde o próprio título.
+- Para usar: ↻ na extensão em `chrome://extensions` e F5 no YouTube e no Radar.
+- **Ajustes do mesmo dia**, a pedido do usuário: o Meu dia do Radar é a tela inteira da extensão, sem moldura e sem
+  o título do Radar em volta (igual à aba dela); saíram todos os emojis do Radar e da extensão (os botões que eram só
+  emoji viraram texto: Marcar, Vou modelar, Alvo, Fantasma, PT:, Print, Baixar); no menu só a aba aberta fica
+  vermelha (o nome do grupo não pinta mais); o botão ChatGPT saiu do topo; a letra sobre o vermelho é branca
+  (`letraLegivelSobre` aceita 3,5:1).
+- **Botão direito numa imagem (0.48.1):** "Salvar no Meu dia" → a lista dos canais (com "falta a thumbnail" ou "já
+  tem thumbnail" ao lado) e "Sem canal". Escolher o canal marca a thumbnail como feita: ela entra no primeiro vídeo de
+  hoje do canal sem thumbnail ou fica no cartão do canal como "Thumbnail feita"; a notificação confirma. As sem canal
+  ganham, no Meu dia, o "Escolher o canal…".
+- **+ Adicionar thumbnail em cada canal (0.49.0):** no Meu dia, cada cartão de canal tem a própria zona: arrastar a
+  imagem, clicar para escolher o arquivo ou passar o mouse e colar (Ctrl+V). A thumbnail entra direto no canal, como no
+  botão direito, sem passar pelas "Thumbnails sem canal" lá embaixo. Desde a 0.49.1 é um botão pequeno e fica só na extensão: a aba
+  Meu dia do site (o quadro com `?site=1`) não mostra.
+
+
+## Extensão 0.47.0: a aba Meu dia (2026-11-14)
+
+Pedido do usuário: os dois cliques com o botão direito abrem uma aba que organiza o dia e se limpa todo dia: quantos
+vídeos postar em cada canal, as thumbnails feitas (salvas pelo botão direito, como o "salvar no PC") e o link do canal
+de treino do algoritmo de cada canal; e todo pedido da Nova produção entra lá como "feito, falta a thumbnail".
+
+- **Abrir:** dois cliques com o botão direito no YouTube (antes abria o painel do Claude, que continua no Alt+C e na
+  abinha "✦ Claude"), o botão **Meu dia** no ícone da extensão, ou o item **Abrir o Meu dia** do botão direito.
+  A aba é a `dia.html` da extensão; chamar de novo traz a mesma aba para a frente.
+- **Por canal:** a pergunta "Você pretende postar quantos vídeos por dia neste canal?" (1 a 4, ou "não posto todo
+  dia"). Com a meta, o cartão mostra `feitos/meta`, fica vermelho com "Falta pedir N vídeos hoje" e o botão Nova
+  produção (abre o YouTube com a janela aberta, `#radar-nova-producao`). Em Ajustes: o link do canal de treino (só
+  YouTube), que vira o botão "🎯 Canal de treino: procurar ideia", e "+ vídeo" para um feito fora da Nova produção.
+- **Nova produção:** ao criar ou salvar na Entrada, o vídeo entra no canal dele com "✓ Vídeo pedido · falta a
+  thumbnail" (o Canal de teste não entra). Cada vídeo tem a caixa **Postado**.
+- **Thumbnails:** botão direito numa imagem em qualquer site → **Salvar thumbnail no Meu dia** → o vídeo de hoje que
+  ainda não tem thumbnail (ou "Só guardar"). A extensão pega a imagem pela própria página (serve para `blob:`) e, se
+  não der, pela extensão; sem nenhum dos dois, avisa para arrastar. Na aba também dá para arrastar, colar (Ctrl+V) ou
+  escolher o arquivo, em cima do vídeo ou nas soltas, ligar uma solta a um vídeo e **Baixar**.
+  No editor do Canva o botão direito é o menu do Canva: use a imagem baixada (arraste o arquivo) ou a aberta numa aba.
+- **Virada do dia:** `dia-dados.js` guarda o dia em `chrome.storage.local` (`dia`, imagens em `diaThumb:<id>`); no
+  primeiro uso de outro dia, tudo isso é apagado. Ficam só a meta e o link de treino (`diaConfig`). Os canais vêm de
+  `/api/meus-canais` (com cópia em `diaCanais` para o Radar desligado).
+- Permissões novas: `contextMenus`, `scripting`, `activeTab` e `unlimitedStorage` (nenhuma pede aviso ao atualizar).
+- Para usar: dê ↻ na extensão em `chrome://extensions` e F5 nas abas do YouTube.
+
+
+## Extensão 0.46.6: na Nova produção a escolha obrigatória é o canal, não o agente (2026-11-14)
+
+Pedido do usuário: "sempre força a escolher o agente, mas não é o agente que era para forçar a escolher e sim o canal".
+
+- **Nova produção (extensão):** o canal não fica mais lembrado (saiu o `npCanal`): a janela abre sem canal, os chips
+  ficam vermelhos e o envio não passa sem canal. Escolhido o canal, ele traz o agente dele já selecionado (como antes
+  de 0.46.2), além de língua, voz e tempo. O agente pode ser trocado; sem canal, o select diz "escolha o canal primeiro".
+- **3 · Confirmar:** o aviso amarelo "Não é o agente deste canal" continua quando o agente foi trocado.
+- Isso substitui o "agente sempre escolhido na hora" da 0.46.2: o erro da Coreia vinha do canal lembrado.
+- Para usar: dê ↻ na extensão em `chrome://extensions`.
+
+
+## Extensão 0.46.3: o "Sign out" do YouTube pede confirmação (2026-11-13)
+
+Pedido do usuário: "coloque na extensão algo que só dá pra apertar o sign out com confirmação, sempre aperto sem querer".
+
+- **`sair.js`** (youtube.com e studio.youtube.com, desde o `document_start`): pega o clique no item "Sign out" /
+  "Sair" do menu da conta antes do YouTube (captura na janela) e abre "Sair mesmo da conta do YouTube?". Cancelar
+  não faz nada; OK repete o clique no mesmo item e a saída segue normal.
+- Reconhece o item pelo link `/logout` ou pelo texto do item do menu (Sign out, Log out, Sair, Fazer logout...).
+  Os outros itens do menu não mudam.
+- Para usar: dê ↻ na extensão em `chrome://extensions` e recarregue o YouTube.
+
+
+## Extensão 0.46.4: "Responder nada disso" na tela nova da Adequação (2026-11-14)
+
+Pedido do usuário: "a extensão no responder nada disso e pular está bugando" (tela "Ad suitability" em inglês).
+
+- O Studio tirou a caixinha "Nenhuma das opções": cada categoria já vem em "None" e o resumo diz "Safe for ads";
+  só falta o **Submit rating**. A extensão procurava a caixinha, dava erro e clicava no Avançar ainda desativado.
+- Agora: marca a caixinha antiga se ela existir, clica "Enviar classificação"/"Submit rating", confirma a
+  janelinha se abrir e espera até 15 s o Avançar liberar (o Studio mostra "Saving…") antes de seguir.
+- O botão vermelho saía do rodapé e ficava pulando nessa tela: o rodapé era achado pelo Avançar, e o Avançar
+  desativado não contava. Agora conta.
+- Para usar: dê ↻ na extensão em `chrome://extensions` e recarregue o Studio.
+
+
+## Extensão 0.46.5: as views de ontem e o valor esperado no cartão Views (2026-11-14)
+
+Pedido do usuário: "coloque também a extensão nessa parte salvando quanto deu o último dia o tanto de visualizações e
+também coloque o valor mais ou menos esperado" (painel novo de estatísticas, `analytics/hub_overview`).
+
+- **`studio.js`**, no cartão **Views**: linha verde "20.111 visualizações ontem · 13 de nov · ≈ R$486.87 esperado · Radar".
+- As views de ontem saem das barras de 48 h (meia-noite a meia-noite, fuso do computador) e ficam salvas no
+  `localStorage` do Studio (`radar-views-dia:<canal>`, 90 dias), para continuarem quando as 48 h passarem.
+- O valor esperado é views de ontem × RPM dos últimos 7 dias que já têm receita: receita do dia (aba Receita, o
+  `measure` vem em milésimos da moeda da página) ÷ views do mesmo dia (gráfico do cartão Views). Passar o mouse
+  na linha mostra o RPM usado. É estimativa: o valor real aparece no Studio 2 ou 3 dias depois.
+- Para usar: dê ↻ na extensão em `chrome://extensions` e recarregue o Studio.
+
+
+## Extensão 0.49.2: "Responder nada disso" não trava mais (2026-11-14)
+
+Pedido do usuário: "o responder nada disso às vezes trava" (tela "Ad suitability", com o "Saving…" no topo).
+
+- A janelinha de confirmação do Submit rating era procurada uma vez só, 1 s depois do clique, e só fora do
+  diálogo do envio. Quando ela demorava ou abria dentro dele, ninguém confirmava: o Avançar não liberava e o botão
+  ficava 15 s em "Respondendo…" até dar erro.
+- Agora, enquanto espera o Avançar (até 20 s), a extensão confirma a janelinha quando ela aparecer, onde estiver,
+  e aperta o Submit rating de novo se o primeiro clique não pegou.
+- Um erro no meio deixava o botão em "Respondendo…" para sempre; agora ele sempre volta e diz o que fazer.
+  Apertar duas vezes seguidas não roda a tarefa em dobro.
+- Para usar: dê ↻ na extensão em `chrome://extensions` e recarregue o Studio.
+
+
+## Roteiro: canal com menos de 1000 inscritos pede no mínimo 2 CTAs (2026-11-15)
+
+Pedido do usuário: "sempre que o canal tiver menos de 1000 inscritos tem que ter no mínimo 2 CTAs no roteiro,
+deixe como observação ou pedido".
+
+- `roteiro_claude.pedido_de_ctas` lê os inscritos do canal (tabela `canais`) e, abaixo de 1000, junta ao pedido do
+  Claude uma "Observação obrigatória": no mínimo 2 chamadas para se inscrever, uma logo depois do gancho e outra no
+  meio ou no fim, curtas e ligadas ao assunto.
+- Vale para o roteiro pedido na tela e para o da fila. Sem canal escolhido ou sem o número de inscritos, nada muda.
+- Para usar: religue o Radar.
+
+
+## Extensão 0.50.0: "Tornar padrão" na Nova produção (2026-11-15)
+
+Pedido do usuário: "coloque uma opção aqui como tornar padrão, exemplo eu mudei o tempo do agente, não quero ter que
+ir lá mudar tudo".
+
+- Na Nova produção da extensão, quando o agente, o idioma ou o tempo ficam diferentes do que o canal guarda, aparece
+  **★ Tornar padrão de <canal> (agente, idioma, tempo)**. Um clique grava os três como o padrão do canal no Radar, e
+  o próximo pedido desse canal já abre com eles.
+- Rota nova `POST /api/producao/{canal_id}/padrao`: muda só `projeto_roteiro_id`, `lingua` e `minutos`. O
+  `POST /api/producao/{canal_id}` troca a configuração inteira e apagaria anúncios, tela final e descrição.
+- Não aparece no Canal de teste nem com "Já tenho o roteiro".
+- Para usar: religue o Radar, dê ↻ na extensão em `chrome://extensions` e recarregue o YouTube.
+
+
+## Extensão 0.51.0: "Canal de treino: procurar ideia" troca para a conta certa (2026-11-15)
+
+Pedido do usuário: "quando aperto para ir procurar ideia, acaba só direcionando pro YouTube, pq o link é o mesmo…
+muitas contas são no mesmo email".
+
+- O botão do Meu dia abre `youtube.com/#radar-conta=<conta>`. A extensão (`content.js`, `trocarDeConta`) abre o menu
+  do avatar, "Trocar de conta" e clica no canal certo, em qualquer e-mail da lista. O YouTube recarrega já nele.
+- Em **Ajustes do canal**, a conta de treino agora é o **@ do canal** ou o **nome dele como aparece no Trocar de
+  conta** (os canais de outros e-mails não mostram o @, então vale o nome). O campo sugere as contas que a extensão
+  já viu no menu (`contasYoutube`).
+- Link sem @ guardado antes não diz qual conta abrir: o Meu dia avisa "troque o link pelo @ da conta de treino".
+- Conferido no Chrome sem trocar de conta: acha a conta aberta, Canada Insight (mesmo e-mail), British Tech e
+  한국의 미래 (outros e-mails) e avisa quando não acha. O clique final na conta não foi testado.
+- Para usar: dê ↻ na extensão em `chrome://extensions`, recarregue o YouTube e escreva a conta de treino de cada canal.
+
+
+## Extensão 0.51.1: a conta de treino é escolhida numa lista (2026-11-15)
+
+Pedido do usuário: "deixe lá todas as opções que tem no YouTube, aí só seleciono".
+
+- Em **Ajustes do canal** do Meu dia, a conta de treino virou uma lista com todas as contas do "Trocar de conta" do
+  YouTube, agrupadas por e-mail. Guarda o @ do canal, ou o nome nos canais de outros e-mails (o menu não mostra o @).
+- **Ler as contas do YouTube** (ou **Ler de novo**) abre `youtube.com/#radar-contas-ler`: a extensão abre o menu
+  do avatar, lê a lista, guarda em `contasYoutube` e fecha o menu, sem trocar de conta. O Meu dia se atualiza sozinho.
+- Para usar: dê ↻ na extensão em `chrome://extensions`, clique em "Ler as contas do YouTube" uma vez e escolha a
+  conta de cada canal.
+
+
+## Extensão 0.51.2: lista de contas de treino mais limpa (2026-11-15)
+
+Pedido do usuário: "coloca só os nomes dos canais, sem o @, e deixa mais bonito".
+
+- A lista nativa (que abria branca, com @ e e-mails misturados) virou um painel do Meu dia: só o nome de cada canal
+  com a inicial, o e-mail como título pequeno de cada grupo, a conta escolhida em vermelho com ✓.
+- "↻ Ler as contas de novo" fica embaixo, discreto. Conferido no navegador com contas de exemplo: abre, escolhe,
+  guarda e o "procurar ideia" passa a abrir a conta escolhida.
+- Para usar: dê ↻ na extensão em `chrome://extensions`.
+
+## Extensão 0.52.0: Meu dia com cores, Postar no Studio e uso de IA sempre Sim (2026-11-15)
+
+Pedido do usuário: "sempre a extensão tem que colocar que tem uso de IA", copiar a thumbnail de referência só pelo
+nome, cores vermelho/amarelo/verde, o Meu dia abrir no YouTube Studio com a opção de postar.
+
+- **Uso de IA**: o Studio em português de Portugal chama a pergunta de "Utilização de IA" / "Foi usada IA para
+  gerar ou editar…", que a extensão não reconhecia. Agora reconhece e marca **Sim sozinha** assim que a pergunta
+  aparece sem resposta, sem precisar apertar nada. Se a pessoa escolher Não, a escolha fica.
+- **Thumbnail de referência**: o pedido da Nova produção leva o link e o título do vídeo de referência para o Meu dia.
+  Cada vídeo mostra "Ref.: <título>" e o botão **Copiar thumbnail de referência**, que põe a imagem (PNG) na área de
+  transferência para colar com Ctrl+V. A imagem não aparece no painel. Só vale para pedidos feitos a partir de agora.
+- **Cores**: vermelho = nada feito; amarelo = meio caminho (um vídeo postado de 2, vídeo sem thumbnail, thumbnail
+  sem postar); verde = meta do dia batida com todos os vídeos com thumbnail e postados. Vale para o cartão do canal,
+  para cada vídeo e para as pílulas do topo. Os vermelhos ficam em cima, os verdes embaixo.
+- **Meu dia no Studio**: a abinha "Meu dia" também aparece no `studio.youtube.com`. Cada vídeo não postado tem
+  **Postar**: o Meu dia acha o projeto na fábrica pelo título (`/api/ext/postar`), baixa o vídeo pronto
+  (`/api/ext/postar/<projeto>/video`: o .mp4 da entrega no PC ou o `final.mp4`), abre Criar > Carregar vídeos e põe
+  o vídeo e a thumbnail do Meu dia nos campos do Studio. A capa com mais de 2 MB é comprimida antes. Fora do Studio
+  o botão é "Postar ↗": abre o Studio e começa sozinho lá.
+- **Postou, fica verde**: quando o Studio mostra "Vídeo publicado" / "Vídeo agendado", o vídeo do Meu dia fica como
+  postado, pelo id (botão Postar) ou pelo título (quem subiu sem o botão).
+- Para usar: dê ↻ na extensão em `chrome://extensions` e religue o Radar (rota nova).
+
+## Extensão 0.52.1: Postar no lugar da Nova produção, canal verde recolhido, procurar ideia para hoje ou amanhã (2026-11-15)
+
+Pedido do usuário: "tire o botão de nova produção e coloque de postar, e quando tudo tiver postado fica só o nome do
+canal verde e procurar ideia… para outro dia ou para o mesmo", e o procurar ideia "só redirecionando para o YouTube
+sem o canal certo".
+
+- O botão vermelho do cartão do canal agora é **Postar**: sobe o próximo vídeo não postado do canal (o mesmo Postar
+  de cada vídeo). Sem vídeo pedido, abre o Criar > Carregar vídeos do Studio. O aviso diz "Falta postar N" e/ou
+  "falta pedir N hoje".
+- **Tudo postado**: o cartão recolhe e fica só "✓ <canal>" em verde, o procurar ideia e os pedidos de amanhã.
+  Clicar no nome abre o cartão inteiro (e clicar de novo recolhe).
+- **Procurar ideia: Para hoje ↗ / Para amanhã ↗**. Com "para amanhã", o próximo pedido da Nova produção desse canal
+  (em até 20 h) não entra no dia de hoje: fica em "Amanhã: <título>" no cartão e entra sozinho no Meu dia quando o
+  dia virar (`diaAmanha` / `diaDestino` no storage da extensão).
+- **Bug do procurar ideia**: o link `youtube.com/#radar-conta=…` perdia o `#` no carregamento do YouTube e a página
+  abria na conta que estivesse aberta, sem aviso. Agora o pedido de troca vai pelo storage (`diaTrocarConta`, vale
+  1 minuto) e a aba do YouTube que abre faz a troca para a conta de treino.
+- Para usar: dê ↻ na extensão em `chrome://extensions` (o Radar não precisa religar).
+
+## Extensão 0.54.0: trocar o pedido entre hoje e amanhã (2026-11-17)
+
+Cada pedido da lista "Amanhã:" do canal tem "Passar para hoje", e cada vídeo de hoje ainda não postado tem "Para
+amanhã". O que vai para amanhã leva a thumbnail e o teste A/B (`thumbsGuardadas` na `diaAmanha`; as imagens não se
+apagam na virada) e volta com elas, seja pelo "Passar para hoje", seja quando o dia vira.
+
+## Extensão 0.53.9: o que não foi postado passa para o dia seguinte (2026-11-17)
+
+Quando vira o dia, os vídeos não postados passam para o dia novo, com a thumbnail e o teste A/B deles, e ganham a
+etiqueta "↪ de 16/11" (`veioDe`, o dia de origem, que se mantém se passar de novo). O resto do dia velho (postados,
+thumbnails soltas, tirados, "hoje sem postar") e as imagens dele se apagam, como antes.
+
+## Extensão 0.53.7: o Postar abre o Studio do canal certo (2026-11-16)
+
+O Postar abria o Studio na conta que estivesse aberta. Agora segue o caminho do "procurar ideia": o background abre
+uma aba ao lado, troca para a conta do canal do vídeo (pelo nome do canal) e, depois da troca (ou se já estava nela),
+a aba vai para a raiz do Studio (que abre o canal da conta da aba; o `/channel/<id>` direto, logo depois da troca, deu "Oops" no teste com João o Lobo), onde o pedido espera (`diaPostar` para o vídeo, `diaAbrirUpload`
+para o Postar do canal sem vídeo; os dois valem 5 min). Dentro do Studio, o painel diz ao Meu dia de qual canal é o
+Studio aberto (`canalStudio`): vídeo de outro canal vai pelo mesmo caminho. Antes de subir, o painel confere se o Studio aberto é do canal do vídeo (`diaPostar.canal`); se não for, avisa e não sobe (0.53.8). Teste: `#radar-postar-canal=<nome>|<UC…>`.
+
+## Extensão 0.53.6: pegar de volta o vídeo tirado e a legenda das cores (2026-11-16)
+
+O usuário tirou sem querer um vídeo pedido do Meu dia. Agora:
+
+- **Tirados hoje:** o × não apaga mais. O vídeo (com a thumbnail e o teste A/B dele) vai para `dia.tirados`, aparece
+  "Desfazer" por 10 s no alto e, depois, a lista "Tirados hoje" no fim da página com "Voltar".
+- **Pedido hoje na fábrica, fora do Meu dia:** cada canal mostra os pedidos de hoje da Nova produção que não estão no
+  Meu dia (nem no "para amanhã"), com "Pôr de volta". A lista vem do `GET /api/ext/pedidos-recentes` (a
+  `producoes_fila` das últimas 36 h: título, canal, link de referência).
+- **Legenda:** no alto do Meu dia, o que cada cor quer dizer (vermelho, amarelo, azul, verde).
+
+## Extensão 0.53.5: cada vídeo na sua cor, com número (2026-11-16)
+
+A faixa dividida na borda do canal (0.53.4) ficava difícil de ler: os pedaços não batiam com as caixinhas dos vídeos.
+Agora cada caixinha de vídeo tem a cor dela (borda, fundo e um número no canto): vermelho = ainda não pedido,
+amarelo = falta a thumbnail, azul = só falta postar, verde = postado. No alto do canal, uma barrinha com um pedaço
+numerado por vídeo do dia, na mesma cor e com o mesmo número da caixinha. Com meta de 2 ou mais, cada vídeo que
+ainda não foi pedido aparece como uma caixinha vermelha tracejada ("Vídeo 2 · Ainda não pedido").
+
+## Extensão 0.53.4: "Hoje não vou postar", o azul e a faixa dividida por vídeo (2026-11-16)
+
+- **Hoje não vou postar:** botão em cada canal; o canal fica verde e recolhido ("hoje sem postar", com "Desfazer"),
+  e sai da conta do resumo do dia. Fica em `dia.semPostar` (vale só para o dia).
+- **Azul:** o vídeo que já tem pedido e thumbnail e só falta postar. O cartão do canal fica azul quando todos os vídeos
+  do dia estão assim (ou já postados).
+- **Faixa dividida:** a faixa da esquerda do cartão tem um pedaço por vídeo do dia (o maior entre a meta e os vídeos
+  pedidos), em ordem de pedido: vermelho = ainda não pedido, amarelo = pedido sem thumbnail, azul = só falta postar,
+  verde = postado. Com 2 por dia e um postado, fica metade verde.
+
+## Extensão 0.53.3: teste A/B de thumbnails, montado sozinho no Postar (2026-11-16)
+
+Cada vídeo do Meu dia tem o "+ Teste A/B": a thumbnail do vídeo é a A, e entram a B e a C (arrastar, clicar ou colar,
+como as outras; ficam em `v.ab`). No Postar, depois de pôr o vídeo e a thumbnail A, o Studio abre o "Testar e
+comparar" (`ytcp-button#ab-test-button`), escolhe "Thumbnail only" (`#chip-1`), põe as thumbnails nos 3 espaços
+(`ytcp-thumbnail-uploader input#file-loader`, comprimindo as de mais de 2 MB) e aperta o "Set test". A janela foi lida
+no Studio do UK CartWatch (vídeo já publicado); no upload em si ainda não foi visto.
+
+## Extensão 0.53.2: do Canva direto para o canal (2026-11-16)
+
+No Canva o design não é uma imagem (são camadas na página), então o clique direito não tinha o "Salvar no Meu dia".
+Agora, quando um PNG/JPG baixado do Canva (Partilhar > Transferir) termina, aparece no próprio Canva uma caixinha com
+os canais, com os que estão sem thumbnail em cima; o clique manda a imagem para o canal no Meu dia, como thumbnail
+feita (a mesma `diaGuardarThumb` do clique direito). Permissões novas: `downloads` e `https://*.canva.com/*`.
+
+## Extensão 0.53.1: postado pelo botão final do Studio e quanto falta na fábrica (2026-11-15)
+
+- **Fica verde sozinho:** um vídeo postado pelo Postar do Meu dia não ficou verde (foi marcado na mão), porque o
+  texto "Vídeo publicado" não foi achado na tela do Studio. Agora vale também o clique no botão final do upload
+  (Publicar / Guardar / Agendar, `#done-button`), que não depende do idioma: depois dele, quando a janela de upload
+  fecha ou aparece a de compartilhar, o vídeo é marcado como postado. O resultado vai para o registro `diaTrocaLog`.
+- **Quanto falta:** cada vídeo pedido mostra a fábrica: "Fábrica: 65% · falta 35% · etapa", com uma barrinha;
+  "Fábrica parada em 40%: precisa de você"; "✓ Vídeo pronto na fábrica: é só postar"; ou "na fila, ainda não
+  começou". Vem do `progresso` que o background lê a cada minuto e, fora dele, do `/api/ext/postar`.
+
+## Extensão 0.53.0: a aba do "procurar ideia" abre na mesma janela (2026-11-15)
+
+Testando todas as contas, a aba aberta pelo background ia para a última janela do Chrome em foco, que podia estar
+escondida atrás; lá o YouTube não desenha o menu da conta e a troca parava. Agora a aba abre na janela do clique, ao
+lado da aba do Meu dia. Se mesmo assim o menu não abrir com a aba sem foco, a troca recomeça quando ela volta para a
+frente.
+
+## Extensão 0.52.9: troca de conta a partir de outro e-mail (2026-11-15)
+
+Saindo de 한국의 미래 (e-mail zepalhano.pirata), o "procurar ideia" não trocava para PALHANO nem Coreia TECNOLOGIA. O
+menu "Mudar de conta" só mostra o @ dos canais do e-mail aberto; os de jpalhano34 vinham só com o nome, e a conta de
+treino guardada é o @. Pior: essa leitura regravava o `contasYoutube` sem os @. Agora:
+
+- `contasHandle` guarda o @ de cada canal visto alguma vez e nunca encolhe; o `contasYoutube` herda os @ conhecidos;
+- um alvo com @ que não aparece na lista é achado pelo @ guardado ou, se nunca visto, pelo nome igual ao @ sem o
+  sufixo (@PALHANO-x6o = PALHANO, @CoreiaTECNOLOGIA = Coreia TECNOLOGIA), só quando há um canal só assim.
+
+## Extensão 0.52.8: o avatar é clicado mesmo com outra caixa aberta (2026-11-15)
+
+Pelo botão, a troca parava em "Abrindo o menu da conta…". Na 0.52.4 a extensão só clicava no avatar se nenhuma caixa
+estivesse aberta, para não fechar o menu com um segundo clique; uma aba nova do YouTube pode ter outras caixinhas
+abertas. Agora olha só a caixa do menu da conta. O registro (`diaTrocaLog`) grava cada clique e passa a ser escrito
+pelo background, em fila: várias abas gravando juntas apagavam as linhas umas das outras.
+
+## Extensão 0.52.7: troca de conta conferida e repetida (2026-11-15)
+
+O registro (`diaTrocaLog`, 0.52.6) mostrou o caminho do "procurar ideia" inteiro funcionando, até o clique na conta,
+e mesmo assim a conta não trocava na aba nova; na mesma aba (`#radar-conta=`) trocava. Agora, antes de clicar, a
+extensão espera a lista de contas firmar e acha o item de novo. Depois do clique, confere: se a página não
+recarregou, ou recarregou com a mesma foto no avatar, tenta de novo (até 3 vezes), e só então avisa.
+
+## Extensão 0.52.5: "procurar ideia" entrega a troca de conta só para a aba que abriu (2026-11-15)
+
+Mesmo com a 0.52.4, o "procurar ideia" abria o YouTube na conta que já estava aberta. A troca em si funcionava
+(testada no Chrome, inclusive pelo `#radar-conta=`), mas o pedido ia pelo storage e a primeira aba do YouTube que
+carregasse levava, nem sempre a aba aberta pelo botão. Agora o Meu dia manda `procurar-ideia` ao background, que abre
+a aba e guarda o pedido pelo id dela (`storage.session`); o content.js pergunta `troca-pendente` e só essa aba recebe.
+
+## Extensão 0.52.4: "procurar ideia" espera o YouTube carregar antes de abrir o menu da conta (2026-11-15)
+
+Depois da 0.52.3 o "procurar ideia" ainda abria na conta errada. O avatar aparece bem antes de a página aceitar o
+clique: com 1,2 s de espera e três cliques a cada 2,5 s, numa página lenta os cliques caíam no vazio, ou o segundo
+fechava o menu que o primeiro abriu. Agora a extensão espera a aba estar na frente, a página terminar de carregar e
+a foto do avatar; só clica de novo se o menu não estiver aberto, e avisa na tela "Abrindo o menu da conta…".
+
+## Extensão 0.52.3: "procurar ideia" troca de conta em qualquer idioma (2026-11-15)
+
+O "procurar ideia" do Meu dia funcionou uma vez e depois abriu o YouTube sem trocar de conta. A conta aberta estava
+com o YouTube em português europeu, onde o item do menu do avatar é "Mudar de conta", e a extensão só procurava
+"Trocar de conta" / "Alternar conta" / "Switch account". Agora reconhece também "Mudar de conta" e o item em
+espanhol, francês, alemão e italiano.
+
+## Extensão 0.52.2: "visualizações ontem" igual ao do YouTube (2026-11-15)
+
+O usuário viu no cartão Visualizações do Studio "35.936 visualizações ontem · 14 de nov" do Radar enquanto o gráfico
+do YouTube mostrava 43.170 para o mesmo 14/11.
+
+- **Causa**: o Radar somava as barras de 48 h de meia-noite a meia-noite no horário do computador (Brasil). O YouTube
+  fecha o dia no horário do Pacífico (5 h depois, UTC-8; UTC-7 no verão de lá). Eram duas janelas de 24 h diferentes,
+  e as barras de tempo real ainda são preliminares.
+- **Agora**: o "ontem" é o dia do YouTube (Pacífico). Quando o gráfico diário do Studio já tem esse dia, o número é o
+  dele, o mesmo da dica ao passar o mouse; senão, soma as barras de 48 h dentro do dia do Pacífico. A dica da linha
+  diz de onde veio. O "hoje (desde a meia-noite)" do cartão de 48 h continua no horário do Brasil.
+- Para usar: dê ↻ na extensão em `chrome://extensions` e recarregue o Studio.

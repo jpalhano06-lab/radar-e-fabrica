@@ -1,0 +1,345 @@
+"""A produção de cada canal: o que o Roteiro e a Thumbnail já puxam ao escolher o canal, e o Assistente ao lado.
+
+Pedido do usuário em 2026-10-15: "no roteiro tenha um canal: escolhe o canal João o Lobo e ele já puxa a voz e o prompt
+para criar o roteiro"; "na thumbnail, trabalhe junto com o Claude para criar o prompt"; e "do lado direito do roteiro e
+da thumbnail, uma janela para uma IA como o ChatGPT, para regionalizar o título ou fazer mudanças".
+
+- Cada canal guarda: o perfil da fábrica (é ele que tem a voz), o estilo de roteiro, o tempo, a língua, o estilo de
+  thumbnail e para qual IA de imagem o prompt vai (Gemini ou ChatGPT). Sem nada salvo, o perfil da fábrica com o mesmo
+  nome do canal (o editor da fábrica cria "canal-joao-o-lobo" com `nome: João o Lobo`) entra sozinho.
+- O prompt da thumbnail é escrito pelo Claude (assinatura, `roteiro_claude._claude`) com o estilo do canal, o que a
+  pessoa pediu ("tire o texto") e o que a thumbnail de referência mostra (descrita pelo modelo de visão grátis).
+- O Assistente é o Claude também, com os dados do canal escolhido nele (o canal do Assistente é à parte do Roteiro)."""
+import json
+import re
+
+from . import banco, roteiro_claude, thumb
+
+PADRAO = {"perfil": "", "projeto_roteiro_id": "", "minutos": 8, "lingua": "", "thumb_projeto_id": "", "ia_imagem": "gemini",
+          "agenda": None, "concorrentes": None,
+          # o texto que a extensão cola na descrição do Studio, igual em todo vídeo do canal (pedido do usuário em
+          # 2026-10-22: "mais padronizado, só mudando para o tema do vídeo, sem spoilers, apenas uma sinopse")
+          # o modelo da descrição: vazio = o modelo padrão do Radar na língua do canal (publicar.modelo_padrao).
+          # `marcas` é o que muda de canal para canal dentro do modelo pronto (as redes que o canal cita).
+          "modelo_tipo": "geral", "marcas": "",
+          # o padrão da publicação deste canal, que a extensão lê no Studio: de quantos em quantos minutos entra
+          # anúncio e que tela final montar ("melhor" = vídeo melhor para o espectador + inscrever-se)
+          "anuncio_cada": 1, "tela_final": "melhor"}
+TELAS_FINAIS = {"melhor": "Vídeo (melhor para o espectador) + inscrever-se",
+                "ultimo": "Copiar a tela final do último vídeo", "nenhuma": "Não mexer"}
+IAS_IMAGEM = {"gemini": ("Gemini", "https://gemini.google.com/app"), "chatgpt": ("ChatGPT", "https://chatgpt.com/")}
+
+
+def _perfil(nome: str) -> dict:
+    """O que interessa do perfil da fábrica: o nome do canal e a voz (lidos do yaml, sem biblioteca de yaml)."""
+    arquivo = roteiro_claude.FABRICA / "perfis" / f"{nome}.yaml"
+    if not re.fullmatch(r"[\w.-]+", nome or "") or not arquivo.exists():
+        return {}
+    texto = arquivo.read_text(encoding="utf-8", errors="ignore")
+    achar = lambda chave: (re.search(rf"^\s*{chave}:\s*(.+?)\s*(#.*)?$", texto, re.M) or [None, ""])[1].strip().strip("\"'")
+    voz = achar("nome_da_voz") or achar("voz_edge") or achar("voice_id")
+    return {"perfil": nome, "canal": achar("nome"), "voz": "" if voz.startswith("COLE_AQUI") else voz,
+            "idioma_da_voz": achar("idioma_da_voz"), "provedor": achar("provedor")}
+
+
+# ---------------------------------------------------------------- o rodapé da descrição, no perfil da fábrica
+# Quem escreve a descrição é a fábrica, no publicacao.json de cada projeto: ela põe o resumo, os capítulos, os
+# créditos e, no fim, o rodapé do canal (apresentação e aviso legal). O rodapé mora no perfil da fábrica, e o
+# Radar edita de lá — assim existe UM lugar só, e o vídeo já sai do projeto com a descrição pronta.
+# (pedido do usuário em 2026-10-24: "quero algo já automático direto na fábrica").
+RODAPE_MAXIMO = 3000
+_MARCA_RODAPE = "  rodape: |"
+# Um bloco de primeiro nível do perfil (imagens:, publicacao:): a linha do nome e as linhas indentadas logo abaixo.
+# Sem o flag s de propósito: com (?ms) o `.*` atravessava as quebras de linha e o "bloco" ia até o fim do arquivo, então
+# trocar quem gera as imagens jogava imagens.provedor dentro de lugar: e o bloco imagens: ficava vazio. Sem provedor, a
+# fábrica caiu no Google grátis e o pedido 116 ficou 7 h em "falta de cota" (2026-11-15)
+_BLOCO = r"(?m)^{nome}:[ \t]*\n((?:[ \t].*(?:\n|\Z)|\n(?=[ \t]))*)"
+
+
+def _arquivo_do_perfil(nome: str):
+    arquivo = roteiro_claude.FABRICA / "perfis" / f"{nome}.yaml"
+    return arquivo if re.fullmatch(r"[\w.-]+", nome or "") and arquivo.exists() else None
+
+
+def rodape_do_perfil(nome: str) -> str:
+    """O texto que fecha a descrição de todo vídeo do canal. "" quando o canal ainda não tem um."""
+    arquivo = _arquivo_do_perfil(nome)
+    if not arquivo:
+        return ""
+    linhas = arquivo.read_text(encoding="utf-8", errors="ignore").split("\n")
+    if _MARCA_RODAPE not in linhas:
+        return ""
+    saida = []
+    for linha in linhas[linhas.index(_MARCA_RODAPE) + 1:]:
+        if linha.strip() and not linha.startswith("    "):
+            break                      # saiu do bloco indentado
+        saida.append(linha[4:] if linha.startswith("    ") else "")
+    return "\n".join(saida).strip()
+
+
+def salvar_rodape(nome: str, texto: str) -> str:
+    """Põe (ou troca) o bloco publicacao.rodape do perfil, sem encostar no resto do arquivo."""
+    arquivo = _arquivo_do_perfil(nome)
+    if not arquivo:
+        raise ValueError("Este canal não tem perfil na fábrica.")
+    texto = (texto or "").strip()[:RODAPE_MAXIMO]
+    atual = arquivo.read_text(encoding="utf-8", errors="ignore")
+    sem_bloco = re.sub(_BLOCO.format(nome="publicacao"), "", atual).rstrip("\n")
+    if not texto:
+        arquivo.write_text(sem_bloco + "\n", encoding="utf-8")
+        return ""
+    corpo = "".join(f"    {l}\n" if l.strip() else "\n" for l in texto.split("\n"))
+    arquivo.write_text(f"{sem_bloco}\n\npublicacao:\n{_MARCA_RODAPE}\n{corpo}", encoding="utf-8")
+    return rodape_do_perfil(nome)
+
+
+# ------------------------------------------------- quem gera as imagens de IA do canal, no perfil da fábrica
+# Pedido do usuário em 2026-11-01, no formato do Robô do Dotti: a pessoa escolhe entre a **assinatura do ChatGPT**
+# (a conta logada neste computador pelo `codex login`, que não cobra por imagem, só gasta o limite dela) e a
+# **chave de API** de sempre. Quem gera é a fábrica, então a escolha mora no perfil do canal lá (imagens.provedor),
+# como o rodapé: um lugar só. Virando para a assinatura, o provedor de antes fica guardado em imagens.provedor_reserva
+# e é ele que atende as imagens que faltarem se o limite acabar no meio do vídeo.
+IMAGENS_QUEM = {"assinatura": "Assinatura do ChatGPT", "api": "Chave de API (o padrão da fábrica)"}
+RESERVA_PADRAO = "openrouter"
+
+
+def _bloco_imagens(texto: str):
+    return re.search(_BLOCO.format(nome="imagens"), texto)
+
+
+def _campo(bloco: str, campo: str) -> str:
+    achado = re.search(rf"(?m)^[ \t]+{campo}:[ \t]*(.*?)[ \t]*(#.*)?$", bloco or "")
+    return achado.group(1).strip().strip("\"'") if achado else ""
+
+
+def imagens_do_perfil(nome: str) -> dict:
+    """Quem gera as imagens deste canal ("assinatura" ou "api") e qual provedor de chave atende. Só olha o próprio
+    arquivo do canal: sem nada escrito nele, vale o que ele herda (o base-documentario), que é chave de API."""
+    arquivo = _arquivo_do_perfil(nome)
+    bloco = _bloco_imagens(arquivo.read_text(encoding="utf-8", errors="ignore")) if arquivo else None
+    provedor = _campo(bloco.group(1), "provedor").lower() if bloco else ""
+    return {"quem": "assinatura" if provedor == "assinatura" else "api",
+            "reserva": (_campo(bloco.group(1), "provedor_reserva").lower() if bloco else "") or RESERVA_PADRAO,
+            "provedor": provedor}
+
+
+def salvar_imagens_quem(nome: str, quem: str) -> dict:
+    """Escreve imagens.provedor no perfil do canal, sem encostar no resto do arquivo nem no resto do bloco."""
+    arquivo = _arquivo_do_perfil(nome)
+    if not arquivo:
+        raise ValueError("Este canal não tem perfil na fábrica.")
+    if quem not in IMAGENS_QUEM:
+        raise ValueError("Escolha entre a assinatura do ChatGPT e a chave de API.")
+    _recusar_contra_a_regra(quem)
+    atual = imagens_do_perfil(nome)
+    if quem == "assinatura":
+        # o provedor de chave que estava valendo vira a reserva, para as imagens que faltarem
+        guardar = atual["provedor"] if atual["provedor"] and atual["provedor"] != "assinatura" else atual["reserva"]
+        novos = {"provedor": "assinatura", "provedor_reserva": guardar or RESERVA_PADRAO}
+    else:
+        # volta para a chave de API: o provedor que estava guardado na reserva, e a reserva sai do arquivo
+        novos = {"provedor": atual["reserva"] if atual["provedor"] == "assinatura" else atual["provedor"],
+                 "provedor_reserva": ""}
+    _gravar_campos_de_imagens(arquivo, novos)
+    return imagens_do_perfil(nome)
+
+
+# "Todos pela conexão" vira regra (pedido do usuário em 2026-11-15: "o canal UK Market mudou sozinho para API...
+# sempre que a opção todos pela assinatura se torna regra"). Ligada pelo botão Todos pela conexão em Integrações e
+# desligada só pelo Todos pela chave de API. Com ela ligada, nenhum canal sai da assinatura: trocar um canal para a
+# chave de API é recusado, e aplicar_regra devolve à assinatura o perfil que mudou por fora (outra tela, um agente, um
+# canal novo), na volta dos avisos de 5 em 5 min, antes de cada vídeo ir para a fábrica e depois de criar um canal.
+REGRA_IMAGENS = "imagens_regra"
+
+
+def regra_imagens() -> str:
+    linha = banco.um("SELECT valor FROM ajustes WHERE chave=?", REGRA_IMAGENS)
+    return linha["valor"] if linha and linha["valor"] in IMAGENS_QUEM else ""
+
+
+def definir_regra_imagens(quem: str) -> None:
+    banco.executar("INSERT OR REPLACE INTO ajustes (chave, valor) VALUES (?, ?)", REGRA_IMAGENS,
+                   "assinatura" if quem == "assinatura" else "")
+
+
+def _recusar_contra_a_regra(quem: str) -> None:
+    if quem != "assinatura" and regra_imagens() == "assinatura":
+        raise ValueError("A regra \"Todos pela conexão\" está ligada: todo canal gera imagem pela assinatura do "
+                         "ChatGPT. Para usar a chave de API, desligue a regra em Integrações › Todos pela chave de API.")
+
+
+def aplicar_regra() -> list[str]:
+    """Põe na assinatura todo perfil de canal que saiu dela, com a regra ligada. Devolve os perfis que mudaram."""
+    if regra_imagens() != "assinatura":
+        return []
+    mudados = []
+    for p in imagens_dos_perfis():
+        if p["e_canal"] and p["quem"] != "assinatura":
+            salvar_imagens_quem(p["perfil"], "assinatura")
+            mudados.append(p["perfil"])
+    if mudados:
+        print(f"regra Todos pela conexão: {', '.join(mudados)} voltaram para a assinatura do ChatGPT")
+    return mudados
+
+
+def _gravar_campos_de_imagens(arquivo, campos: dict[str, str]) -> None:
+    """Põe, troca ou tira cada campo dentro do bloco imagens: do perfil. Campo com valor "" sai do arquivo; o bloco
+    só nasce se algum campo tiver valor, e some quando fica vazio."""
+    texto = arquivo.read_text(encoding="utf-8", errors="ignore")
+    bloco = _bloco_imagens(texto)
+    linhas = (bloco.group(1).rstrip("\n").split("\n") if bloco and bloco.group(1).strip() else [])
+    for campo, valor in campos.items():
+        marca = re.compile(rf"(?m)^[ \t]+{campo}:")
+        linhas = [l for l in linhas if not marca.match(l)]
+        if valor:
+            linhas.append(f"  {campo}: {valor}")
+    corpo = "\n".join(l for l in linhas if l.strip())
+    novo = f"imagens:\n{corpo}\n" if corpo else ""
+    if bloco:
+        texto = texto[:bloco.start()] + novo + texto[bloco.end():]
+    elif novo:
+        texto = texto.rstrip("\n") + "\n\n" + novo
+    arquivo.write_text(texto, encoding="utf-8")
+
+
+def perfis() -> list[dict]:
+    return [_perfil(p) | {"perfil": p} for p in roteiro_claude.perfis_da_fabrica()]
+
+
+def imagens_dos_perfis() -> list[dict]:
+    """Cada perfil da fábrica e quem gera as imagens dele, para a troca em massa de Integrações. e_canal separa os
+    perfis de canal (canal-*) dos modelos da fábrica (documentário, meditação...), que a troca de todos não mexe."""
+    return [{"perfil": p["perfil"], "canal": p.get("canal") or p["perfil"], "e_canal": p["perfil"].startswith("canal-")}
+            | imagens_do_perfil(p["perfil"]) for p in perfis() if _arquivo_do_perfil(p["perfil"])]
+
+
+def lingua_da_voz(perfil: str) -> str:
+    """A língua que a voz do canal fala, pelo perfil da fábrica ("ja" → "japonês"). Vazio quando o perfil não diz.
+
+    É ela que manda na língua do canal (2026-11-17): o canal japonês 日本の革新 ficou com "inglês" gravado na
+    configuração e os dois primeiros vídeos saíram em inglês, com o título japonês traduzido para inglês, porque o
+    pedido copia a língua do canal e ela vale por cima das instruções do agente."""
+    from .fabrica_api import IDIOMA     # o fabrica_api importa este módulo
+    codigo = str(_perfil(perfil).get("idioma_da_voz") or "").strip().lower()
+    return {c: l for l, c in IDIOMA.items()}.get(codigo, "")
+
+
+def conferir_lingua(perfil: str, lingua: str) -> None:
+    """Não deixa gravar no canal uma língua que não é a da voz dele. Para mudar a língua, muda-se a voz primeiro."""
+    da_voz = lingua_da_voz(perfil)
+    if not lingua or not da_voz or roteiro_claude.codigo_da_lingua(lingua) == roteiro_claude.codigo_da_lingua(da_voz):
+        return
+    raise ValueError(f"A voz deste canal fala {da_voz}, e o pedido veio em {lingua}: o roteiro sairia em {lingua} e o "
+                     f"título seria traduzido para {lingua}. Para mudar a língua do canal, escolha antes uma voz em "
+                     f"{lingua} na configuração do canal.")
+
+
+def _perfil_do_canal(titulo: str) -> str:
+    """O perfil da fábrica que tem o mesmo nome do canal ("João o Lobo" → canal-joao-o-lobo)."""
+    for p in perfis():
+        if p.get("canal") and p["canal"].strip().lower() == (titulo or "").strip().lower():
+            return p["perfil"]
+    return ""
+
+
+def canal_do_perfil(usuario_id: int, perfil: str) -> tuple[str, str]:
+    """(id, título) do canal da pessoa que usa esse perfil da fábrica, pelo que está salvo ou pelo nome do canal."""
+    if not perfil:
+        return "", ""
+    meus = banco.todos("""SELECT c.id, c.titulo FROM meus_canais m JOIN canais c ON c.id = m.canal_id
+                           WHERE m.usuario_id=?""", usuario_id)
+    for c in meus:
+        salvo = banco.um("SELECT dados FROM canais_config WHERE usuario_id=? AND canal_id=?", usuario_id, c["id"])
+        if salvo and (json.loads(salvo["dados"]).get("perfil") or "") == perfil:
+            return c["id"], c["titulo"]
+    nome = (_perfil(perfil).get("canal") or "").strip().lower()
+    for c in meus:
+        if nome and c["titulo"].strip().lower() == nome:
+            return c["id"], c["titulo"]
+    return "", ""
+
+
+def config(usuario_id: int, canal_id: str) -> dict:
+    linha = banco.um("SELECT dados FROM canais_config WHERE usuario_id=? AND canal_id=?", usuario_id, canal_id)
+    dados = PADRAO | {"agenda": {"por_semana": 3, "dias": []}, "concorrentes": []} | (json.loads(linha["dados"]) if linha else {})
+    canal = banco.um("SELECT titulo, nicho, subnicho, pais FROM canais WHERE id=?", canal_id) or {}
+    if not dados["perfil"]:
+        dados["perfil"] = _perfil_do_canal(canal.get("titulo", ""))
+    p = _perfil(dados["perfil"])
+    if not dados["lingua"]:
+        dados["lingua"] = lingua_da_voz(dados["perfil"]) or "português"
+    return dados | {"voz": p.get("voz", ""), "canal": canal.get("titulo", ""), "salvo": bool(linha)}
+
+
+def salvar(usuario_id: int, canal_id: str, dados: dict) -> dict:
+    limpo = {k: dados[k] for k in PADRAO if k in dados}
+    # a língua do canal é a da voz dele: gravar outra fazia o roteiro sair na língua errada em todo vídeo do canal
+    if limpo.get("lingua"):
+        conferir_lingua(limpo.get("perfil") or config(usuario_id, canal_id).get("perfil", ""), limpo["lingua"])
+    if "minutos" in limpo:
+        limpo["minutos"] = max(1, min(60, int(limpo["minutos"] or 8)))
+    if limpo.get("ia_imagem") not in IAS_IMAGEM:
+        limpo["ia_imagem"] = "gemini"
+    if "anuncio_cada" in limpo:
+        limpo["anuncio_cada"] = max(1, min(60, int(limpo["anuncio_cada"] or 1)))
+    if limpo.get("tela_final") not in TELAS_FINAIS:
+        limpo["tela_final"] = "melhor"
+    banco.executar("INSERT OR REPLACE INTO canais_config (usuario_id, canal_id, dados, criado) VALUES (?,?,?,?)",
+                   usuario_id, canal_id, json.dumps(limpo, ensure_ascii=False), banco.agora())
+    return config(usuario_id, canal_id)
+
+
+# ---------------------------------------------------------------- o prompt da thumbnail, pelo Claude
+
+SISTEMA_THUMB = """Você escreve prompts para uma IA de imagem (Gemini ou ChatGPT) criar thumbnails de YouTube para
+canais dark (sem apresentador). Responda SÓ com o prompt, pronto para colar, sem comentários, sem aspas, sem título.
+Regras: 16:9, 1280x720; uma ideia visual forte, legível no celular; siga o estilo do canal; siga à risca o que a pessoa
+pediu (se ela pediu para tirar o texto, a imagem não tem texto nenhum); use a thumbnail de referência como base de
+composição, mas peça uma imagem nova e original; escreva o prompt em inglês (as IAs de imagem entendem melhor), e
+qualquer texto que apareça na imagem fica na língua do título do vídeo."""
+
+
+def prompt_da_thumb(usuario_id: int, projeto_id: int | None, pedido: str, titulo: str, video_id: str, ia: str) -> dict:
+    base = thumb.montar(usuario_id, projeto_id, titulo, video_id)
+    texto = (f"Título do vídeo: {titulo or '(sem título)'}\n\n"
+             f"O que a thumbnail de referência mostra: {base['referencia'] or '(sem referência)'}\n\n"
+             f"Estilo do canal (o prompt base, já com os campos preenchidos):\n{base['prompt']}\n\n"
+             f"O que a pessoa pediu agora: {pedido or '(nada a mais: siga o estilo)'}\n\n"
+             f"A IA de imagem é o {IAS_IMAGEM.get(ia, IAS_IMAGEM['gemini'])[0]}. Escreva o prompt.")
+    prompt = roteiro_claude._claude(SISTEMA_THUMB, texto, modelo=roteiro_claude.LEVE)
+    nome, link = IAS_IMAGEM.get(ia, IAS_IMAGEM["gemini"])
+    return {"prompt": prompt, "referencia": base["referencia"], "estilo": base["projeto"], "ia": nome, "link": link}
+
+
+# ---------------------------------------------------------------- o Assistente (a janela da direita)
+
+SISTEMA_ASSISTENTE = """Você é o assistente de um produtor de canais dark do YouTube (vídeos narrados, sem rosto),
+numa janela ao lado do Roteiro e da Thumbnail ou num painel dentro do YouTube. Ajuda com títulos (regionalizar para
+outro país ou língua, deixar mais chamativo sem enganar), descrições, ganchos, ideias e ajustes no texto. Responda em
+português, curto e direto, a não ser que a pessoa peça outra língua. Quando der opções, numere. Não invente fatos sobre
+pessoas reais."""
+
+
+def assistente(usuario_id: int, canal_id: str, mensagens: list[dict], pagina: dict | None = None,
+               projeto_id: str = "") -> str:
+    contexto = ""
+    if projeto_id:  # o agente escolhido no painel do YouTube: as mesmas instruções que o Roteiro usa (2026-10-22)
+        ag = banco.um("SELECT nome, instrucoes FROM projetos_roteiro WHERE id=? AND usuario_id=?", projeto_id, usuario_id)
+        if ag and ag["instrucoes"]:
+            contexto += (f"Instruções do agente \"{ag['nome']}\" (o jeito de trabalhar que a pessoa escolheu; valem "
+                         f"por cima das regras gerais quando conflitarem):\n{ag['instrucoes'][:8000]}\n\n")
+    if pagina:      # o painel do Claude dentro do YouTube manda o que está aberto na aba
+        contexto += (f"A pessoa está no YouTube, nesta página: {str(pagina.get('titulo', ''))[:300]}"
+                     f"{' (canal ' + str(pagina['canal'])[:100] + ')' if pagina.get('canal') else ''} — "
+                     f"{str(pagina.get('url', ''))[:300]}\n\n")
+    if canal_id:
+        c = banco.um("SELECT titulo, nicho, subnicho, pais, inscritos FROM canais WHERE id=?", canal_id) or {}
+        cfg = config(usuario_id, canal_id)
+        titulos = [v["titulo"] for v in banco.todos("SELECT titulo FROM videos WHERE canal_id=? ORDER BY views DESC LIMIT 8", canal_id)]
+        contexto += (f"Canal em foco: {c.get('titulo', '')} (nicho {c.get('nicho') or '?'}, {c.get('subnicho') or ''}; "
+                     f"país {c.get('pais') or '?'}; língua dos vídeos: {cfg['lingua']}).\n"
+                     f"Títulos que mais deram view no canal: {' | '.join(titulos) or '(nenhum ainda)'}\n\n")
+    conversa = "\n\n".join(f"{'Pessoa' if m.get('papel') == 'pessoa' else 'Assistente'}: {str(m.get('texto', ''))[:4000]}"
+                           for m in mensagens[-12:])
+    return roteiro_claude._claude(SISTEMA_ASSISTENTE, contexto + "Conversa até agora:\n\n" + conversa
+                                  + "\n\nResponda a última mensagem da Pessoa.")

@@ -1,0 +1,173 @@
+"""As funções da extensão, numa fonte só.
+
+A tela **Extensão** do site, a tela **Planos** e a própria extensão liam listas diferentes, escritas à mão em
+três lugares: quem mexia numa esquecia as outras. Aqui fica a lista inteira, e cada função diz só de que
+`recurso` ela depende — quem decide o preço continua sendo o `config.PLANOS`, que já é a fonte dos recursos.
+Assim, mudar o que um plano abre não mexe nesta lista.
+
+`onde` é a tela do YouTube em que a função aparece, e serve para agrupar na tela de ajuda.
+"""
+from .config import PLANOS, pode
+
+# chave, nome, o que faz, onde aparece, o recurso que a abre, atalho
+FUNCOES: list[dict] = [
+    # ---- em cima de cada vídeo, enquanto a pessoa navega
+    {"chave": "nota", "nome": "Nota de outlier", "onde": "video", "recurso": "extensao",
+     "desc": "Quantas vezes o vídeo passou do normal do canal, escrito em cima de cada capa."},
+    {"chave": "vph", "nome": "Views por hora", "onde": "video", "recurso": "extensao",
+     "desc": "A velocidade do vídeo, medida e não estimada: views dividido pelas horas desde que ele saiu."},
+    {"chave": "selo", "nome": "Selo Raro · Épico · Lendário", "onde": "video", "recurso": "extensao",
+     "desc": "O selo que só o canal fora da curva recebe, na capa e na análise do canal."},
+    {"chave": "reacao", "nome": "Reação do público", "onde": "video", "recurso": "extensao",
+     "desc": "Quando o vídeo é curtido e comentado bem acima do normal, mesmo sem ser outlier de views."},
+    {"chave": "inscritos", "nome": "Inscritos do canal", "onde": "video", "recurso": "extensao",
+     "desc": "O tamanho do canal sem precisar abrir a página dele."},
+    {"chave": "monetizado", "nome": "Canal monetizado", "onde": "video", "recurso": "extensao",
+     "desc": "Se os vídeos do canal estão com anúncio."},
+    {"chave": "sem-shorts", "nome": "Esconder os Shorts", "onde": "video", "recurso": "extensao",
+     "desc": "Tira as prateleiras e os cartões de Shorts de todas as telas do YouTube."},
+    {"chave": "som", "nome": "Sons dos gestos", "onde": "video", "recurso": "extensao",
+     "desc": "Um som curto ao salvar, ao desfazer e ao achar um canal raro. Fica em silêncio enquanto houver vídeo tocando."},
+    {"chave": "ler", "nome": "Ler os vídeos sem gastar cota", "onde": "video", "recurso": "extensao",
+     "desc": "Enquanto você navega, a extensão lê os números que a página já mostra e guarda no Radar os que estouraram."},
+    {"chave": "traduzir", "nome": "Traduzir o título", "onde": "video", "recurso": "extensao",
+     "desc": "Um botão ao lado do título de cada vídeo (na página do vídeo e nas listas) mostra o título em português."},
+    {"chave": "fantasma-cartao", "nome": "Método Fantasma no cartão", "onde": "video", "recurso": "extensao",
+     "desc": "O botão 👻 ao lado do título de cada vídeo procura, sem abrir o vídeo, em que língua (inglês, espanhol e "
+             "português) ninguém fez aquele vídeo ainda."},
+    {"chave": "treino", "nome": "Selo do treino", "onde": "video", "recurso": "extensao",
+     "desc": "Os vídeos que combinam com o canal seu já treinado no site ganham o selo, com o botão de salvar a ideia."},
+
+    # ---- o painel ao lado do vídeo e o botão Radar
+    {"chave": "painel", "nome": "Painel ao lado do vídeo", "onde": "painel", "recurso": "extensao",
+     "desc": "Os números do vídeo, a curva de views, o canal, a capa e as tags sem sair da página."},
+    {"chave": "capa", "nome": "Capa e números", "onde": "painel", "recurso": "extensao",
+     "desc": "A capa em tamanho real, com quantos x o vídeo deu, e o botão de copiar a imagem."},
+    {"chave": "tags", "nome": "Tags do vídeo e do canal", "onde": "painel", "recurso": "extensao",
+     "desc": "As palavras que o dono do canal escondeu, com um clique para copiar."},
+    {"chave": "transcricao", "nome": "Transcrição", "onde": "painel", "recurso": "extensao",
+     "desc": "A fala inteira do vídeo com o tempo de cada trecho, para ler e copiar com ou sem os tempos."},
+    {"chave": "titulo", "nome": "Copiar o título", "onde": "painel", "recurso": "extensao",
+     "desc": "O título do vídeo na área de transferência, com um clique."},
+    {"chave": "print-cartao", "nome": "Print do cartão", "onde": "painel", "recurso": "extensao",
+     "desc": "A capa com o título, o canal, as views e a nota, como imagem, para colar onde quiser (Ctrl+V)."},
+    {"chave": "provar", "nome": "Provar capa e título", "onde": "painel", "recurso": "extensao",
+     "desc": "Põe a sua capa e o seu título no meio dos vídeos de verdade da página, para comparar."},
+    {"chave": "roteiro", "nome": "Levar ao Roteiro", "onde": "painel", "recurso": "extensao",
+     "desc": "Abre o Roteiro do Radar já com este vídeo.", "atalho": "Alt+R"},
+    {"chave": "ideia", "nome": "Salvar ideia", "onde": "painel", "recurso": "extensao",
+     "desc": "Guarda o vídeo na Entrada do painel do Radar."},
+    {"chave": "claude", "nome": "Claude e ChatGPT no YouTube", "onde": "painel", "recurso": "extensao",
+     "desc": "A abinha na beirada direita abre o painel do Claude, que sabe qual página está aberta.", "atalho": "Alt+C"},
+
+    # ---- na página do canal e na busca
+    {"chave": "numeros-canal", "nome": "Números do canal", "onde": "canal", "recurso": "extensao",
+     "desc": "Na página do canal: a análise, a fase do nicho e os vídeos que passaram do normal."},
+    {"chave": "cracha", "nome": "Crachá do canal", "onde": "canal", "recurso": "extensao",
+     "desc": "Que tipo de canal é, com o motivo: novo explodindo, bom para tirar títulos, perdendo força. Com o ritmo de postagem e a projeção de 30 dias."},
+    {"chave": "resumo-busca", "nome": "Resumo da busca", "onde": "busca", "recurso": "extensao",
+     "desc": "Uma faixa em cima dos resultados com os números dos vídeos da página e se o nicho está aberto."},
+    {"chave": "filtros", "nome": "Filtros dos vídeos da página", "onde": "busca", "recurso": "extensao",
+     "desc": "Os vídeos que a página já mostrou, em ordem de outlier, de views por hora ou de inscritos, com planilha.",
+     "atalho": "Alt+V"},
+
+    # ---- no YouTube Studio
+    {"chave": "ia-video", "nome": "IA no painel do vídeo", "onde": "painel", "recurso": "extensao",
+     "desc": "Por que o vídeo estourou, 10 títulos no molde dele para o seu assunto, o título levado para outra língua e a receita da capa."},
+    {"chave": "molde", "nome": "Mesmo molde de título", "onde": "painel", "recurso": "extensao",
+     "desc": "Quem mais escreve títulos na mesma estrutura deste vídeo, quantos canais são e quanto esse molde rende."},
+    {"chave": "capas-parecidas", "nome": "Capas parecidas", "onde": "painel", "recurso": "extensao",
+     "desc": "As capas que estouraram mais parecidas com a deste vídeo, com o canal, as views e quantas vezes o normal cada uma fez."},
+    {"chave": "print-quadro", "nome": "Botões no player", "onde": "painel", "recurso": "extensao",
+     "desc": "Capa, transcrição e print do quadro atual na barra do player. O print vai para colar com Ctrl+V."},
+    {"chave": "numeros-meu-canal", "nome": "Números do seu canal", "onde": "studio", "recurso": "extensao",
+     "desc": "As views e os ganhos do SEU canal, lidos do YouTube Studio conectado."},
+    {"chave": "foto-studio", "nome": "Foto com um clique no Studio", "onde": "studio", "recurso": "extensao",
+     "desc": "Uma câmera no canto de cada cartão do Studio: um clique copia a foto do gráfico."},
+    {"chave": "publicar", "nome": "Preencher a publicação", "onde": "studio", "recurso": "extensao",
+     "desc": "Preenche sozinha os detalhes, os anúncios e o questionário do vídeo no Studio. Quem aperta publicar é você."},
+    {"chave": "horario-postar", "nome": "Melhor horário para postar", "onde": "studio", "recurso": "extensao",
+     "desc": "Na hora de agendar, as faixas de 3 horas em que o público DESTE canal aparece, medidas nas curvas do "
+             "Radar. Sem curva suficiente ele diz que não sabe, em vez de inventar um horário."},
+    {"chave": "capa-2mb", "nome": "Capa acima de 2 MB", "onde": "studio", "recurso": "extensao",
+     "desc": "A capa grande demais é encolhida e salva em JPEG até caber no limite do YouTube, e já volta para o "
+             "campo da capa. A imagem no seu computador não muda."},
+    {"chave": "escrever-publicacao", "nome": "Descrição e tags com o Claude", "onde": "studio", "recurso": "extensao",
+     "desc": "Para o vídeo que não saiu da fábrica: um rascunho da descrição a partir do título (e da legenda, se "
+             "houver) e as tags que as pessoas buscam. Quem lê e muda antes de publicar é você."},
+
+    # ---- o que depende do plano
+    {"chave": "salvos-estouraram", "nome": "Aviso dos salvos que estouraram", "onde": "video", "recurso": "salvar",
+     "desc": "Uma vez por dia, ao abrir o YouTube: quantos vídeos dos seus canais salvos passaram de 5 vezes o normal."},
+    {"chave": "feed", "nome": "Medir o canal que você abre", "onde": "canal", "recurso": "extensao",
+     "desc": "Lê o feed público do canal aberto e guarda as views dos vídeos recentes, para a curva ficar em dia."},
+    {"chave": "modelar", "nome": "Fila de modelagem", "onde": "painel", "recurso": "outliers",
+     "desc": "Do painel do vídeo para a fila de modelagem do Radar, dizendo para qual canal seu ele é."},
+    {"chave": "salvar", "nome": "Salvar canal no Radar", "onde": "video", "recurso": "salvar",
+     "desc": "Um clique no vídeo ou na página do canal guarda o canal no Radar, para você acompanhar.", "atalho": "Alt+S"},
+    {"chave": "parecidos", "nome": "Canais parecidos", "onde": "canal", "recurso": "parecidos",
+     "desc": "Uma aba nova no canal com os canais que falam dos mesmos assuntos, do mais parecido para o menos."},
+    {"chave": "nicho", "nome": "Analisar o nicho", "onde": "canal", "recurso": "parecidos",
+     "desc": "Se o nicho está nascendo, em corrida ou cansado, e quem são os concorrentes dele.", "atalho": "Alt+G"},
+    {"chave": "videos-nicho", "nome": "Vídeos do nicho", "onde": "canal", "recurso": "parecidos",
+     "desc": "Os vídeos dos canais parecidos com este, do que mais estourou para o menos."},
+    {"chave": "linguas", "nome": "Método Fantasma", "onde": "painel", "recurso": "linguas",
+     "desc": "Em que língua ninguém fez este vídeo ainda: a busca pronta em 9 línguas, sem gastar cota."},
+    {"chave": "fantasma-canal", "nome": "Método Fantasma do canal", "onde": "canal", "recurso": "linguas",
+     "desc": "Os vídeos mais vistos do canal, um por um: em que língua ninguém fez, com os títulos livres para copiar."},
+    {"chave": "pedidos", "nome": "O que o público pede", "onde": "canal", "recurso": "extensao",
+     "desc": "Os pedidos e as perguntas dos comentários dos 10 vídeos mais vistos, dos mais curtidos para os menos."},
+    {"chave": "engajadas", "nome": "Visualizações engajadas", "onde": "studio", "recurso": "extensao",
+     "desc": "Uma coluna nova no Conteúdo do Studio com as visualizações engajadas de cada vídeo."},
+    {"chave": "foto-cartao", "nome": "Foto do cartão", "onde": "studio", "recurso": "extensao",
+     "desc": "Um clique copia a foto de um cartão do Studio, pronta para colar com Ctrl+V."},
+    {"chave": "perde-gente", "nome": "Onde o vídeo perde gente", "onde": "studio", "recurso": "extensao",
+     "desc": "As 3 maiores quedas da retenção e o que era falado em cada uma."},
+    {"chave": "nota-titulo", "nome": "Nota do título", "onde": "studio", "recurso": "extensao",
+     "desc": "Embaixo do campo Título: a nota pelo molde e pelo tamanho, e títulos no mesmo molde."},
+    {"chave": "capitulos", "nome": "Capítulos da fala", "onde": "studio", "recurso": "extensao",
+     "desc": "Lê a legenda do vídeo, separa as partes e coloca os capítulos na descrição."},
+    {"chave": "hora-pais", "nome": "Horário de postar", "onde": "studio", "recurso": "extensao",
+     "desc": "Na hora de agendar: escolhe o país e a hora de lá, vê no relógio do Studio e coloca. Lembra por canal e mostra as horas com mais views."},
+    {"chave": "anuncios-onda", "nome": "Painel de anúncios", "onde": "studio", "recurso": "extensao",
+     "desc": "No editor: a cada tanto, por quantidade ou nas pausas da fala, com prévia. Troca os atuais, confere cada um e tira vermelhos ou todos."},
+    {"chave": "avisos", "nome": "Avisos no Chrome", "onde": "video", "recurso": "extensao",
+     "desc": "Notificação quando um pedido para, o saldo acaba, o Studio desconecta ou o Radar cai."},
+    {"chave": "chat", "nome": "Botão no Claude e no ChatGPT", "onde": "video", "recurso": "extensao",
+     "desc": "Perguntas prontas do Radar dentro dos dois, e o comando para conectar o MCP."},
+    {"chave": "ponte", "nome": "Ler o YouTube para o Claude", "onde": "video", "recurso": "extensao",
+     "desc": "Com uma aba do YouTube aberta, o MCP do Radar lê canais e buscas por ela, sem gastar a cota."},
+    {"chave": "numeros-fora", "nome": "Números do seu canal fora do Studio", "onde": "video", "recurso": "extensao",
+     "desc": "As views das últimas 48 horas na barra do topo do YouTube, mesmo sem o Studio aberto."},
+    {"chave": "alta", "nome": "Canais novos em alta", "onde": "video", "recurso": "radar",
+     "desc": "Uma faixa no topo da página inicial do YouTube com os canais novos que o garimpo achou crescendo."},
+]
+
+ONDE = {"video": "Em cima de cada vídeo", "painel": "No painel ao lado do vídeo", "canal": "Na página do canal",
+        "busca": "Na busca do YouTube", "studio": "No YouTube Studio"}
+
+
+def plano_de(recurso: str) -> str:
+    """O plano mais barato que abre este recurso (a mesma conta do 402 do servidor)."""
+    return next((k for k, v in PLANOS.items() if recurso in v["recursos"]), "pro")
+
+
+def lista(plano: str | None = None) -> list[dict]:
+    """A lista inteira; com o plano da pessoa, cada função já diz se está liberada para ela."""
+    saida = []
+    for f in FUNCOES:
+        exige = plano_de(f["recurso"])
+        saida.append({**f, "plano": exige, "plano_nome": PLANOS[exige]["nome"],
+                      "liberada": pode(plano, f["recurso"]) if plano else None})
+    return saida
+
+
+def por_plano() -> dict[str, list[str]]:
+    """Para a tela de planos: o nome de cada função que cada plano abre."""
+    return {k: [f["nome"] for f in lista(k) if f["liberada"]] for k in PLANOS}
+
+
+def contagem() -> dict:
+    """Quantas funções no total e quantas no plano grátis — o número que a tela de ajuda mostra no alto."""
+    todas = lista("gratis")
+    return {"total": len(todas), "gratis": sum(1 for f in todas if f["liberada"])}
