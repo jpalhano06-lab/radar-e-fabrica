@@ -330,15 +330,29 @@ def _dividir_enumeracoes(cenas, alinhamento, minimo=ESTILO_MINIMO_ENUMERACAO, lo
 def _aplicar_fracao_da_ia(cenas, fracao, log=print):
     """Leva a parte de IA do vídeo até a escolhida (ia.fracao), espalhada pelo vídeo. As cenas que só valem de verdade
     (nome exato, época, arquivo) são as últimas a virar IA. O agente já escreveu o prompt de toda cena, então nada é
-    pedido de novo; a busca fica de reserva. O excesso de IA quem corta é o teto (imagens._teto_da_ia)."""
+    pedido de novo; a busca fica de reserva. O excesso de IA quem corta é o teto (imagens._teto_da_ia).
+
+    O começo fica com o material real (pedido do usuário em 2026-11-16: 75% de IA, mas os primeiros minutos com mais
+    vídeo, como manda ESTILO_VIDEO_NO_INICIO): a IA vai primeiro para depois dos 5 min, espalhada; só se ainda faltar
+    entra entre o gancho e os 5 min, e o gancho (40 s) é o último."""
     falta = round(fracao * len(cenas)) - sum(1 for c in cenas if c.get("tipo") == "ia")
     reais = [c for c in cenas if c.get("tipo") != "ia" and (c.get("prompt") or "").strip()]
     if falta <= 0 or not reais:
         return
     soltas = [c for c in reais if not (c.get("exato") or c.get("epoca") or c.get("onde_existe") == "arquivo")]
     presas = [c for c in reais if c not in soltas]
-    quantas = min(falta, len(soltas))
-    escolhidas = [soltas[i * len(soltas) // quantas] for i in range(quantas)] + presas[:falta - quantas]
+    limites = [fim for fim, _ in ESTILO_VIDEO_NO_INICIO]  # (40 s, 300 s)
+
+    def faixa(c):  # 0 depois dos 5 min, 1 entre o gancho e os 5 min, 2 o gancho
+        ini = float(c.get("ini") or 0)
+        return 0 if ini >= limites[-1] else 1 if ini >= limites[0] else 2
+
+    escolhidas = []
+    for f in (0, 1, 2):
+        grupo = [c for c in soltas if faixa(c) == f]
+        quantas = min(falta - len(escolhidas), len(grupo))
+        escolhidas += [grupo[i * len(grupo) // quantas] for i in range(quantas)] if quantas > 0 else []
+    escolhidas += presas[:falta - len(escolhidas)]
     for c in escolhidas:
         c["tipo"], c["busca_reserva"], c["busca"] = "ia", c.get("busca") or c.get("busca_reserva") or "", ""
     log(f"  parte de IA escolhida ({fracao:.0%}): {len(escolhidas)} cena(s) de banco viraram imagem de IA")

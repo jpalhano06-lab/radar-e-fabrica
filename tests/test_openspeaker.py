@@ -11,6 +11,16 @@ import pytest
 from fabrica import custos_reais, openspeaker
 
 
+@pytest.fixture(autouse=True)
+def sem_marca_de_transcricao(tmp_path, monkeypatch):
+    """O aviso de transcrição pendurada fica num arquivo da pasta da fábrica: nos testes ele vai para a pasta
+    temporária, senão um teste marcaria a conta de verdade como pendurada e os outros veriam a marca dele."""
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "openspeaker_transcricao.json")
+    monkeypatch.setattr(openspeaker, "_transcricao_pendurada", False)
+    # a memória de fila cheia é escrita dentro de _criar: sem zerar aqui, um teste condenava a conta nos seguintes
+    monkeypatch.setattr(openspeaker, "_vagas_cheias_em", 0.0)
+
+
 # ---------------------------------------------------------------- voz e corpo da tarefa
 
 def test_id_cru_da_elevenlabs_ganha_o_prefixo():
@@ -27,9 +37,22 @@ def test_velocidade_fica_dentro_do_que_a_api_aceita():
     assert openspeaker.corpo_da_tarefa("oi", {"voice_id": "abc", "velocidade": 0.1})["speed"] == 0.5
 
 
-def test_corpo_pede_a_transcricao():
+def test_corpo_pede_a_transcricao(monkeypatch):
+    """Sem nada no config.yaml, a transcrição é pedida (é ela que mede o tempo de cada palavra)."""
+    monkeypatch.setattr(openspeaker, "config_geral", lambda: {})
     corpo = openspeaker.corpo_da_tarefa("oi", {"voice_id": "abc"})
     assert corpo["with_transcript"] == "true" and corpo["text"] == "oi"
+
+
+def test_transcricao_desligada_no_config_sai_do_corpo(monkeypatch):
+    monkeypatch.setattr(openspeaker, "config_geral", lambda: {"openspeaker": {"transcricao": False}})
+    assert openspeaker.corpo_da_tarefa("oi", {"voice_id": "abc"})["with_transcript"] == "false"
+
+
+def test_fila_pendurada_para_de_pedir_transcricao(monkeypatch):
+    """Tarefa pendurada não libera a vaga: com 20 presas, a conta toda para com queue_limit_exceeded."""
+    monkeypatch.setattr(openspeaker, "_transcricao_pendurada", True)
+    assert openspeaker.corpo_da_tarefa("oi", {"voice_id": "abc"})["with_transcript"] == "false"
 
 
 def test_sem_voz_no_perfil_explica_o_que_fazer():
@@ -133,6 +156,33 @@ def test_tarefa_com_erro_explica_em_portugues(tmp_path, monkeypatch):
     assert "sem créditos" in str(erro.value)
 
 
+def test_audio_pronto_e_transcricao_atrasada_segue_sem_ela(tmp_path, monkeypatch):
+    """A fila de transcrição do OpenSpeaker parou em 2026-11-18 e a tarefa ficava "doing" com o áudio pronto.
+
+    Sem isto, cada bloco esperava os 20 minutos do limite, errava e tentava de novo, sem entregar narração."""
+    _api_falsa(monkeypatch, tmp_path)
+    monkeypatch.setattr(openspeaker, "_pedir", lambda m, c, **kw: _Resposta(
+        {"success": True, "task_id": "tarefa-1"} if c == "/v3/text-to-speech"
+        else {"id": "tarefa-1", "status": "doing", "progress": 90, "credit_cost": 224,
+              "metadata": {"audio_url": "https://x/a.mp3", "transcript_status": "processing"}}))
+    monkeypatch.setattr(openspeaker, "ESPERA_DA_TRANSCRICAO", 0)
+    mp3 = tmp_path / "bloco.mp3"
+    palavras, creditos = openspeaker.narrar("oi mundo", {"voice_id": "abc"}, mp3, log=lambda *_: None)
+    assert mp3.read_bytes() == b"MP3"      # o áudio que já estava pago vem para o disco
+    assert palavras == []                   # sem transcrição: narracao estima o tempo pelas pausas
+    assert creditos == 224
+
+
+def test_sem_audio_nenhum_a_espera_ainda_estoura(tmp_path, monkeypatch):
+    """A saída sem transcrição não pode virar desculpa para aceitar tarefa que não gravou nada."""
+    monkeypatch.setattr(openspeaker, "_pedir", lambda m, c, **kw: _Resposta(
+        {"id": "tarefa-1", "status": "doing", "progress": 10, "metadata": {}}))
+    monkeypatch.setattr(openspeaker, "ESPERA_DA_TRANSCRICAO", 0)
+    with pytest.raises(SystemExit) as erro:
+        openspeaker._esperar("tarefa-1", limite=0, log=lambda *_: None)
+    assert "não terminou" in str(erro.value)
+
+
 # ---------------------------------------------------------------- preço
 
 def test_preco_do_openspeaker_nao_sai_do_pacote_da_genaipro():
@@ -157,3 +207,193 @@ def test_caractere_do_openspeaker_custa_1_29_credito():
     assert taxa == pytest.approx(1.29)
     # o caractere sai bem mais barato que os US$ 0,000022 da GenAIPro, mesmo gastando mais créditos
     assert custos_reais.preco_por_caractere(config, provedor="openspeaker")[0] == pytest.approx(0.0000061404)
+
+
+# ---------------------------------------------------------------- as vagas da conta (2026-11-19)
+
+class _RespostaHttp:
+    """Resposta crua, como httpx devolve: tem status_code e text, que é o que _pedir olha."""
+
+    def __init__(self, status_code, text="", dados=None):
+        self.status_code, self.text, self._dados = status_code, text, dados or {}
+
+    def json(self):
+        return self._dados
+
+
+FILA_CHEIA = ('{"success":false,"message":"You have too many tasks in queue (20/20), please wait for it to '
+              'finish.","error":{"code":"queue_limit_exceeded"}}')
+
+
+def test_fila_cheia_nao_insiste_em_segundos(monkeypatch):
+    """Antes, queue_limit_exceeded virava 4 tentativas rápidas e um erro em 40s: a criação só tentava de novo."""
+    pedidos = []
+
+    def request(metodo, url, **kw):
+        pedidos.append(url)
+        return _RespostaHttp(429, FILA_CHEIA, json.loads(FILA_CHEIA))
+
+    monkeypatch.setattr(openspeaker.httpx, "request", request)
+    monkeypatch.setattr(openspeaker, "chave", lambda: "k")
+    with pytest.raises(openspeaker.FilaCheia) as erro:
+        openspeaker._pedir("POST", "/v3/text-to-speech")
+    assert len(pedidos) == 1 and "vagas" in str(erro.value)
+
+
+def _tarefa_presa(ident="presa-1", quando="2020-01-01T00:00:00.000Z", transcricao="processing"):
+    return {"id": ident, "status": "doing", "created_at": quando, "text": "oi mundo",
+            "metadata": {"audio_url": "https://x/a.mp3", "transcript_status": transcricao,
+                         "v3": {"raw_voice_id": "elevenlabs_abc"}}}
+
+
+def test_presa_na_transcricao_e_a_tarefa_com_audio_que_nunca_termina():
+    assert openspeaker._presa_na_transcricao(_tarefa_presa())
+    # a que já terminou não está presa, e a que ainda não gravou áudio também não (cancelar perderia a narração)
+    assert not openspeaker._presa_na_transcricao({**_tarefa_presa(), "status": "done"})
+    assert not openspeaker._presa_na_transcricao({"status": "doing", "metadata": {}})
+
+
+def test_liberar_vagas_nao_cancela_a_tarefa_que_este_processo_espera(monkeypatch, tmp_path):
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "t.json")
+    monkeypatch.setattr(openspeaker, "tarefas", lambda: [_tarefa_presa("minha"), _tarefa_presa("velha")])
+    canceladas = []
+    monkeypatch.setattr(openspeaker, "cancelar", lambda i: canceladas.append(i) or True)
+    openspeaker._minhas.add("minha")
+    try:
+        assert openspeaker.liberar_vagas(log=lambda *_: None) == 1
+    finally:
+        openspeaker._minhas.discard("minha")
+    assert canceladas == ["velha"]
+
+
+def test_tarefa_recem_criada_nao_perde_a_vaga(monkeypatch, tmp_path):
+    """Cancelar uma tarefa de agora mataria a narração que está gravando: só a presa há mais de 10 min sai."""
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "t.json")
+    monkeypatch.setattr(openspeaker, "_idade", lambda t: 60)
+    monkeypatch.setattr(openspeaker, "tarefas", lambda: [_tarefa_presa()])
+    monkeypatch.setattr(openspeaker, "cancelar", lambda i: True)
+    assert openspeaker.liberar_vagas(log=lambda *_: None) == 0
+
+
+def test_fila_cheia_aproveita_a_tarefa_igual_sem_pagar_de_novo(monkeypatch, tmp_path):
+    monkeypatch.setattr(openspeaker, "chave", lambda: "k")
+    monkeypatch.setattr(openspeaker.httpx, "request",
+                        lambda m, u, **kw: _RespostaHttp(429, FILA_CHEIA, json.loads(FILA_CHEIA)))
+    monkeypatch.setattr(openspeaker, "tarefas", lambda: [_tarefa_presa("ja-paga")])
+    corpo = openspeaker.corpo_da_tarefa("oi mundo", {"voice_id": "abc"})
+    assert openspeaker._criar(corpo, log=lambda *_: None) == ("ja-paga", True)
+
+
+def test_fila_cheia_sem_tarefa_igual_desiste_depois_do_limite(monkeypatch, tmp_path):
+    monkeypatch.setattr(openspeaker, "chave", lambda: "k")
+    monkeypatch.setattr(openspeaker.httpx, "request",
+                        lambda m, u, **kw: _RespostaHttp(429, FILA_CHEIA, json.loads(FILA_CHEIA)))
+    monkeypatch.setattr(openspeaker, "tarefas", lambda: [])
+    monkeypatch.setattr(openspeaker, "ESPERA_POR_VAGA", -1)   # o limite já passou na primeira volta
+    corpo = openspeaker.corpo_da_tarefa("oi mundo", {"voice_id": "abc"})
+    with pytest.raises(openspeaker.FilaCheia):
+        openspeaker._criar(corpo, log=lambda *_: None)
+
+
+def test_transcricao_pendurada_vale_depois_de_reiniciar(monkeypatch, tmp_path):
+    """O aviso em memória se perdia no reinício e a conta voltava a encher as 20 vagas em minutos."""
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "t.json")
+    monkeypatch.setattr(openspeaker, "config_geral", lambda: {})
+    openspeaker.marcar_transcricao_pendurada()
+    monkeypatch.setattr(openspeaker, "_transcricao_pendurada", False)   # como se a fábrica tivesse reiniciado
+    assert openspeaker.pedir_transcricao() is False
+    # passadas as horas, a fábrica tenta a transcrição de novo: o problema é do lado deles e costuma passar
+    monkeypatch.setattr(openspeaker, "HORAS_SEM_TRANSCRICAO", 0)
+    assert openspeaker.pedir_transcricao() is True
+
+
+def test_tarefa_pendurada_sai_da_fila_quando_o_audio_chega(tmp_path, monkeypatch):
+    """Sem isso a vaga ficava ocupada para sempre, mesmo com o áudio já baixado."""
+    _api_falsa(monkeypatch, tmp_path)
+    monkeypatch.setattr(openspeaker, "_pedir", lambda m, c, **kw: _Resposta(
+        {"success": True, "task_id": "tarefa-1"} if c == "/v3/text-to-speech"
+        else {"id": "tarefa-1", "status": "doing", "credit_cost": 224,
+              "metadata": {"audio_url": "https://x/a.mp3"}}))
+    monkeypatch.setattr(openspeaker, "ESPERA_DA_TRANSCRICAO", 0)
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "t.json")
+    canceladas = []
+    monkeypatch.setattr(openspeaker, "cancelar", lambda i: canceladas.append(i) or True)
+    openspeaker.narrar("oi mundo", {"voice_id": "abc"}, tmp_path / "bloco.mp3", log=lambda *_: None)
+    assert canceladas == ["tarefa-1"]
+
+
+def test_conta_travada_quando_as_vagas_estao_todas_ocupadas(monkeypatch, tmp_path):
+    """É isto que manda o vídeo narrar na reserva (Fish) em vez de esperar vaga por horas."""
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "t.json")
+    monkeypatch.setattr(openspeaker, "VAGAS_DA_CONTA", 2)
+    monkeypatch.setattr(openspeaker, "tarefas", lambda: [_tarefa_presa("a"), _tarefa_presa("b")])
+    monkeypatch.setattr(openspeaker, "cancelar", lambda i: False)   # a API deles não tem cancelamento
+    assert openspeaker.conta_travada(log=lambda *_: None) is True
+
+
+def test_conta_com_vaga_sobrando_nao_vai_para_a_reserva(monkeypatch, tmp_path):
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "t.json")
+    monkeypatch.setattr(openspeaker, "VAGAS_DA_CONTA", 2)
+    monkeypatch.setattr(openspeaker, "tarefas", lambda: [_tarefa_presa("a")])
+    assert openspeaker.conta_travada(log=lambda *_: None) is False
+
+
+def test_lista_de_tarefas_que_nao_responde_nao_troca_a_voz_do_canal(monkeypatch):
+    """Falha de leitura não pode virar motivo para o vídeo sair com outra voz."""
+    def explode():
+        raise openspeaker.ErroOpenSpeaker("a lista não respondeu")
+    monkeypatch.setattr(openspeaker, "tarefas", explode)
+    assert openspeaker.conta_travada(log=lambda *_: None) is False
+
+
+def test_vaga_que_abriu_depois_do_cancelamento_mantem_o_openspeaker(monkeypatch, tmp_path):
+    monkeypatch.setattr(openspeaker, "_arquivo_transcricao", lambda: tmp_path / "t.json")
+    monkeypatch.setattr(openspeaker, "VAGAS_DA_CONTA", 2)
+    filas = [[_tarefa_presa("a"), _tarefa_presa("b")], [_tarefa_presa("b")]]
+    monkeypatch.setattr(openspeaker, "tarefas", lambda: filas.pop(0) if len(filas) > 1 else filas[0])
+    monkeypatch.setattr(openspeaker, "cancelar", lambda i: True)
+    assert openspeaker.conta_travada(log=lambda *_: None) is False
+
+
+# ---------------------------------------------------------------- a reserva da narração (narracao.voz_com_reserva)
+
+def test_conta_travada_manda_o_video_para_a_fish(monkeypatch):
+    from fabrica import narracao
+    monkeypatch.setattr(openspeaker, "conta_travada", lambda log=print: True)
+    voz = {"provedor": "openspeaker", "voice_id": "elevenlabs_abc", "velocidade": 1.1}
+    nova = narracao.voz_com_reserva(voz, log=lambda *_: None)
+    assert nova["provedor"] == "fish" and nova["voice_id"] == "" and nova["velocidade"] == 1.1
+
+
+def test_openspeaker_com_vaga_grava_na_voz_do_canal(monkeypatch):
+    from fabrica import narracao
+    monkeypatch.setattr(openspeaker, "conta_travada", lambda log=print: False)
+    voz = {"provedor": "openspeaker", "voice_id": "elevenlabs_abc"}
+    assert narracao.voz_com_reserva(voz, log=lambda *_: None) is voz
+
+
+def test_voz_de_outro_provedor_nao_e_mexida(monkeypatch):
+    from fabrica import narracao
+    monkeypatch.setattr(openspeaker, "conta_travada", lambda log=print: pytest.fail("nem devia olhar a conta"))
+    voz = {"provedor": "genaipro", "voice_id": "abc"}
+    assert narracao.voz_com_reserva(voz, log=lambda *_: None) is voz
+
+
+def test_voz_da_fish_escolhida_no_perfil_vale_na_reserva(monkeypatch):
+    """voz.voice_id_fish no perfil do canal: a reserva grava com ela em vez da voz padrão da Fish."""
+    from fabrica import narracao
+    monkeypatch.setattr(openspeaker, "conta_travada", lambda log=print: True)
+    voz = {"provedor": "openspeaker", "voice_id": "elevenlabs_abc", "voice_id_fish": "fish-123"}
+    assert narracao.voz_com_reserva(voz, log=lambda *_: None)["voice_id"] == "fish-123"
+
+
+def test_fila_cheia_fica_lembrada_mesmo_com_a_listagem_fora(monkeypatch):
+    """A listagem deles devolve 503 de vez em quando: sem memória, o vídeo não ia para a reserva."""
+    def explode():
+        raise openspeaker.ErroOpenSpeaker("503 Task polling temporarily busy")
+    monkeypatch.setattr(openspeaker, "tarefas", explode)
+    monkeypatch.setattr(openspeaker, "_vagas_cheias_em", openspeaker.time.time())
+    assert openspeaker.conta_travada(log=lambda *_: None) is True
+    # passada a memória, volta a perguntar à API em vez de condenar a conta para sempre
+    monkeypatch.setattr(openspeaker, "MEMORIA_DA_FILA_CHEIA", 0)
+    assert openspeaker.conta_travada(log=lambda *_: None) is False

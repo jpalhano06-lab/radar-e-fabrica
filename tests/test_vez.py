@@ -42,6 +42,50 @@ def test_zero_desliga(monkeypatch):
     assert "teste" not in vez._SEMAFOROS
 
 
+def test_pausado_solta_a_vaga(monkeypatch):
+    """O vídeo pausado DENTRO da etapa solta a vaga: o outro entra na hora, em vez de esperar a despausa."""
+    monkeypatch.setattr(vez, "_SEMAFOROS", {})
+    monkeypatch.setattr(tempos, "medir", lambda p, nome, log=None: _Medida([], nome))
+    p = Projeto({"vez": {"teste": 1}})
+    ordem, b_entrou = [], threading.Event()
+
+    def pausado():
+        with vez.na_vez("teste", p, log=lambda *_: None):
+            ordem.append("entra a")
+            with vez.solto(log=lambda *_: None):   # a pausa do vídeo
+                b_entrou.wait(5)
+            ordem.append("sai a")
+
+    def outro():
+        with vez.na_vez("teste", p, log=lambda *_: None):
+            ordem.append("entra b")
+            b_entrou.set()
+            time.sleep(0.05)
+            ordem.append("sai b")
+
+    a = threading.Thread(target=pausado); a.start()
+    time.sleep(0.05)
+    b = threading.Thread(target=outro); b.start()
+    a.join(5); b.join(5)
+    assert ordem == ["entra a", "entra b", "sai b", "sai a"]
+    assert vez._SEMAFOROS["teste"].acquire(blocking=False)   # ninguém ficou com a vaga
+
+
+def test_log_da_solta_nao_solta_duas_vezes(monkeypatch):
+    """O log da solta passa pelo log_w, que chama a pausa de novo: a segunda solta não pode liberar a mesma vaga."""
+    monkeypatch.setattr(vez, "_SEMAFOROS", {})
+    p = Projeto({"vez": {"teste": 1}})
+
+    def log(_msg):
+        with vez.solto(log=lambda *_: None):   # pausa dentro do log da própria solta
+            pass
+
+    with vez.na_vez("teste", p, log=lambda *_: None):
+        with vez.solto(log=log):
+            pass
+    assert vez._SEMAFOROS["teste"].acquire(blocking=False)
+
+
 class _Medida:
     def __init__(self, lista, nome):
         self.lista, self.nome = lista, nome

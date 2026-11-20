@@ -949,6 +949,7 @@ def _sem_youtube_se_a_cota_fechou(cota, ordem, candidatos_da_cena, escolhidos, l
 def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
     from . import garimpo
 
+    comeco = time.time()  # o prazo da busca rápida conta daqui
     garimpo.esquecer_cota(projeto)  # o servidor vive dias: a cota desta busca nasce do que está no disco agora
     cota_do_garimpo = garimpo.cota(projeto, garimpo.cfg_do_projeto(projeto), log)
     if "youtube" in ((getattr(buscador, "cfg", None) or {}).get("fontes_video") or ()):
@@ -991,7 +992,8 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
         notas = _adiantar_notas(projeto, por_n, ordens_parciais, candidatos, descricoes, usados, vizinhas, log) if conferir else {}
         for n, ordem in ordens_parciais.items():
             decididas.add(n)
-            if not ordem and not permissivo and segunda_leva.get(n) and n not in na_segunda and not projeto.offline:
+            if not ordem and not permissivo and segunda_leva.get(n) and n not in na_segunda and not projeto.offline \
+                    and not busca_rapida(projeto, por_n[n]):
                 # o modelo recusou os 12 primeiros: antes de cair nas tags, ele vê os 12 seguintes
                 adiadas.add(n)
                 decididas.discard(n)
@@ -1017,7 +1019,8 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
                         contagem["conferidas"] += 1
                         contagem["reprovados"] += info.get("reprovados_antes", 0)
                     contagem["suspeitas"] += 1 if info.get("suspeita") else 0
-                elif segunda_leva.get(n) and n not in na_segunda and not projeto.offline:
+                elif segunda_leva.get(n) and n not in na_segunda and not projeto.offline \
+                        and not busca_rapida(projeto, por_n[n]):
                     # o Jev reprovou os escolhidos da primeira leva: a cena vê a segunda
                     adiadas.add(n)
                     decididas.discard(n)
@@ -1068,6 +1071,7 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
                     log(f"  cena {n} não conseguiu baixar o material. {str(erro)[:150]}")
         projeto.salvar_json("cenas.json", dados)
 
+    sem_tempo = set()  # cenas da busca rápida que o prazo cortou: vão para a IA
     if projeto.offline:
         aplicar({c["n"]: list(range(len(candidatos[c["n"]]))) for c in com_opcoes})
     else:
@@ -1086,7 +1090,7 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
         with ThreadPoolExecutor(processos) as executor:
             futuros = [executor.submit(_escolher_lote, projeto, lote, candidatos, folhas, descricoes if conferir else None)
                        for lote in lotes]
-            interrupcao = _aplicar_ao_terminar(futuros, aplicar)
+            interrupcao, sem_tempo = _aplicar_com_prazo(futuros, lotes, aplicar, projeto, comeco, log)
         if interrupcao is not None:
             prontas = sum(1 for c in alvo if c.get("midia"))
             log(f"  {prontas} de {len(alvo)} cena(s) baixadas e gravadas antes da interrupção")
@@ -1107,6 +1111,10 @@ def _buscar_cenas(projeto, dados, alvo, geral, buscador, log, permissivo):
     for cena in alvo:
         if cena.get("midia"):
             encontrados += 1
+        elif busca_rapida(projeto, cena) and not permissivo:
+            # depois do começo não se tenta de novo: o que a busca rápida não achou (no prazo, na escolha ou no download)
+            # vai para a IA, e a próxima rodada não volta a buscar
+            cena["sem_midia_real"] = True
         elif cena["n"] in falhas_de_download:
             # o download falhou, o que costuma ser passageiro: a cena continua pendente
             sem_resposta += 1
@@ -1370,6 +1378,53 @@ def _candidatos_da_cena(buscador, cena):
     return [c for c in buscador.candidatos(cena) if _chave(c) not in rejeitadas]
 
 
+# A busca rápida (pedido do usuário em 2026-11-16: "ache rápido as imagens e as que forem demorar já passa pra IA; o
+# importante é no começo ser vídeos"). No 15-cheap-poundland a busca de acervo levou 1h40, e cada cena real custava de
+# 7 a 17 buscas nos bancos, umas 6 chamadas de modelo e downloads de 80 MB do YouTube. Agora só o começo (até
+# midia.busca_rapida_depois_de, 5 min, o mesmo trecho de ESTILO_VIDEO_NO_INICIO) tem a busca completa; depois dele a
+# cena tem uma busca só, sem YouTube, sem a segunda leva, e o que não sair dentro do prazo da etapa vai para a IA
+BUSCA_RAPIDA_DEPOIS_DE = 300.0  # segundos
+PRAZO_DA_BUSCA_MIN = 10.0       # minutos da etapa; o começo nunca é cortado pelo prazo
+
+
+def busca_rapida(projeto, cena) -> bool:
+    """A cena está depois do começo e a IA está ligada para pegar o que a busca rápida não achar."""
+    if projeto.offline or not ia_ativa(projeto):
+        return False
+    limite = float((projeto.config.get("midia") or {}).get("busca_rapida_depois_de", BUSCA_RAPIDA_DEPOIS_DE) or 0)
+    return limite > 0 and float(cena.get("ini") or 0) >= limite
+
+
+def prazo_da_busca(projeto) -> float:
+    """Segundos da etapa de busca para as cenas da busca rápida; 0 sem prazo."""
+    return float((projeto.config.get("midia") or {}).get("prazo_da_busca_min", PRAZO_DA_BUSCA_MIN) or 0) * 60
+
+
+def _aplicar_com_prazo(futuros, lotes, aplicar, projeto, comeco, log):
+    """_aplicar_ao_terminar com o prazo da busca: passou dele, os lotes que ainda não começaram e só têm cenas da busca
+    rápida são cancelados. Devolve (primeiro erro, números das cenas canceladas)."""
+    prazo = prazo_da_busca(projeto)
+    cancelados = set()
+    interrupcao = None
+    avisou = False
+    for futuro, lote in zip(futuros, lotes):
+        if prazo and time.time() - comeco > prazo and all(busca_rapida(projeto, c) for c in lote) and futuro.cancel():
+            cancelados.update(c["n"] for c in lote)
+            if not avisou:
+                log(f"  a busca passou de {prazo / 60:.0f} min: as cenas depois do começo que faltam vão para a IA")
+                avisou = True
+            continue
+        try:
+            aplicar(futuro.result())
+        except KeyboardInterrupt:
+            for f in futuros:
+                f.cancel()
+            raise
+        except BaseException as erro:
+            interrupcao = interrupcao or erro
+    return interrupcao, cancelados
+
+
 VAGAS_DO_GARIMPO_EM_FOTO = 3  # trechos por busca numa cena de foto: o resto das vagas continua com as fotos
 
 
@@ -1447,6 +1502,10 @@ class Buscador:
                       busca_com_contexto(bloco, cena["busca"]), cena["busca"], exato if contido else "",
                       busca_com_contexto(bloco, cena.get("busca_alternativa") or ""),
                       busca_com_contexto(bloco, curta)]
+        rapida = getattr(self, "projeto", None) is not None and busca_rapida(self.projeto, cena)
+        if rapida:
+            # depois do começo: uma busca só, a mais exata; o que não vier dela vai para a IA
+            tentativas = [next((b for b in tentativas if (b or "").strip()), "")]
         vistas = set()
         achados = []
         for busca in tentativas:
@@ -1455,11 +1514,11 @@ class Buscador:
                 continue
             vistas.add(busca.lower())
             novos = self._das_fontes(tipo, busca, preferida, acervo)
-            if tipo == "foto" and not acervo:
+            if tipo == "foto" and not acervo and not rapida:  # o YouTube (downloads de 80 MB) só no começo
                 novos = self._do_garimpo(busca) + novos
             # em cena de animal vale a própria espécie: "snake" nas tags de vídeos de píton e de cobra-do-milho
             # passava por mamba-negra, e a foto da mamba nunca era procurada
-            if tipo == "video" and not [n for n in novos if _cita_o_assunto(especie or assunto, n)]:
+            if tipo == "video" and not rapida and not [n for n in novos if _cita_o_assunto(especie or assunto, n)]:
                 # nenhum vídeo do assunto: coisa com nome próprio (o Novo Confinamento Seguro, o "pé de elefante")
                 # só existe em foto, e quase sempre na Wikimedia, que a busca de vídeo não consulta
                 # espécie: o iNaturalist, que tem foto de quase todo bicho (a mamba-negra do natureza-nos-ensina não

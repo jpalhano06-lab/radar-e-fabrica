@@ -35,6 +35,18 @@ TEXTO_TESTE_VOZ = (
 )
 
 
+def voz_com_reserva(voz: dict, log=print) -> dict:
+    """A voz que vai gravar: a do perfil, ou a reserva grátis quando a conta do OpenSpeaker está travada.
+
+    Devolve o mesmo dicionário quando nada muda, para quem chamou saber que não houve troca."""
+    if voz.get("provedor") != "openspeaker" or not openspeaker.conta_travada(log):
+        return voz
+    log(f"  ⚠ AVISO: as {openspeaker.VAGAS_DA_CONTA} vagas de tarefa da conta do OpenSpeaker estão ocupadas e não "
+        "há como soltá-las (a API deles não tem cancelamento): este vídeo vai narrar na Fish Audio, grátis, com a "
+        "voz padrão dela, que é diferente da voz do canal. Os próximos narram no OpenSpeaker de novo, sozinhos")
+    return {**voz, "provedor": "fish", "voice_id": str(voz.get("voice_id_fish") or "").strip()}
+
+
 def narrar(projeto, log=print, sem_gastar=False) -> float:
     """sem_gastar: só remonta a narração com os blocos já gravados (o pacote importado, pacote.importar); se algum
     bloco tivesse de ser gravado de novo (o texto ou a voz mudou), para antes de chamar a voz paga."""
@@ -70,6 +82,18 @@ def narrar(projeto, log=print, sem_gastar=False) -> float:
                          f"mudou desde o pacote). Nada foi gasto.")
     if por_voz:
         log(f"  a voz mudou: {por_voz} bloco(s) com o mesmo texto vão ser gravados de novo com a voz nova")
+    # Reserva da narração (2026-11-19): com as vagas de tarefa da conta do OpenSpeaker todas ocupadas, o vídeo
+    # narra na Fish Audio (grátis) em vez de ficar parado. É o que desentala o dia em que a fila deles pendura: a
+    # API do OpenSpeaker não tem como cancelar tarefa, então as vagas podem ficar presas por horas. Todos os blocos
+    # vão para a reserva, mesmo os já gravados, para o vídeo não sair com duas vozes diferentes. Quando a conta do
+    # OpenSpeaker voltar, os vídeos seguintes narram nela de novo, sem mexer em nada.
+    if pendentes and not local and not projeto.offline:
+        de_reserva = voz_com_reserva(voz, log)
+        if de_reserva is not voz:
+            voz = de_reserva
+            assinatura = assinatura_da_voz(projeto, voz)
+            pendentes = list(range(len(blocos)))  # tudo na mesma voz: bloco já gravado no OpenSpeaker é regravado
+
     preparada = None
     if local and pendentes:
         # o motor de voz da fábrica (motores_voz/servidor.py) é ligado uma vez para o vídeo todo
@@ -104,7 +128,9 @@ def narrar(projeto, log=print, sem_gastar=False) -> float:
                                        custo, detalhes={"provedor": "fish", "transcricao": True})
             return alinhamento
         if voz.get("provedor") == "openspeaker":
-            alinhamento = _openspeaker(bloco.texto, voz, bruto, lambda *_: None, falado)
+            # com o log de verdade: é por aqui que aparecem a vaga da conta cheia, a tarefa já paga que foi
+            # aproveitada e a transcrição pendurada, que sem isto ninguém via (2026-11-19)
+            alinhamento = _openspeaker(bloco.texto, voz, bruto, log, falado)
             creditos = alinhamento.pop("_creditos", 0)
             if creditos:
                 # o OpenSpeaker diz quanto cada tarefa cobrou (credit_cost): o bloco entra na conta na hora,

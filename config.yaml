@@ -57,6 +57,19 @@ fish:
   transcricao: openai/whisper-large-v3-turbo
   blocos_ao_mesmo_tempo: 3
 
+# Narração no OpenSpeaker (ai33.pro), o provedor de voz de hoje. A chave fica no .env, em OPENSPEAKER_API.
+openspeaker:
+  # A transcrição é o que mede o tempo de cada palavra. Em false, o tempo é estimado pelas pausas do áudio (como
+  # na Fish) e a tarefa fica pronta assim que o áudio sai, sem risco de ficar presa na fila deles. A fábrica
+  # desliga sozinha, por 6 horas, quando a fila de transcrição do OpenSpeaker pendura: a tarefa pendurada ocupa
+  # uma das 20 vagas da conta e, com as 20 presas, nenhum vídeo narra (foi o que parou os pedidos 176 e 177 em
+  # 2026-11-19). O aviso fica em openspeaker_transcricao.json e vale depois de a fábrica reiniciar.
+  # Desligada à mão em 2026-11-19, enquanto a fila de transcrição deles está parada: a API do OpenSpeaker não tem
+  # como cancelar tarefa (todas as rotas de cancelamento devolvem 404), então cada tarefa pendurada perde uma vaga
+  # até eles andarem com a fila. Volte para true quando a transcrição deles voltar; o tempo das palavras fica mais
+  # preciso e a legenda também.
+  transcricao: false
+
 # Narração. A chave fica no .env, em GENAIPRO_API. O saldo aparece no editor e em uv run fabrica creditos.
 genaipro:
   url: https://genaipro.io/api
@@ -195,13 +208,17 @@ groq:
   contexto_depois: 2         # cenas seguintes mostradas só para dar contexto
 
 banco_imagens:               # toda imagem de IA fica guardada, e a cena parecida de outro canal usa ela sem gerar (banco_proprio.py)
-  ativo: true
+  ativo: false               # desligado em 2026-11-16 (pedido do usuário): a pasta encheu o disco
   semelhanca_minima: 0.8     # abaixo disso já vinha outra coisa. O Jev confere depois, como qualquer imagem de IA
   usos_max: 3                # no total, contando quem gerou. Nunca duas vezes no mesmo canal
 
 ia:
   ativa: true                # cena que não existe em foto ou que veio errada recebe imagem de IA (conferida pelo Jev).
                              # false: vídeo só com banco de imagens, nenhuma IA
+  fracao: 0.75               # alvo: 75% das cenas em IA em todo vídeo, longe do começo (cenas._aplicar_fracao_da_ia).
+                             # Pedido do usuário em 2026-11-16: o 15-cheap-poundland saiu sem a parte do agente, com 19
+                             # cenas de IA em 403, e a busca de acervo levou 1h40. O vídeo que escolhe outra parte manda
+                             # a dele no config_override
   teto: 0.75                 # 75% desde 2026-11-05 (pedido do usuário: entregar rápido como o Robô do Dotti, que usa uns
                              # 75%). Com 25%, a cena reprovada não podia ir para a IA e voltava a buscar foto: no
                              # asdas-80-billion, das 96 min, as imagens levaram 4 min e essas buscas de novo, uns 35.
@@ -257,6 +274,9 @@ claude:
   processos: 2               # chamadas ao Claude ao mesmo tempo
 
 midia:
+  busca_rapida_depois_de: 300  # segundos. Depois do começo cada cena tem uma busca só, sem YouTube e sem a 2ª leva;
+                               # o que não achar vai para a IA (midia.busca_rapida, pedido do usuário em 2026-11-16)
+  prazo_da_busca_min: 10       # passou disso, as cenas depois do começo que faltam vão para a IA. O começo não é cortado
   escolha: mimo            # quem escolhe as fotos: a cadeia de visão (modelos_visao, abaixo)
   # quem olha as imagens (escolha das fotos, descrição para o Jev, revisão do vídeo pronto): os gratuitos que enxergam
   # imagem primeiro, o pago só de reserva e sem raciocínio. Pedido do usuário em 2026-10-05: a escolha das fotos do

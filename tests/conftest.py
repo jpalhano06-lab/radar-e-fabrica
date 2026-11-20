@@ -1,7 +1,15 @@
 """Nenhum teste toca no banco de imagens de verdade, nem no login e nas contas guardadas do ChatGPT."""
 import pytest
 
-from fabrica import banco_proprio, chatgpt_assinatura
+from fabrica import banco_proprio, chatgpt_assinatura, cotas, gemini_local, openrouter_local
+
+
+@pytest.fixture(autouse=True)
+def cotas_de_teste(tmp_path, monkeypatch):
+    """As cotas do dia esgotadas de verdade (cotas_esgotadas.json) nunca entram nem saem de um teste."""
+    monkeypatch.setattr(cotas, "ARQUIVO", tmp_path / "cotas_esgotadas.json")
+    monkeypatch.setattr(openrouter_local, "_FORA_DO_AR", {})
+    monkeypatch.setattr(gemini_local, "_esgotados", {})
 
 
 @pytest.fixture(autouse=True)

@@ -50,3 +50,14 @@ def test_a_fracao_so_vale_com_a_ia_ligada():
     assert midia.fracao_da_ia(SimpleNamespace(config={"ia": {"fracao": 0.75}})) == 0.75
     assert midia.fracao_da_ia(SimpleNamespace(config={"ia": {"ativa": False, "fracao": 0.75}})) is None
     assert midia.fracao_da_ia(SimpleNamespace(config={})) is None
+
+
+def test_ia_fica_longe_do_comeco():
+    # 2026-11-16: 75% de IA, mas o começo segue com material real (vídeo). 100 cenas de 5 s: 40 depois dos 5 min
+    lista = [{"n": i, "ini": i * 5.0, "tipo": "foto_real", "busca": f"b{i}", "prompt": f"p{i}"} for i in range(100)]
+    cenas._aplicar_fracao_da_ia(lista, 0.4, log=lambda *_: None)
+    assert len(_ia(lista)) == 40
+    assert all(c["ini"] >= 300 for c in lista if c["tipo"] == "ia")
+    cenas._aplicar_fracao_da_ia(lista, 0.75, log=lambda *_: None)
+    assert len(_ia(lista)) == 75
+    assert all(c["tipo"] == "foto_real" for c in lista if c["ini"] < 40)  # o gancho é o último

@@ -1,9 +1,11 @@
 """Conectar a fábrica a uma conta do YouTube, publicar o vídeo final e agendar
 a publicação pra mais tarde.
 
-A conta é uma só, da fábrica inteira (não por projeto nem por pessoa) — o mesmo
-espírito das chaves de API que já existem no .env, só que aqui o "login" é feito
-pelo fluxo OAuth do Google em vez de colar uma chave.
+Há uma conta por canal do YouTube (não por projeto nem por pessoa). O "login" é feito pelo fluxo OAuth do Google em
+vez de colar uma chave, no mesmo espírito das chaves de API que já existem no .env. Até 2026-11-17 era uma conta só,
+da fábrica inteira; o Radar passou a testar cada canal novo que a pessoa adiciona, e um token do OAuth fica preso ao
+canal escolhido na tela de consentimento do Google (não existe trocar de canal na hora de postar:
+`onBehalfOfContentOwner` é só para parceiros de CMS), então cada canal é conectado uma vez e guardado pelo seu id.
 
 O agendamento (desde 2026-10-09, da análise do concorrente) é do próprio YouTube: o vídeo sobe como "Privado" com
 a data de publicação (`status.publishAt`), e o YouTube publica sozinho na hora, mesmo com o computador desligado.
@@ -41,7 +43,8 @@ URL_UPLOAD = "https://www.googleapis.com/upload/youtube/v3/videos"
 URL_THUMBNAIL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 URL_LEGENDA = "https://www.googleapis.com/upload/youtube/v3/captions"
 
-ARQUIVO_CONTA = RAIZ / "youtube_conta.json"
+ARQUIVO_CONTA = RAIZ / "youtube_conta.json"      # a conta única de antes de 2026-11-17, lida uma vez e migrada
+ARQUIVO_CONTAS = RAIZ / "youtube_contas.json"    # {canal_id: dados da conta}
 
 _trava = threading.Lock()
 
@@ -58,32 +61,74 @@ def _credenciais_app() -> tuple[str, str]:
 
 
 # -----------------------------------------------------------------------------
-# Conta conectada (arquivo único, fábrica inteira)
+# Contas conectadas (uma por canal do YouTube)
 # -----------------------------------------------------------------------------
 
-def conectada() -> bool:
-    return ARQUIVO_CONTA.exists()
+def _ler_contas() -> dict:
+    """{canal_id: dados}. Quem já tinha a conta única de antes não precisa conectar de novo: ela vira a primeira."""
+    for arquivo, unica in ((ARQUIVO_CONTAS, False), (ARQUIVO_CONTA, True)):
+        if not arquivo.exists():
+            continue
+        try:
+            dados = json.loads(arquivo.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(dados, dict):
+            return {}
+        if not unica:
+            return dados
+        return {dados["canal_id"]: dados} if dados.get("canal_id") else {}
+    return {}
 
 
-def conta() -> Optional[dict]:
-    if not ARQUIVO_CONTA.exists():
-        return None
-    return json.loads(ARQUIVO_CONTA.read_text(encoding="utf-8"))
+def _gravar_contas(contas_novas: dict) -> None:
+    ARQUIVO_CONTAS.write_text(json.dumps(contas_novas, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def contas() -> list[dict]:
+    """Todas as contas conectadas, uma por canal."""
+    with _trava:
+        return list(_ler_contas().values())
+
+
+def conta(canal: str = "") -> Optional[dict]:
+    """A conta de um canal. Sem canal: a única conectada — com mais de uma devolve None, para nunca escolher o
+    canal errado por conta própria."""
+    with _trava:
+        todas = _ler_contas()
+    if canal:
+        return todas.get(canal)
+    return next(iter(todas.values())) if len(todas) == 1 else None
+
+
+def conectada(canal: str = "") -> bool:
+    with _trava:
+        todas = _ler_contas()
+    return bool(todas.get(canal)) if canal else bool(todas)
 
 
 def _salvar_conta(dados: dict) -> None:
     with _trava:
-        ARQUIVO_CONTA.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
+        todas = _ler_contas()
+        todas[dados["canal_id"]] = dados
+        _gravar_contas(todas)
 
 
-def desconectar() -> None:
-    dados = conta()
-    if dados and dados.get("refresh_token"):
+def desconectar(canal: str = "") -> None:
+    """Desconecta um canal (sem canal, o único conectado)."""
+    dados = conta(canal)
+    if not dados:
+        return
+    if dados.get("refresh_token"):
         try:
             httpx.post(URL_REVOGAR, params={"token": dados["refresh_token"]}, timeout=15)
         except httpx.HTTPError:
-            pass  # revogar é cortesia; se o Google não responder, apagamos o arquivo mesmo assim
-    ARQUIVO_CONTA.unlink(missing_ok=True)
+            pass  # revogar é cortesia; se o Google não responder, apagamos a entrada mesmo assim
+    with _trava:
+        todas = _ler_contas()
+        todas.pop(dados["canal_id"], None)
+        _gravar_contas(todas)
+        ARQUIVO_CONTA.unlink(missing_ok=True)  # o conteúdo dele já está no arquivo novo
 
 
 def url_autorizacao(redirect_uri: str) -> str:
@@ -131,7 +176,7 @@ def concluir_autorizacao(code: str, redirect_uri: str) -> dict:
     # numa reconexão o Google só manda refresh_token de novo às vezes; sem isso,
     # perder o antigo travaria o agendamento (não dá pra renovar o access_token sozinho)
     if not dados["refresh_token"]:
-        anterior = conta()
+        anterior = conta(dados["canal_id"])
         if anterior and anterior.get("refresh_token"):
             dados["refresh_token"] = anterior["refresh_token"]
         else:
@@ -143,10 +188,12 @@ def concluir_autorizacao(code: str, redirect_uri: str) -> dict:
     return dados
 
 
-def _token_valido() -> str:
+def _token_valido(canal: str = "") -> str:
     """Devolve um access_token que ainda vale, renovando com o refresh_token se preciso."""
-    dados = conta()
+    dados = conta(canal)
     if not dados:
+        if not canal and contas():
+            raise SystemExit("Há mais de um canal conectado: diga em qual deles publicar.")
         raise SystemExit("Conecte uma conta do YouTube antes de publicar (aba Publicar no YouTube).")
     if dados["expira_em"] - datetime.now(timezone.utc).timestamp() > 60:
         return dados["access_token"]
@@ -183,22 +230,41 @@ def _pedir_com_token(access_token: str, caminho: str, **params) -> dict:
 # -----------------------------------------------------------------------------
 
 TAMANHO_PEDACO = 8 * 1024 * 1024  # 8 MB por pedaço, o mínimo exigido pelo Google é 256 KB
+LIMITE_TAGS = 500                 # caracteres de todas as tags juntas, do jeito que o YouTube conta
+
+
+def tags_que_cabem(tags: list) -> list:
+    """As tags, na ordem, até onde cabem nos 500 caracteres do YouTube. Ele conta a vírgula entre elas e as aspas
+    que põe em volta da tag com espaço; passou disso, recusa o envio inteiro com invalidTags (The Moon Is Drifting
+    Away From Us, 2026-11-20: 18 tags, 512 caracteres). Vírgula dentro da tag ("3,8 cm") e < > também são recusados."""
+    cabem, usado = [], 0
+    for tag in tags or []:
+        tag = " ".join(str(tag).replace(",", ".").replace("<", " ").replace(">", " ").split())[:100]
+        if not tag or tag in cabem:
+            continue
+        custo = len(tag) + (2 if " " in tag else 0) + (1 if cabem else 0)
+        if usado + custo > LIMITE_TAGS:
+            continue
+        cabem.append(tag)
+        usado += custo
+    return cabem
 
 
 def publicar(arquivo: Path, titulo: str, descricao: str, tags: list, privacidade: str,
              categoria: str = "22", on_progresso=None, publicar_em: Optional[datetime] = None,
-             sintetico: bool = False, idioma: str = "pt-BR") -> dict:
+             sintetico: bool = False, idioma: str = "pt-BR", canal: str = "") -> dict:
     """Sobe o vídeo pro YouTube em pedaços, chamando on_progresso(pct) a cada um.
     Devolve o recurso do vídeo criado (com o id) quando termina.
 
     publicar_em: o YouTube publica sozinho nessa hora (o vídeo sobe privado, com publishAt). sintetico: declara
-    conteúdo alterado ou sintético realista (imagem de IA), como pede a política do YouTube."""
-    access_token = _token_valido()
+    conteúdo alterado ou sintético realista (imagem de IA), como pede a política do YouTube. canal: o id do canal
+    em que publicar (vazio quando só há um conectado)."""
+    access_token = _token_valido(canal)
     metadados = {
         "snippet": {
             "title": titulo[:100],
             "description": descricao[:5000],
-            "tags": tags[:500],
+            "tags": tags_que_cabem(tags),
             "categoryId": categoria,
             "defaultLanguage": idioma,
             "defaultAudioLanguage": idioma,
@@ -252,8 +318,8 @@ def publicar(arquivo: Path, titulo: str, descricao: str, tags: list, privacidade
     raise SystemExit("O envio terminou sem o YouTube confirmar o vídeo.")
 
 
-def trocar_privacidade(video_id: str, privacidade: str) -> None:
-    access_token = _token_valido()
+def trocar_privacidade(video_id: str, privacidade: str, canal: str = "") -> None:
+    access_token = _token_valido(canal)
     r = httpx.put(
         f"{URL_API}/videos",
         params={"part": "status"},
@@ -265,17 +331,18 @@ def trocar_privacidade(video_id: str, privacidade: str) -> None:
         raise SystemExit(f"O YouTube recusou trocar a visibilidade do vídeo: {r.text[:300]}")
 
 
-def enviar_thumbnail(video_id: str, arquivo: Path) -> None:
+def enviar_thumbnail(video_id: str, arquivo: Path, canal: str = "") -> None:
     """A capa do vídeo (thumbnails.set). O canal precisa estar verificado por telefone."""
     r = httpx.post(URL_THUMBNAIL, params={"videoId": video_id, "uploadType": "media"},
-                   headers={"Authorization": f"Bearer {_token_valido()}", "Content-Type": "image/jpeg"},
+                   headers={"Authorization": f"Bearer {_token_valido(canal)}", "Content-Type": "image/jpeg"},
                    content=Path(arquivo).read_bytes(), timeout=60)
     if r.status_code >= 400:
         dica = " (o canal precisa estar verificado por telefone em youtube.com/verify)" if r.status_code == 403 else ""
         raise SystemExit(f"o YouTube recusou a thumbnail ({r.status_code}){dica}: {r.text[:200]}")
 
 
-def enviar_legenda(video_id: str, arquivo: Path, idioma: str = "pt-BR", nome: str = "Português") -> None:
+def enviar_legenda(video_id: str, arquivo: Path, idioma: str = "pt-BR", nome: str = "Português",
+                   canal: str = "") -> None:
     """A legenda do vídeo (captions.insert), num pedido multipart com os dados e o .srt."""
     fronteira = "fabrica-legenda-" + str(int(time.time()))
     dados = json.dumps({"snippet": {"videoId": video_id, "language": idioma, "name": nome, "isDraft": False}})
@@ -283,7 +350,7 @@ def enviar_legenda(video_id: str, arquivo: Path, idioma: str = "pt-BR", nome: st
              f"--{fronteira}\r\nContent-Type: application/octet-stream\r\n\r\n").encode("utf-8")
     corpo += Path(arquivo).read_bytes() + f"\r\n--{fronteira}--\r\n".encode("utf-8")
     r = httpx.post(URL_LEGENDA, params={"part": "snippet", "uploadType": "multipart"},
-                   headers={"Authorization": f"Bearer {_token_valido()}",
+                   headers={"Authorization": f"Bearer {_token_valido(canal)}",
                             "Content-Type": f"multipart/related; boundary={fronteira}"},
                    content=corpo, timeout=120)
     if r.status_code >= 400:
@@ -291,8 +358,8 @@ def enviar_legenda(video_id: str, arquivo: Path, idioma: str = "pt-BR", nome: st
         raise SystemExit(f"o YouTube recusou a legenda ({r.status_code}){dica}: {r.text[:200]}")
 
 
-def visibilidade(video_id: str) -> str:
-    dados = _pedir_com_token(_token_valido(), "videos", part="status", id=video_id)
+def visibilidade(video_id: str, canal: str = "") -> str:
+    dados = _pedir_com_token(_token_valido(canal), "videos", part="status", id=video_id)
     itens = dados.get("items") or []
     return (itens[0].get("status") or {}).get("privacyStatus", "") if itens else ""
 
@@ -350,9 +417,10 @@ def plano(projeto, quando=None, privacidade="public", com_shorts=False, com_thum
 
 def publicar_projeto(projeto, quando=None, privacidade="public", com_shorts=False, com_thumbnail=True,
                      com_legenda=True, titulo=None, descricao=None, tags=None, simular=False, on_progresso=None,
-                     log=print) -> dict:
+                     log=print, canal: str = "") -> dict:
     """Sobe o vídeo do projeto com a capa e a legenda e, se pedido, os shorts. Grava youtube.json. Com simular,
-    devolve só o plano. O que falhar depois do vídeo (capa, legenda, um short) vira aviso, não desfaz o envio."""
+    devolve só o plano. O que falhar depois do vídeo (capa, legenda, um short) vira aviso, não desfaz o envio.
+    canal: o id do canal em que publicar (vazio quando só há um conectado)."""
     pl = plano(projeto, quando, privacidade, com_shorts, com_thumbnail, com_legenda, titulo, descricao, tags)
     if simular:
         return {"simulacao": True, **pl}
@@ -368,28 +436,28 @@ def publicar_projeto(projeto, quando=None, privacidade="public", com_shorts=Fals
     metadados.gravar(projeto, log=log)  # o MP4 sobe com o título, a descrição e as tags dentro (grátis, segundos)
     log(f"  enviando o vídeo: {v['titulo']}")
     recurso = publicar(projeto.pasta / v["arquivo"], v["titulo"], v["descricao"], v["tags"], v["privacidade"],
-                       pl["categoria"], progresso_de(0), momento, v["sintetico"], pl["idioma"])
+                       pl["categoria"], progresso_de(0), momento, v["sintetico"], pl["idioma"], canal)
     video_id = recurso["id"]
     for etapa, funcao, arquivo in (("thumbnail", enviar_thumbnail, v["thumbnail"]),
                                    ("legenda", enviar_legenda, v["legenda"])):
         if not arquivo:
             continue
         try:
-            funcao(video_id, projeto.pasta / arquivo)
+            funcao(video_id, projeto.pasta / arquivo, canal=canal)
             log(f"  {etapa} enviada")
         except (SystemExit, httpx.HTTPError) as erro:
             avisos.append(str(erro))
             log(f"  {etapa} não foi: {erro}")
     if not momento and privacidade == "public":
         try:
-            if visibilidade(video_id) == "private":
+            if visibilidade(video_id, canal) == "private":
                 avisos.append("o YouTube deixou o vídeo privado: o projeto do Google Cloud ainda não passou pela "
                               "auditoria da API do YouTube (formulário 'YouTube API Services Audit'). Até lá, "
                               "publique pelo YouTube Studio")
         except SystemExit:
             pass
     dados = {"video_id": video_id, "url": f"https://youtu.be/{video_id}", "titulo": v["titulo"],
-             "descricao": v["descricao"], "tags": v["tags"], "privacidade_alvo": privacidade,
+             "descricao": v["descricao"], "tags": v["tags"], "privacidade_alvo": privacidade, "canal_id": canal,
              "agendado_para": v["publicar_em"], "pelo_youtube": True,
              "status": "agendado" if momento else "publicado", "enviado_em": datetime.now().isoformat(timespec="seconds"),
              "comentario_fixado": v["comentario_fixado"], "shorts": [], "avisos": avisos}
@@ -399,7 +467,7 @@ def publicar_projeto(projeto, quando=None, privacidade="public", com_shorts=Fals
             log(f"  enviando o short {sh['id']}: {sh['titulo']}")
             hora = datetime.fromisoformat(sh["publicar_em"]) if sh["publicar_em"] else None
             r = publicar(projeto.pasta / sh["arquivo"], sh["titulo"], sh["descricao"], sh["tags"], sh["privacidade"],
-                         pl["categoria"], progresso_de(k), hora, v["sintetico"], pl["idioma"])
+                         pl["categoria"], progresso_de(k), hora, v["sintetico"], pl["idioma"], canal)
             dados["shorts"].append({"id": sh["id"], "video_id": r["id"], "url": f"https://youtube.com/shorts/{r['id']}",
                                     "titulo": sh["titulo"], "agendado_para": sh["publicar_em"]})
         except (SystemExit, httpx.HTTPError) as erro:
@@ -442,7 +510,7 @@ def _agendamentos_pendentes():
 def executar_agendamentos_pendentes(log=print) -> None:
     for arquivo, dados in list(_agendamentos_pendentes()):
         try:
-            trocar_privacidade(dados["video_id"], dados["privacidade_alvo"])
+            trocar_privacidade(dados["video_id"], dados["privacidade_alvo"], dados.get("canal_id", ""))
             dados["status"] = "publicado"
             dados["publicado_em"] = datetime.now().isoformat(timespec="seconds")
             arquivo.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")

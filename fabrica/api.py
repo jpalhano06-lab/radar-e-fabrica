@@ -222,9 +222,16 @@ TENTATIVAS_POR_ETAPA = 6              # falha que não é de chave: tenta de nov
 RODADAS_PARA_COMPLETAR = 3
 
 # erros que esperar não resolve: a pessoa precisa mexer em chave, crédito ou configuração
+#
+# tts_reference_audio_error (2026-11-18): o OpenSpeaker devolve esse erro quando o áudio de referência da voz está
+# quebrado no lado dele. A voz continua no catálogo e a chave está certa, então nada aqui conserta sozinho: a única
+# saída é escolher outra voz no perfil do canal. Sem estar nesta lista, a etapa ficava tentando de novo a cada 5
+# minutos para sempre: o vídeo "shopping-centres-are-dying-across-the-uk" girou nove horas e 119 tentativas sem
+# gravar um bloco, e a pessoa só descobriu olhando o log. Agora a criação para e pede para trocar a voz.
 _ERRO_PERMANENTE = re.compile(
     r"inválid|recusou a chave|foi recusada|pediu uma chave|falta a chave|falta a \w+_key|acabou o crédito|"
-    r"adicione saldo|saldo de créditos insuficiente|credits insufficient|não achei o claude|não está conectado|defina voz|está vazio|só aceita|desconhecid|herda de",
+    r"adicione saldo|saldo de créditos insuficiente|credits insufficient|não achei o claude|não está conectado|defina voz|está vazio|só aceita|desconhecid|herda de|"
+    r"tts_reference_audio_error",
     re.I)
 _ESPERAS = [5, 10, 20, 30, 45, 60]   # segundos: parado é pior, então nunca espera muito
 ESPERA_LONGA = 300                    # depois das tentativas rápidas, de 5 em 5 minutos, sem desistir
@@ -347,8 +354,13 @@ def _segurar_se_pausado(task_id: str, nome) -> None:
     with TAREFAS_LOCK:
         antes = (TAREFAS.get(task_id) or {}).get("mensagem")
     _atualizar(task_id, pausado=True, mensagem="Pausado (botão Pausar do Radar)")
-    while _pausado(nome) and (PROJETOS / nome / "projeto.json").exists():
-        _esperar(nome, 5)  # o despausar acorda na hora (acordar)
+    # dormir aqui não pode segurar a vaga de "uma de cada vez": o vídeo pausado dentro da Conferência das completadas
+    # travava todos os outros até a despausa (o british-heart-foundation esperou 45 min pelo europa-s-ocean-under-the-ice
+    # em 17/11/2026). Solta a vaga, dorme, e na volta espera a vez de novo
+    from . import vez
+    with vez.solto(lambda m: _log_tarefa(task_id, m), "vídeo pausado"):
+        while _pausado(nome) and (PROJETOS / nome / "projeto.json").exists():
+            _esperar(nome, 5)  # o despausar acorda na hora (acordar)
     _atualizar(task_id, pausado=False, mensagem=antes or "Retomando...")
 
 
@@ -1085,6 +1097,7 @@ class PublicarYoutubePayload(BaseModel):
     com_thumbnail: bool = True    # a thumbnail escolhida (thumbnail.jpg)
     com_legenda: bool = True      # a legenda legendas_final.srt
     simular: bool = False         # só devolve o que subiria, sem enviar nada
+    canal: str = ""               # o id do canal do YouTube em que publicar (vazio: o único conectado)
 
 
 class EscolherThumbPayload(BaseModel):
@@ -3739,13 +3752,14 @@ def drive_desconectar():
 
 
 @app.get("/api/youtube/status")
-def youtube_status():
-    return {"conectado": ytpub.conectada(), "conta": ytpub.conta()}
+def youtube_status(canal: str = ""):
+    """Com canal: só aquele canal. Sem canal: todos os conectados (e, se for um só, ele em "conta")."""
+    return {"conectado": ytpub.conectada(canal), "conta": ytpub.conta(canal), "contas": ytpub.contas()}
 
 
 @app.post("/api/youtube/desconectar")
-def youtube_desconectar():
-    ytpub.desconectar()
+def youtube_desconectar(canal: str = ""):
+    ytpub.desconectar(canal)
     return {"sucesso": True}
 
 
@@ -3761,14 +3775,19 @@ def youtube_publicar(nome: str, payload: PublicarYoutubePayload, bg_tasks: Backg
         raise HTTPException(status_code=400, detail="Privacidade precisa ser public, unlisted ou private.")
     argumentos = dict(quando=payload.agendado_para, privacidade=payload.privacidade, com_shorts=payload.com_shorts,
                       com_thumbnail=payload.com_thumbnail, com_legenda=payload.com_legenda,
-                      titulo=payload.titulo or None, descricao=payload.descricao, tags=payload.tags)
+                      titulo=payload.titulo or None, descricao=payload.descricao, tags=payload.tags,
+                      canal=payload.canal)
     if payload.simular:
         try:
             return ytpub.publicar_projeto(p, simular=True, **argumentos)
         except SystemExit as erro:
             raise HTTPException(status_code=400, detail=str(erro))
-    if not ytpub.conectada():
-        raise HTTPException(status_code=400, detail="Conecte uma conta do YouTube antes de publicar.")
+    if not ytpub.conectada(payload.canal):
+        raise HTTPException(status_code=400, detail="Conecte uma conta do YouTube antes de publicar."
+                            if not payload.canal else
+                            "Esse canal ainda não foi conectado: autorize a fábrica nele antes de publicar.")
+    if not payload.canal and len(ytpub.contas()) > 1:
+        raise HTTPException(status_code=400, detail="Há mais de um canal conectado: diga em qual deles publicar.")
 
     task_id = f"youtube_{nome}_{datetime.now():%Y%m%d_%H%M%S}"
     with TAREFAS_LOCK:

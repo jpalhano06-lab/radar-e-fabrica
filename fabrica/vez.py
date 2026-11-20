@@ -19,6 +19,13 @@ from contextlib import contextmanager
 PADRAO = {"render_juntar": 1, "conferencia_completadas": 1}
 _TRAVA = threading.Lock()
 _SEMAFOROS: dict[str, threading.BoundedSemaphore] = {}
+_MINHAS = threading.local()   # as vagas que ESTE fio está segurando agora, para soltar quando ele fica parado
+
+
+def _minhas() -> list:
+    if not hasattr(_MINHAS, "vagas"):
+        _MINHAS.vagas = []
+    return _MINHAS.vagas
 
 
 def _semaforo(nome: str, projeto):
@@ -45,7 +52,40 @@ def na_vez(nome: str, projeto, log=print, rotulo: str = ""):
         log(f"  {rotulo or nome}: outro vídeo está nesta etapa, esperando a vez")
         with tempos.medir(projeto, f"Esperando a vez: {rotulo or nome}", log=log):
             s.acquire()
+    _minhas().append((nome, s))
     try:
         yield
     finally:
+        try:
+            _minhas().remove((nome, s))
+        except ValueError:
+            pass
         s.release()
+
+
+@contextmanager
+def solto(log=print, motivo: str = ""):
+    """Solta as vagas que este fio segura enquanto ele fica parado de propósito (a pausa do vídeo), e pega de volta
+    na saída, esperando a vez como qualquer outro.
+
+    Sem isso, o vídeo pausado DENTRO de uma etapa de vaga única segurava a vaga enquanto dormia, e os outros vídeos
+    esperavam a despausa para sempre: em 17/11/2026 o europa-s-ocean-under-the-ice foi pausado dentro da Conferência
+    das completadas e travou o british-heart-foundation por 45 min, sem nenhuma chamada de modelo.
+
+    A vaga sai da lista do fio antes de qualquer log: assim a pausa que o próprio log dispara não solta duas vezes."""
+    vagas = _minhas()[:]
+    if not vagas:
+        yield
+        return
+    del _minhas()[:]
+    for _, s in vagas:
+        s.release()
+    log(f"  {motivo or 'este vídeo parou'}: a vaga de {', '.join(n for n, _ in vagas)} fica livre para outro vídeo")
+    try:
+        yield
+    finally:
+        for nome, s in vagas:
+            if not s.acquire(blocking=False):
+                log(f"  esperando a vez de novo: {nome}")
+                s.acquire()
+        _minhas().extend(vagas)

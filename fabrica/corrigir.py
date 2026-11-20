@@ -469,7 +469,11 @@ def _pelo_gemini(projeto, pedido, imagens, log):
             raciocinio=cfg.get("raciocinio", "minimal"), resolucao=cfg.get("resolucao", "baixa"),
             max_tokens=int(cfg.get("max_tokens", 600)), limite=float(cfg.get("limite_segundos", 15)) or None)
     except (openrouter_local.RotaIndisponivel, RuntimeError) as e:
-        log(f"  o Gemini não descreveu ({str(e)[:100]}): seguindo com a cadeia de visão")
+        # a cota do dia acabou: avisa uma vez, não a cada lote (eram centenas de linhas iguais no log do vídeo)
+        if "cota diária" not in str(e) or not getattr(projeto, "_aviso_cota_gemini", False):
+            log(f"  o Gemini não descreveu ({str(e)[:100]}): seguindo com a cadeia de visão")
+            if "cota diária" in str(e):
+                projeto._aviso_cota_gemini = True
         return None
     if not isinstance(resposta, dict) or not isinstance(resposta.get("cenas"), list):
         return None

@@ -19,7 +19,16 @@ DE_LADO = 180  # segundos
 
 
 def _esgotado(modelo) -> bool:
-    return _esgotados.get(modelo, 0) > time.time()
+    if _esgotados.get(modelo, 0) > time.time():
+        return True
+    # a cota do dia gravada em disco (cotas.py) vale também para a fábrica religada depois que ela acabou
+    from . import cotas
+
+    ate = cotas.ate(f"gemini:{modelo}")
+    if ate > time.time():
+        _esgotados[modelo] = ate
+        return True
+    return False
 
 
 def _por_de_lado(modelo, log, motivo):
@@ -194,7 +203,13 @@ def perguntar(projeto, etapa, instrucoes, pedido, esquema, log=print, modelo=Non
                 # a cota do dia (500 pedidos no plano grátis) acabou: fica de lado até ela voltar, em vez de cada
                 # descrição tentar de novo e perder 1,5 s (pedido do usuário em 2026-10-10, para acelerar)
                 log(f"  a cota diária do {modelo} acabou (plano gratuito do Google)")
-                _esgotados[modelos.pop(0)] = time.time() + (volta or 3600)
+                # até a virada do dia do Google (meia-noite do Pacífico), gravado em disco: a fábrica religada não
+                # tenta de novo no mesmo dia (pedido do usuário em 2026-11-16; antes era 1 hora, só na memória)
+                from . import cotas
+
+                ate = cotas.virada_do_gemini() if "PerDay" in str(e) or not volta else time.time() + volta
+                cotas.marcar(f"gemini:{modelos[0]}", ate)
+                _esgotados[modelos.pop(0)] = ate
                 if not modelos:
                     return mimo("a cota diária de todos os modelos Gemini acabou")
                 log(f"  usando o {modelos[0]}")

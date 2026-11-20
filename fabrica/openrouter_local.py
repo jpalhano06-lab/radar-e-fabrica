@@ -74,6 +74,19 @@ class RotaIndisponivel(RuntimeError):
 _FORA_DO_AR: dict = {}
 
 
+def _carregar_cotas_do_dia() -> None:
+    """A cota do dia que acabou antes de a fábrica ser religada continua de lado (cotas.py): sem isto a fábrica nova
+    voltava a bater nos gratuitos esgotados a cada chamada."""
+    from . import cotas
+
+    for rota, ate in cotas.esgotadas().items():
+        if not rota.startswith("gemini:"):
+            _FORA_DO_AR[rota] = max(_FORA_DO_AR.get(rota, 0), ate)
+
+
+_carregar_cotas_do_dia()
+
+
 def _rota(modelo: str):
     """(url, chave, nome do modelo na API, provedor) de uma rota da cadeia."""
     if modelo.startswith("aimlapi:"):
@@ -527,8 +540,15 @@ def _perguntar_rota(projeto, etapa, instrucoes, pedido, esquema, log, modelo, im
             # (openrouter.espera_no_limite_do_minuto). Era um minuto inteiro, mais do que qualquer espera que
             # _espera_por_melhor aceita: a rota rápida saía de cena e a escolha das fotos ia toda para a de reserva
             por_dia = "per-day" in texto_erro or "per day" in texto_erro or "daily" in texto_erro
-            fora = 60 * 60 if por_dia else cfg.get("espera_no_limite_do_minuto", 15)
-            _fora_do_ar(rota, fora / 60, f"429 {r.text[:120]}")
+            if por_dia:
+                # a cota do dia dos gratuitos só volta à meia-noite UTC: de lado até lá, gravado em disco para a
+                # fábrica religada não tentar de novo (pedido do usuário em 2026-11-16; antes era 1 hora, na memória)
+                from . import cotas
+
+                volta = cotas.virada_do_openrouter()
+                cotas.marcar(rota, volta)
+                _fora_do_ar(rota, (volta - time.time()) / 60, f"429 {r.text[:120]}")
+            _fora_do_ar(rota, cfg.get("espera_no_limite_do_minuto", 15) / 60, f"429 {r.text[:120]}")
         if cadeia and r.status_code in (500, 502, 503, 504) and erros >= 1:
             _fora_do_ar(rota, 2, f"{r.status_code} do servidor")
         if r.status_code == 401:

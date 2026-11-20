@@ -38,7 +38,7 @@ def test_agendado_sobe_privado_com_publishat_e_declara_sintetico(monkeypatch, tm
 
     arquivo = tmp_path / "v.mp4"
     arquivo.write_bytes(b"0" * 1000)
-    monkeypatch.setattr(yt, "_token_valido", lambda: "token")
+    monkeypatch.setattr(yt, "_token_valido", lambda canal="": "token")
     monkeypatch.setattr(yt.httpx, "post", post)
     monkeypatch.setattr(yt.httpx, "Client", lambda timeout=None: Cliente())
     r = yt.publicar(arquivo, "Título", "Desc", ["a"], "public", publicar_em=datetime(2026, 10, 12, 21, tzinfo=timezone.utc),

@@ -3,14 +3,25 @@
 base: documentario.yaml
 nome: UK CartWatch
 voz:
-  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). Esta voz é
-  # PROVISÓRIA: o catálogo do OpenSpeaker não tem nenhuma das vozes antigas, então todos os canais
-  # ficaram com a mesma voz em inglês até a escolha definitiva, canal por canal.
+  # 2026-11-17: narração trocada da GenAI Pro para o OpenSpeaker (3,1x mais barato). O catálogo do OpenSpeaker
+  # não tem nenhuma das vozes antigas, então a voz foi escolhida de novo: era Sully - Mature, Deep and
+  # Intriguing. Escolhida pela descrição, não de ouvido: ouça a prévia no Radar antes de publicar.
   # Voz antiga na GenAI Pro: wAGzRVkxKEs8La0lmdrE (Sully - Mature, Deep and Intriguing).
+  #
+  # 2026-11-18: a voz Michael - Premium British Narrator (elevenlabs_BrWYb3gAm0zrex67Ybdq) foi trocada porque o
+  # OpenSpeaker nunca consegue gravar com ela: toda tarefa volta com o erro tts_reference_audio_error em poucos
+  # segundos, ou seja, o áudio de referência dessa voz está quebrado no lado deles. A voz continua aparecendo no
+  # catálogo, então não é um id inválido. Isso travou a criação do vídeo
+  # "shopping-centres-are-dying-across-the-uk" por nove horas, em 111 tentativas, sem gravar um bloco.
+  # No lugar dela entrou George - Warm, Captivating Storyteller: sotaque britânico, meia-idade, narrador de
+  # histórias, e é uma das vozes de fábrica da ElevenLabs, que não dependem de áudio de referência. Num teste
+  # direto na API em 2026-11-18 ela gravou o áudio sem erro. Escolhida pela descrição, não de ouvido: ouça a
+  # prévia no Radar antes de publicar. Se não agradar, a outra voz britânica testada e aprovada no mesmo dia foi
+  # Daniel - Steady Broadcaster (elevenlabs_onwK4e9ZLuTAKqWW03F9), com voz de locutor de telejornal.
   provedor: openspeaker
-  voice_id: elevenlabs_nPczCjzI2devNBz1zQrb
+  voice_id: elevenlabs_JBFqnCBsd6RMkjVDRZzb
   paga_escolhida: true             # escolhida no Radar: não vira a voz local
-  nome_da_voz: Brian - Deep, Resonant and Comforting
+  nome_da_voz: George - Warm, Captivating Storyteller
   idioma_da_voz: en
 
 imagens:

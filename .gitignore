@@ -61,3 +61,12 @@ tiplabs-log.txt
 api.diff
 
 teste_vozes/
+
+# Contas do YouTube com o refresh_token de cada canal: nunca vai para o Git
+youtube_contas.json
+# Estado deste computador (cotas, vozes medidas, garimpo) e restos de log
+cotas_esgotadas.json
+garimpo_ip_quente.json
+openspeaker_transcricao.json
+openspeaker_vozes.json
+*.log.err
