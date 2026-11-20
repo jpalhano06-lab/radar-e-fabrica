@@ -1,0 +1,9 @@
+# Segredos: nunca subir (cada pasta tem também o seu .gitignore)
+.env
+.env.*
+!.env.exemplo
+youtube_contas.json
+*.db
+*.log
+*.log.err
+.claude/
