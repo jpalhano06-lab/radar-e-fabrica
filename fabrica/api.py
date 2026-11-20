@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from . import drive, faxina, garimpo, video_ia
 from . import acordado, animacoes, aprendizados, cenas, chatgpt_assinatura, corrigir, diretor, entrega_pc, fish, pago, voz_local, publicacao, qualidade, shorts, thumbnail, rostos, revisao_video, trilha, custos, custos_reais, genaipro, openspeaker, imagens, limpeza, lixeira, midia, narracao, nichos, render, roteirista, verificar
-from . import tempos
+from . import ajustes_animacao, tempos
 from . import texto as tx
 from . import youtube_publicar as ytpub
 from .config import RAIZ, carregar_perfil, config_geral
@@ -1668,6 +1668,103 @@ def salvar_canal(payload: CanalPayload):
     arquivo.write_text(cabecalho + yaml.safe_dump(dados, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return {"sucesso": True, "caminho": f"perfis/{arquivo.name}", "id": arquivo.stem, "titulo": nome,
             "voz": _voz_do_canal(arquivo)}
+
+
+# ------------------------------------------------------------------------------------------- a página Animações do Radar
+
+class AjustesAnimacaoPayload(BaseModel):
+    ajustes: Dict[str, Any]
+
+
+class AnimacaoDoCanalPayload(AjustesAnimacaoPayload):
+    perfil: str  # canal-NOME (só os perfis de canal: os de base valem para muitos canais)
+
+
+def _ajustes_ou_400(ajustes) -> dict:
+    try:
+        return ajustes_animacao.limpar(ajustes)
+    except ajustes_animacao.AjusteInvalido as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.get("/api/animacoes/catalogo")
+def animacoes_catalogo():
+    """Os estilos, as animações de cada um, as letras e os fundos que a pessoa pode escolher."""
+    return ajustes_animacao.catalogo()
+
+
+@app.get("/api/animacoes/previa", response_class=HTMLResponse)
+def animacoes_previa(ajustes: str = "{}", tipo: str = "", parado: Optional[float] = None):
+    """A animação tocando no navegador, sem gravar nem gastar. `parado`: um quadro só, para a galeria."""
+    try:
+        pedido = json.loads(ajustes)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Os ajustes vieram em formato errado.")
+    try:
+        return HTMLResponse(ajustes_animacao.previa(pedido, tipo, parado))
+    except ajustes_animacao.AjusteInvalido as erro:
+        raise HTTPException(status_code=400, detail=str(erro))
+
+
+@app.get("/api/animacoes/fonte/{arquivo}")
+def animacoes_fonte(arquivo: str):
+    caminho = ajustes_animacao.arquivo_de_fonte(arquivo)
+    if caminho is None or not caminho.exists():
+        raise HTTPException(status_code=404, detail="Essa letra não existe.")
+    return FileResponse(caminho, media_type="font/ttf")
+
+
+@app.post("/api/animacoes/conferir")
+def animacoes_conferir(payload: AjustesAnimacaoPayload):
+    """A mesma conferência da gravação: a cena que reprovar aqui voltaria para a foto na produção. Grátis."""
+    _ajustes_ou_400(payload.ajustes)
+    try:
+        return ajustes_animacao.conferir(payload.ajustes)
+    except RuntimeError as erro:
+        raise HTTPException(status_code=503, detail=str(erro))
+
+
+def _arquivo_do_canal(perfil: str) -> Path:
+    nome = Path(perfil).stem
+    arquivo = RAIZ / "perfis" / f"{nome}.yaml"
+    if not nome.startswith(PREFIXO_CANAL) or not arquivo.exists():
+        raise HTTPException(status_code=400, detail="Este canal ainda não tem perfil próprio na fábrica: escolha a voz "
+                                                    "do canal primeiro.")
+    return arquivo
+
+
+@app.get("/api/canais/animacoes")
+def animacoes_do_canal(perfil: str):
+    import yaml
+    dados = yaml.safe_load(_arquivo_do_canal(perfil).read_text(encoding="utf-8")) or {}
+    return {"ajustes": dados.get("animation_ai") or None}
+
+
+@app.post("/api/canais/animacoes")
+def animacoes_do_canal_salvar(payload: AnimacaoDoCanalPayload):
+    """O padrão do canal: vale para os próximos vídeos dele. Os vídeos já feitos não mudam."""
+    import yaml
+    limpo = _ajustes_ou_400(payload.ajustes)
+    arquivo = _arquivo_do_canal(payload.perfil)
+    linhas = arquivo.read_text(encoding="utf-8").splitlines()
+    cabecalho = "".join(l + "\n" for l in linhas[:next((i for i, l in enumerate(linhas) if not l.startswith("#")), 0)])
+    dados = yaml.safe_load("\n".join(linhas)) or {}
+    dados["animation_ai"] = {**(dados.get("animation_ai") or {}), **limpo}
+    arquivo.write_text(cabecalho + yaml.safe_dump(dados, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return {"sucesso": True, "ajustes": limpo}
+
+
+@app.post("/api/projetos/{nome}/animacoes")
+def animacoes_do_projeto(nome: str, payload: AjustesAnimacaoPayload):
+    """O estilo só deste vídeo, por cima do canal. Só antes de começar: a criação lê os ajustes enquanto anda."""
+    limpo = _ajustes_ou_400(payload.ajustes)
+    if not (PROJETOS / nome / "projeto.json").exists():
+        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    with TAREFAS_LOCK:
+        if nome in CRIACOES_ATIVAS:
+            raise HTTPException(status_code=409, detail="Este vídeo já está sendo criado.")
+    Projeto(nome).definir_override("animation_ai", limpo)
+    return {"sucesso": True, "ajustes": limpo}
 
 
 def _perfil_de_avatar(caminho: Path) -> bool:

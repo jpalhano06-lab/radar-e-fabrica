@@ -35,6 +35,7 @@ from . import texto as tx
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import ajustes_animacao
 from .animacoes_modelos import CATALOGO, MODELOS, conferir_dados
 from .animacoes_modelos import VERSAO as VERSAO_DESIGN
 from .animacoes_modelos import partes as partes_do_modelo
@@ -126,8 +127,16 @@ _NODE = {}
 _TRAVA_ARQUIVO = threading.Lock()
 
 
+def _ajustes(projeto) -> dict:
+    """O que a pessoa escolheu na página Animações do Radar (ajustes_animacao.py): vale também para esta camada."""
+    return projeto.perfil.get("animation_ai") or {}
+
+
 def config(projeto) -> dict:
-    return {**(projeto.config.get("animacoes") or {}), **((projeto.perfil.get("animacoes") or {}))}
+    cfg = {**(projeto.config.get("animacoes") or {}), **((projeto.perfil.get("animacoes") or {}))}
+    if _ajustes(projeto).get("ativo") is False:  # "Sem animações" vale para as duas
+        cfg["ativo"] = False
+    return cfg
 
 
 def tipos(projeto) -> tuple:
@@ -162,7 +171,18 @@ def _estilo(projeto) -> dict:
     nome = str(escolhido.pop("tema", "") or "").strip().lower()
     tema = TEMAS.get(nome, {})
     desenho = {"desenho": DESENHOS[nome]} if nome in DESENHOS else {}
-    return {**ESTILO_PADRAO, **tema, **desenho, **escolhido}
+    estilo = {**ESTILO_PADRAO, **tema, **desenho, **escolhido}
+    # as cores e as letras escolhidas na página Animações do Radar (ajustes_animacao.py) valem por cima do tema
+    ajustes = _ajustes(projeto)
+    cores, fontes = ajustes.get("cores") or {}, ajustes.get("fontes") or {}
+    if cores.get("acc"):
+        estilo["destaque"] = cores["acc"]
+    if cores.get("txt"):
+        estilo["texto"] = cores["txt"]
+    for chave in ("texto", "titulo"):
+        if fontes.get(chave):
+            estilo[f"_fonte_{chave}"] = fontes[chave]
+    return estilo
 
 
 def _tamanho(projeto):
@@ -465,7 +485,8 @@ def _erros_para_o_modelo(erros_conferencia) -> list:
 def _montar_html(partes, dur, largura, altura, estilo, lang="pt-BR") -> str:
     """A página da camada: fundo transparente, o véu escuro que entra e sai, e o conteúdo do modelo."""
     dur = round(dur, 3)
-    cores = "".join(f"--{k}: {v};" for k, v in estilo.items() if k not in ("escurecer", "veu", "desenho"))
+    cores = "".join(f"--{k}: {v};" for k, v in estilo.items()
+                    if k not in ("escurecer", "veu", "desenho") and not k.startswith("_"))
     saida = max(dur - 0.35, 0.0)
     return f"""<!doctype html>
 <html lang="{lang}">
@@ -474,8 +495,7 @@ def _montar_html(partes, dur, largura, altura, estilo, lang="pt-BR") -> str:
     <meta name="viewport" content="width={largura}, height={altura}" />
     <script src="{GSAP}"></script>
     <style>
-      @font-face {{ font-family: "Titulo"; src: url("assets/fontes/PlayfairDisplay.ttf"); font-weight: 400 900; }}
-      @font-face {{ font-family: "Texto"; src: url("assets/fontes/Inter.ttf"); font-weight: 100 900; }}
+{ajustes_animacao.css_das_fontes(estilo)}
       :root {{ {cores} }}
       * {{ margin: 0; padding: 0; box-sizing: border-box; }}
       html, body {{ width: {largura}px; height: {altura}px; overflow: hidden; background: transparent; }}
@@ -779,6 +799,7 @@ def _animar(projeto, item, vizinhas, forcar, log, limite=None):
     pasta = _pasta(projeto, item)
     pasta.mkdir(parents=True, exist_ok=True)
     _preparar_pasta(pasta)
+    ajustes_animacao.copiar_fontes(pasta, _estilo(projeto))
     escolha = None
     lingua = idioma.lingua(projeto)
     sugestao = (item.get("pedido") or {}).get("texto_tela") or ""
@@ -786,7 +807,9 @@ def _animar(projeto, item, vizinhas, forcar, log, limite=None):
         # o overlay sugerido pelo roteirista veio em outra língua (o "10 SUPERMERCADOS" de um vídeo em inglês): não vai
         # nem como sugestão, para não puxar o modelo para ela
         item = {**item, "pedido": {**item.get("pedido", {}), "texto_tela": ""}}
-    if not forcar and item.get("modelo") in MODELOS:
+    fora = ajustes_animacao.modelos_fora(_ajustes(projeto))  # os que a pessoa desligou
+    proibidos = f"\nNunca use estes modelos: {', '.join(sorted(fora))}." if fora else ""
+    if not forcar and item.get("modelo") in MODELOS and item.get("modelo") not in fora:
         # a mesma fala: só o tempo (outra voz) ou o design mudou, então reaproveita o que o modelo escolheu
         dados = _remapear(item.get("dados"), item.get("tempos") or [], tempos)
         dados, erros = conferir_dados(item["modelo"], dados, dur, tempos, fala)
@@ -799,11 +822,13 @@ def _animar(projeto, item, vizinhas, forcar, log, limite=None):
         erros = []
         for tentativa in range(int(config(projeto).get("tentativas", 3))):
             resposta = openrouter_local.perguntar(
-                projeto, "animação da cena", INSTRUCOES + "\n" + idioma.regra_da_tela(projeto),
+                projeto, "animação da cena", INSTRUCOES + "\n" + idioma.regra_da_tela(projeto) + proibidos,
                 _pedido(item, ancora, vizinhas, erros), ESQUEMA, log=log,
                 modelo=openrouter_local.principal(projeto), temperatura=0.4 if tentativa else 0.2)
             modelo = str(resposta.get("modelo") or "").strip()
             dados, erros = conferir_dados(modelo, resposta.get("dados"), dur, tempos, fala)
+            if modelo in fora:
+                erros = [f"o modelo {modelo} foi desligado neste canal; use outro"]
             erros = erros or _lingua_da_tela(dados, lingua, fala)
             if not erros:
                 duracao = desenhar(modelo, dados)

@@ -17,7 +17,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import abertura, animacoes, animation_ai, avatar, efeitos, motion_ia, rostos, textos, trilha
+from . import abertura, animacoes, animation_ai, avatar, efeitos, efeitos_foto, motion_ia, rostos, textos, trilha
 from .config import caminho_relativo
 from .util import duracao_audio, rodar
 
@@ -276,6 +276,7 @@ def _tarefas_da_linha(projeto, linha, cfg, pasta_clipes, transicao, so_prontas=F
     arquivo já existe (adiantar_clipes), sem mudar o movimento sorteado dos outros."""
     fps = cfg.get("fps", 30)
     sorteio, anterior, tarefas = random.Random(projeto.nome), None, []
+    escolhas = _efeitos_da_linha(projeto, linha, cfg, pasta_clipes.parent)
     for pedaco in linha:
         f_ini, f_fim = round(pedaco["ini"] * fps), round(pedaco["fim"] * fps)
         frames = max(f_fim - f_ini, 1)
@@ -298,15 +299,33 @@ def _tarefas_da_linha(projeto, linha, cfg, pasta_clipes, transicao, so_prontas=F
         # o nome do clipe muda quando a origem, a duração, o movimento, o símbolo ou o título mudam. O "||" é o lugar
         # do texto na tela, que saiu da fábrica (2026-10-05): fica vazio para os clipes já prontos não mudarem de nome
         enquadramento = _enquadramento(arquivo, cfg) if pedaco["origem"] == "foto" else ""
+        escolha = escolhas.get(pedaco["ordem"])
         assinatura = (
             f"{pedaco['origem']}|{arquivo}|{arquivo.stat().st_mtime_ns}|{frames}|{movimento}|{sorted(cfg.items())}{enquadramento}|"
             f"|{textos.assinatura_simbolos(simbolos, projeto.perfil)}|"
             f"{textos.assinatura_titulos(titulos, projeto.perfil)}"
+            f"{efeitos_foto.assinatura(escolha)}"  # vazio sem efeito: os outros clipes não mudam de nome
         )
         codigo = hashlib.sha1(assinatura.encode()).hexdigest()[:10]
-        tarefas.append({**pedaco, "frames": frames, "movimento": movimento,
+        tarefas.append({**pedaco, "frames": frames, "movimento": movimento, "efeito_foto": escolha,
                         "destino": pasta_clipes / f"{pedaco['ordem']:04d}-{codigo}.mp4"})
     return tarefas
+
+
+def _efeitos_da_linha(projeto, linha, cfg, pasta_base) -> dict:
+    """O rabisco de cada pedaço (efeitos_foto.py): pouco, espaçado, só na tela deitada. Nunca para o
+    vídeo: se a escolha falhar, ninguém ganha efeito."""
+    pasta_fotos = pasta_base / "fotos"
+    pasta_fotos.mkdir(parents=True, exist_ok=True)
+
+    def preparar(arquivo):
+        nome, gerar = _foto_na_tela(arquivo, cfg)
+        return _preparar_foto(arquivo, pasta_fotos, cfg), gerar is None or nome.startswith("rosto")
+
+    try:
+        return efeitos_foto.escolher(linha, pasta_base / "efeitos", cfg, efeitos_foto.config(projeto), preparar)
+    except Exception:  # noqa: BLE001 - sem efeito, o vídeo sai com o movimento lento de sempre
+        return {}
 
 
 # clipes adiantados em segundo plano, por pasta do projeto: o render espera eles antes de começar
@@ -547,10 +566,21 @@ def _clipe(tarefa, pasta_fotos, pasta_textos, perfil, cfg):
         return _clipe_avatar(tarefa, destino, temporario, cfg)
     if tarefa["tipo"] == "abertura":
         return _clipe_abertura(tarefa, destino, temporario, pasta_fotos, cfg)
+    efeito = None
     if tarefa["origem"] == "video":
         entradas, filtro = _entrada_video(arquivo, frames, cfg)
     else:
-        entradas, filtro = ["-i", _preparar_foto(arquivo, pasta_fotos, cfg)], _filtro_foto(tarefa["movimento"], frames, cfg)
+        foto = _preparar_foto(arquivo, pasta_fotos, cfg)
+        entradas, filtro = ["-i", foto], _filtro_foto(tarefa["movimento"], frames, cfg)
+        if tarefa.get("efeito_foto"):
+            # o rabisco (efeitos_foto.py) sai num vídeo à parte, que segue o caminho dos outros clipes
+            efeito = destino.with_name(destino.stem + ".efeito.mp4")
+            try:
+                efeitos_foto.renderizar(tarefa, foto, cfg, pasta_fotos.parent / "efeitos", efeito)
+                entradas, filtro = ["-i", efeito], "format=yuv420p"
+            except Exception:  # noqa: BLE001 - sem o efeito, a cena sai com o movimento lento de sempre
+                efeito.unlink(missing_ok=True)
+                efeito = None
     filtro = _com_transicao(_com_visual(filtro, cfg), cfg, frames, fps)
 
     duracao = frames / fps
@@ -594,6 +624,8 @@ def _clipe(tarefa, pasta_fotos, pasta_textos, perfil, cfg):
         "-an", temporario,
     ])
     temporario.replace(destino)
+    if efeito is not None:
+        efeito.unlink(missing_ok=True)
 
 
 def _filtro_foto(movimento, frames, cfg):

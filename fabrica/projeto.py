@@ -20,7 +20,8 @@ class Projeto:
         self.perfil = carregar_perfil(self.dados["perfil"])
         # voz e provedor de imagem escolhidos no editor valem só neste projeto, sem tocar no perfil do canal.
         # Ficam aqui, e não na api, para o terminal e o servidor usarem (e cobrarem) exatamente o mesmo.
-        for secao in ("voz", "imagens"):
+        # animation_ai: o estilo das animações escolhido para este vídeo na página Animações do Radar
+        for secao in ("voz", "imagens", "animation_ai"):
             override = self.dados.get(f"{secao}_override")
             if override:
                 self.perfil[secao] = {**(self.perfil.get(secao) or {}), **override}
