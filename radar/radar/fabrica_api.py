@@ -106,12 +106,17 @@ def producoes() -> dict:
         if nome.startswith("_"):
             continue
         c = p.get("criacao") or {}
+        # vídeo postado há mais de 48 h teve o final.mp4 apagado (limpeza_postados.py), mas continua pronto
+        if not p.get("tem_final") and (_pasta(nome) / "limpo_pos_postagem.json").exists():
+            p = {**p, "tem_final": True}
         perfil = Path(str(p.get("perfil") or "")).stem
         canal = producao._perfil(perfil).get("canal") if perfil else ""
         item = {"nome": nome, "titulo": _titulo(nome), "canal": canal or "Sem canal", "perfil": perfil, "criado": p.get("criado", ""), "duracao": p.get("duracao") or 0,
                 "cenas": p.get("cenas_count") or 0, "do_radar": nome in do_radar, "capa": _capa(nome),
                 "status": c.get("status") or ("pronto" if p.get("tem_final") else "parado"),
-                "rodando": bool(c.get("rodando")), "progresso": c.get("progresso_pct") or 0,
+                # o render ainda gravando conta como rodando: o final.mp4 aparece antes de ele terminar, e o vídeo era
+                # dado por entregue no meio (o oxfam-uk em 2026-11-21)
+                "rodando": bool(c.get("rodando") or p.get("renderizando")), "progresso": c.get("progresso_pct") or 0,
                 "mensagem": c.get("mensagem") or "", "precisa_voce": bool(c.get("precisa_voce")),
                 "tem_final": bool(p.get("tem_final"))}
         if item["tem_final"]:
