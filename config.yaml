@@ -95,6 +95,12 @@ gemini:
 vez:                       # quantos vídeos fazem a etapa ao mesmo tempo (fabrica/vez.py, medido em 2026-11-07). 0: sem limite
   render_juntar: 1         # FFmpeg: dois juntos levavam quase 3 vezes cada
   conferencia_completadas: 1
+  # medido em 2026-11-22 (segundos por cena, sozinho e junto com outro vídeo): todas passam de 2 vezes mais lentas
+  render_clipes: 1         # clipes adiantados, FFmpeg: 0,41 e 0,89
+  narracao: 1              # 0,33 e 1,44
+  garantia: 1              # garantia das cenas: 0,47 e 0,92
+  animacoes: 1             # diagramas, textos e mapas (Chrome escondido): 0,51 e 1,12
+  trilha: 1                # 0,42 e 2,71
 
 corrigir:
   provedor: jev            # jev: o modelo de visão descreve a imagem e o Jev julga (muito mais barato).
@@ -107,6 +113,8 @@ corrigir:
   automatico: true         # roda sozinho no "tudo", depois do acervo e antes das imagens de IA
   garantir: true           # no fim, a foto de banco que ainda não combina com a fala vira imagem de IA, uma vez
                            # (corrigir.garantir). A imagem de IA ruim não é refeita. ~US$ 0,0046 por imagem
+  conferir_ia_da_garantia: false  # a imagem de IA da garantia não volta ao juiz (estudo da Dotti, 2026-11-22: ela julga
+                           # uma vez só, na captura). true confere e desfaz a troca quando a nova sai pior que a foto
   rodadas: 1               # vezes que tenta outro material real numa cena que não combina. Eram 3 (1 desde 2026-11-05,
                            # pedido do usuário: o que continua reprovado vai direto para a IA, como no Robô do Dotti)
   nota_para_trocar: 20     # abaixo disso o sistema troca sozinho. Entre este e o nota_minima ele só aponta
@@ -146,20 +154,35 @@ openrouter:
   # API gratuita. "groq:" na frente vai pelo Groq, revezando as GROQ_API_KEY do .env (11 hoje, cada uma com 1.000
   # pedidos por dia e 8.000 tokens por minuto); o Qwen 27B de lá enxerga imagem. Os gratuitos do OpenRouter vêm
   # depois, e o pago só no fim. Pedido com imagem pula quem está em so_texto
+  # Desde 2026-11-22 (estudo da Dotti, pedido do usuário: "o nosso sempre gasta os grátis e fica lento"): as pagas
+  # rápidas vêm PRIMEIRO, como no robô da Dotti, que paga só o Gemini Flash pelo OpenRouter (US$ 1,00 a 1,40 por vídeo
+  # de 40 min, zero falhas e zero esperas). Nos 5 vídeos de 22/11 os gratuitos falharam de 130 a 460 vezes por vídeo
+  # (cota do dia ou do minuto) e cada falha custava tempo antes de a chamada cair na paga, que atendia de qualquer
+  # jeito. Os gratuitos ficaram no fim, só de reserva. gratis_primeiro: true volta ao jeito antigo
+  gratis_primeiro: false
   principais:
-    - groq:qwen/qwen3.8-27b
-    - groq:openai/gpt-oss-120b
-    - google/gemma-4-31b-it:free
-    - dots-studio/dots-3-note-preview:free
-    - nvidia/nemotron-3-super-120b-a12b:free
-    - google/gemini-2.5-flash-lite  # última reserva, PAGA (US$ 0,10 e 0,40 por milhão de tokens, sem pensar, uns 3 s):
+    - google/gemini-3.1-flash-lite  # PAGA, na roda: o modelo do juiz e da detecção da Dotti (US$ 0,25 e 1,50). Medido em
+                                # 22/11: 2,2 s, enquanto o 2.5 levava 429 do Google e 19,8 s (US$ 0,10 e 0,40 por milhão de tokens, sem pensar, uns 3 s):
                                 # só entra quando os gratuitos acabam ou saem do ar. Enxerga imagem. Pedido do usuário em
                                 # 2026-10-20: no 10-animais-que-voce-vai-agradecer-por-es os prompts de IA em sequência
                                 # pararam a fábrica 15 min (20:17 a 20:32) em modelos que pensavam até o limite, de 137 a
                                 # 273 s cada: o openrouter/free sorteou MiniMax M3.1, Nemotron 3.5 Lightning e Cohere North
                                 # (saiu da cadeia), e o Qwen 3.8 Flash pago (que estava aqui) pensou 14 mil tokens por chamada
+    - google/gemma-4-26b-a4b-it     # PAGO (US$ 0,068 e 0,225), na roda. 1 a 8 s por escolha
+    - google/gemini-2.5-flash-lite  # PAGA, fora da roda: a mais barata (US$ 0,10 e 0,40), mas o Google devolve 429
     - gemini:gemini-3.1-flash-lite  # o mesmo Gemini pelas GEMINI_API_KEY do .env, com a cota própria, para quando o
                                 # OpenRouter devolve 429 do Google (pedido do usuário em 2026-10-29)
+    - qwen/qwen3.8-27b              # PAGO (US$ 0,035 e 1,50), sem pensar, mais lento: 8 a 11 s por escolha
+    - groq:qwen/qwen3.8-27b         # os gratuitos, só de reserva
+    - groq:openai/gpt-oss-120b
+    - google/gemma-4-31b-it:free
+  # as pagas que revezam (2026-11-22, pedido do usuário: "quando acaba a cota grátis, várias pagas para não demorar").
+  # Com os gratuitos esgotados, cada chamada começa por uma delas, em roda, e a que estiver no limite do minuto passa
+  # a vez para a irmã sem esperar. Medido numa escolha de fotos de verdade (3 folhas): Gemini 2.5 3 a 6 s, Gemma 4 26B
+  # 1 a 8 s, Qwen 3.8 27B 8 a 11 s; o Mistral Small 3.2 levou 51 a 73 s e ficou de fora. Vazia, volta a fila de antes
+  pagas_juntas:                  # o Qwen pago saiu da roda em 2026-11-22: 8 a 11 s contra 1 a 6 s das outras
+    - google/gemini-3.1-flash-lite
+    - google/gemma-4-26b-a4b-it
   espera_pelo_gratis: 5          # antes de pagar, espera até isso (s) por um gratuito que está fora só pelo limite do
                                 # minuto. Um pico da conferência mandou 27 descrições para o Qwen pago em 1 min. Era 60:
                                 # pedido do usuário em 2026-10-29, com o Groq voltando aos poucos cada chamada esperava
@@ -181,8 +204,10 @@ openrouter:
   # editor. Teto = teto_pago_por_minuto vezes a duração do vídeo, no mínimo teto_pago_minimo. Um vídeo normal gasta uns
   # US$ 0,02 a 0,04 por minuto com os gratuitos esgotados; o Qwen pago pensando (05/10) gastou US$ 0,09 por minuto.
   # O Jev, a narração e as imagens de IA não entram na conta.
-  teto_pago_por_minuto: 0.06    # US$ por minuto de vídeo: 20 min = US$ 1,20
-  teto_pago_minimo: 0.50        # US$, para vídeo curto
+  # 2026-11-22: com as pagas na frente, tudo passa por aqui (a Dotti gasta US$ 0,035 por minuto). O teto subiu para a
+  # produção não parar esperando confirmação por gasto normal: só um gasto anormal (o dobro do dela) para
+  teto_pago_por_minuto: 0.12    # US$ por minuto de vídeo: 20 min = US$ 2,40
+  teto_pago_minimo: 1.00        # US$, para vídeo curto
   so_texto:                      # quem não enxerga imagem: pedido com imagem pula estes
     - groq:openai/gpt-oss
     - nvidia/nemotron-3-super
@@ -191,7 +216,9 @@ openrouter:
   raciocinio_por_modelo:         # esforço de raciocínio só onde o modelo aceita: nenhum, low, medium ou high
     dots-studio/: nenhum        # o Dots pensava 7 mil tokens e levava 99 s numa escolha de fotos; sem pensar, 25 s
     stealth/: low               # modelos stealth pensam antes de responder (o Space Bunny gastava tudo pensando)
-    qwen/: low                  # o Qwen Flash estourava os 10 mil tokens pensando na busca das cenas cortadas e refazia
+    qwen/qwen3.8-27b: nenhum    # o pago das pagas_juntas: sem pensar (o pensamento é cobrado como escrita, US$ 1,50)
+    google/: nenhum             # os Gemini e Gemma pagos da roda (2026-11-22): sem pensar, rápidos e sem cobrar pensamento
+    qwen/: low                # o Qwen Flash estourava os 10 mil tokens pensando na busca das cenas cortadas e refazia
                                 # com 24 mil, minutos cada (nunca-deve-ter-dentro-de-casa-parte-2, 2026-10-05)
     deepseek/: low              # o DeepSeek V4 Flash pensava uns 8 mil tokens por lote de cenas, levava 30 min para um vídeo de
                                 # 8 min e às vezes estourava o limite só pensando
@@ -277,6 +304,10 @@ midia:
   busca_rapida_depois_de: 300  # segundos. Depois do começo cada cena tem uma busca só, sem YouTube e sem a 2ª leva;
                                # o que não achar vai para a IA (midia.busca_rapida, pedido do usuário em 2026-11-16)
   prazo_da_busca_min: 10       # passou disso, as cenas depois do começo que faltam vão para a IA. O começo não é cortado
+  # o prazo pelo rendimento (estudo da Dotti, 2026-11-22): depois de rendimento_depois_de_min de busca, se no ritmo de
+  # agora o que falta levaria mais que rendimento_limite_s, as cenas depois do começo que faltam vão para a IA. 0 desliga
+  rendimento_depois_de_min: 3
+  rendimento_limite_s: 180
   escolha: mimo            # quem escolhe as fotos: a cadeia de visão (modelos_visao, abaixo)
   # quem olha as imagens (escolha das fotos, descrição para o Jev, revisão do vídeo pronto): os gratuitos que enxergam
   # imagem primeiro, o pago só de reserva e sem raciocínio. Pedido do usuário em 2026-10-05: a escolha das fotos do
@@ -288,9 +319,13 @@ midia:
   # openrouter/free 20 a 153 s; Nemotron Nano Omni 5 s a 12 min (falhou). Num vídeo de 10 min (198 escolhas, 16 ao
   # mesmo tempo), o Gemini 2.5 escolhe tudo em 1,2 min por US$ 0,16. Qualquer gratuito na lista vem antes dos pagos
   # (openrouter_local.perguntar), por isso os lentos saíram daqui e ficaram em visao_gratuitos.
+  # 2026-11-22 (estudo da Dotti): as pagas rápidas primeiro (openrouter.gratis_primeiro: false), o Groq grátis de reserva
   modelos_visao:
-    - groq:qwen/qwen3.8-27b          # grátis: 11 chaves do Groq, 4 s por folha
-    - google/gemini-2.5-flash-lite   # o pago mais rápido com bom custo: US$ 0,10 e 0,40 por milhão de tokens
+    - google/gemini-3.1-flash-lite   # PAGO, na roda (openrouter.pagas_juntas): o modelo do juiz da Dotti
+    - google/gemma-4-26b-a4b-it      # PAGO, na roda: 1 a 8 s por escolha
+    - google/gemini-2.5-flash-lite   # PAGO, fora da roda: o mais barato, mas o Google devolve 429 com frequência
+    - qwen/qwen3.8-27b               # PAGO, fora da roda: 8 a 11 s por escolha
+    - groq:qwen/qwen3.8-27b          # grátis, de reserva: 11 chaves do Groq, 4 s por folha
     - gemini:gemini-3.1-flash-lite   # o mesmo Gemini pelas GEMINI_API_KEY do .env, com a cota própria. Pedido do usuário
                                      # em 2026-10-29: o OpenRouter devolvia 429 do Google quase sempre e tudo caía no Qwen
                                      # Fica DEPOIS do 2.5 de propósito: com ele na frente (tentado em 2026-10-30) cada
@@ -362,10 +397,22 @@ jev:
 animacoes:
   ativo: true
   versao: 0.8.113             # versão fixa do HyperFrames: atualização dele não muda vídeo sem aviso
-  paralelo: 2                 # cenas animadas ao mesmo tempo (cada uma abre um Chrome escondido)
+  paralelo: 4                 # cenas animadas ao mesmo tempo (cada uma abre um Chrome escondido). Eram 2; medido em
+                              # 22/11 numa máquina de 12 núcleos: 13 s por animação sozinha, 8,9 com 2 juntas, 7,1 com 4
   tentativas: 3               # pedidos ao modelo quando a animação reprova na conferência
   tipos: [diagrama, texto_tela, linha_do_tempo, mapa]
-  # estilo:                   # cores do canal (também dá para pôr no perfil, em animacoes.estilo)
+  # ritmo (estudo da Dotti, 2026-11-22): segundos livres entre duas animações e no máximo quantas começam por minuto.
+  # Vale para o que a criação anima sozinha; a animação pedida no editor não passa por aqui. 0 nos dois desliga
+  intervalo_minimo: 5
+  por_minuto: 6
+  cards_automaticos: true     # número por extenso que pesa ("four hundred billion") vira card, em en/pt/es
+  # o que a fábrica acha sozinha na fala (estudo da Dotti, 2026-11-22, animacoes_achar.py): título de capítulo,
+  # inscreva-se, mapa-múndi, ano, número, nome, termo, foto em destaque, pergunta, karaokê e frase de impacto.
+  # false desliga todas (fica só o card de número); formas_desligadas tira algumas, ex.: [karaoke, impacto]
+  formas_automaticas: true
+  formas_desligadas: []
+  teaser: false               # true: o cartão "a seguir" uns 10 s antes de cada capítulo novo
+  # estilo:                  # cores do canal (também dá para pôr no perfil, em animacoes.estilo)
   #   destaque: "#E8A33D"
   #   texto: "#F3EBDD"
   #   escurecer: 0.62          # quanto o material real escurece por trás da animação

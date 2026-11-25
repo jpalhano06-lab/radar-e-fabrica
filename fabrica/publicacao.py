@@ -147,6 +147,24 @@ def _textos_do_modelo(projeto, caps, log=print):
                                       modelo=openrouter_local.principal(projeto))
 
 
+# nomes de capítulo que não dizem nada como busca
+_CAPITULO_GENERICO = {"introducao", "introdução", "intro", "conclusao", "conclusão", "final", "fim", "abertura",
+                      "introduction", "conclusion", "ending", "outro", "introduccion", "introducción"}
+
+
+def tags_com_capitulos(tags, nomes) -> list:
+    """As tags do modelo e, depois delas, o nome de cada capítulo (do estudo da Dotti, 2026-11-22: ela sobe os
+    tópicos dos capítulos para as tags). Sem repetir, sem os genéricos e dentro do limite de letras do YouTube."""
+    saida, total = list(tags), sum(len(t) + 1 for t in tags)
+    for n in nomes:
+        t = re.sub(r'[<>,#"]', "", str(n or "")).strip().lower()
+        if not 3 <= len(t) <= 40 or t in saida or t in _CAPITULO_GENERICO or total + len(t) + 1 >= TAGS_MAXIMO:
+            continue
+        saida.append(t)
+        total += len(t) + 1
+    return saida
+
+
 def _limpar(dados, caps, titulo_reserva):
     titulo = _sem_travessao(str(dados.get("titulo") or titulo_reserva or "")).strip().strip('"')
     if len(titulo) > 100:
@@ -260,7 +278,7 @@ def gerar(projeto, log=print, forcar=False) -> dict:
         "titulos_alt": alternativos,
         "descricao": descricao(textos, caps, cfg.get("aviso_voz_sintetica", True),
                                texto_fixo(projeto), rodape(projeto)),
-        "tags": textos["tags"],
+        "tags": tags_com_capitulos(textos["tags"], textos["nomes_capitulos"]),
         "hashtags": textos["hashtags"],
         "comentario_fixado": textos["comentario_fixado"],
         "thumbs": textos.get("thumbs") or [],

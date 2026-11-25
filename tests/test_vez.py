@@ -95,3 +95,44 @@ class _Medida:
 
     def __exit__(self, *_):
         return False
+
+
+def test_vagas_da_fabrica_somam_os_videos(monkeypatch):
+    """imagens.processos é o total da fábrica: dois vídeos com 2 vagas não passam de 2 juntos (2026-11-22)."""
+    monkeypatch.setattr(vez, "_GLOBAIS", {})
+    dentro, maximo, trava = [0], [0], threading.Lock()
+
+    def uma():
+        vaga = vez.pegar("imagens", 2)
+        try:
+            with trava:
+                dentro[0] += 1
+                maximo[0] = max(maximo[0], dentro[0])
+            time.sleep(0.05)
+            with trava:
+                dentro[0] -= 1
+        finally:
+            vez.soltar(vaga)
+
+    fios = [threading.Thread(target=uma) for _ in range(6)]
+    for f in fios:
+        f.start()
+    for f in fios:
+        f.join()
+    assert maximo[0] == 2
+
+
+def test_vaga_zero_nao_limita(monkeypatch):
+    monkeypatch.setattr(vez, "_GLOBAIS", {})
+    assert vez.pegar("imagens", 0) is None
+    vez.soltar(None)
+    assert "imagens" not in vez._GLOBAIS
+
+
+def test_etapas_lentas_juntas_sao_uma_de_cada_vez():
+    """As medidas de 2026-11-22: trilha, narração, animações, clipes adiantados e garantia passaram de 2 vezes mais
+    lentas com outro vídeo junto. A busca de acervo não (junto ela foi mais rápida)."""
+    for nome in ("render_juntar", "conferencia_completadas", "render_clipes", "narracao", "garantia", "animacoes",
+                 "trilha"):
+        assert vez.PADRAO[nome] == 1
+    assert "busca" not in vez.PADRAO

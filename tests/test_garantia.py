@@ -1,5 +1,7 @@
 """Garantia: no fim, a cena que ainda não combina com a fala vira imagem de IA, e a imagem de IA ruim é feita de novo."""
 import copy
+
+import pytest
 from pathlib import Path
 
 from fabrica import corrigir, imagens, midia
@@ -101,9 +103,18 @@ def test_imagem_de_ia_ruim_nao_e_feita_de_novo(tmp_path, monkeypatch):
 
 def test_ia_nova_pior_que_a_foto_devolve_a_foto(tmp_path, monkeypatch):
     p, chamadas = preparar(monkeypatch, tmp_path, [foto(1, 35)], {1: 20})
+    p.config.setdefault("corrigir", {})["conferir_ia_da_garantia"] = True  # o jeito de antes, ligado no config
     corrigir.garantir(p, log=lambda *_: None)
     assert chamadas["voltou"] == [1]
     assert chamadas["refazer"] == []
+
+
+def test_ia_nova_nao_volta_ao_juiz_por_padrao(tmp_path, monkeypatch):
+    # como a Dotti (2026-11-22): julga uma vez, na captura; a imagem de IA da garantia não é julgada de novo
+    p, chamadas = preparar(monkeypatch, tmp_path, [foto(1, 35)], {1: 20})
+    monkeypatch.setattr(corrigir, "_avaliar", lambda *a, **k: pytest.fail("a garantia julgou a imagem de IA de novo"))
+    assert corrigir.garantir(p, log=lambda *_: None) == {"para_ia": [1], "voltaram": []}
+    assert "voltou" not in chamadas
 
 
 def test_cena_da_pessoa_e_motion_ficam_de_fora(tmp_path, monkeypatch):

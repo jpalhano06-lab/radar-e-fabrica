@@ -1282,7 +1282,12 @@ def garantir(projeto, log=print) -> dict:
     voltaram = set(_devolver_sem_imagem(projeto, set(mandadas), log))
     geradas = {c["n"] for c in projeto.ler_json("cenas.json")["cenas"]
                if c["n"] in set(mandadas) - voltaram and projeto.imagem(c["n"]).exists() and not c.get("midia")}
-    if geradas:
+    if geradas and not cfg.get("conferir_ia_da_garantia", False):
+        # do estudo da Dotti (2026-11-22): ela julga cada trecho uma vez só, na captura, e não confere a imagem de IA
+        # depois. Aqui a imagem nova também não volta ao juiz (corrigir.conferir_ia_da_garantia: true volta a conferir
+        # e a desfazer a troca quando a nova sai pior que a foto)
+        log(f"  garantia: {len(geradas)} imagem(ns) de IA no lugar das fotos que não combinavam")
+    elif geradas:
         novas = _avaliar(projeto, geradas, log, NOTA_MINIMA)
         _guardar(projeto, novas, rodada=0)
         antes = {c["n"] for c in projeto.ler_json("cenas.json")["cenas"] if c.get("midia")}

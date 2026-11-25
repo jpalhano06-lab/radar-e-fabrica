@@ -15,8 +15,19 @@ import re
 import unicodedata
 
 NOMES = {"pt": "português do Brasil", "en": "inglês (English)", "es": "espanhol (español)",
-         "ja": "japonês (日本語)", "ko": "coreano (한국어)"}
-LOCALES = {"pt": "pt-BR", "en": "en-US", "es": "es-ES", "ja": "ja-JP", "ko": "ko-KR"}
+         "ja": "japonês (日本語)", "ko": "coreano (한국어)", "fr": "francês (français)", "de": "alemão (Deutsch)",
+         "it": "italiano (italiano)", "nl": "holandês (Nederlands)", "pl": "polonês (polski)", "ru": "russo (русский)",
+         "uk": "ucraniano (українська)", "tr": "turco (Türkçe)", "ar": "árabe (العربية)", "hi": "hindi (हिन्दी)",
+         "ta": "tâmil (தமிழ்)", "zh": "chinês (中文)", "id": "indonésio (Bahasa Indonesia)", "ms": "malaio (Bahasa Melayu)",
+         "fil": "filipino (Filipino)", "vi": "vietnamita (Tiếng Việt)", "sv": "sueco (svenska)", "da": "dinamarquês (dansk)",
+         "no": "norueguês (norsk)", "fi": "finlandês (suomi)", "el": "grego (Ελληνικά)", "cs": "tcheco (čeština)",
+         "sk": "eslovaco (slovenčina)", "hu": "húngaro (magyar)", "ro": "romeno (română)", "bg": "búlgaro (български)",
+         "hr": "croata (hrvatski)"}
+LOCALES = {"pt": "pt-BR", "en": "en-US", "es": "es-ES", "ja": "ja-JP", "ko": "ko-KR", "fr": "fr-FR", "de": "de-DE",
+           "it": "it-IT", "nl": "nl-NL", "pl": "pl-PL", "ru": "ru-RU", "uk": "uk-UA", "tr": "tr-TR", "ar": "ar-SA",
+           "hi": "hi-IN", "ta": "ta-IN", "zh": "zh-CN", "id": "id-ID", "ms": "ms-MY", "fil": "fil-PH", "vi": "vi-VN",
+           "sv": "sv-SE", "da": "da-DK", "no": "nb-NO", "fi": "fi-FI", "el": "el-GR", "cs": "cs-CZ", "sk": "sk-SK",
+           "hu": "hu-HU", "ro": "ro-RO", "bg": "bg-BG", "hr": "hr-HR"}
 KANA = re.compile("[぀-ヿ]")
 HANGUL = re.compile("[ᄀ-ᇿ㄰-㆏가-힯]")
 
@@ -85,7 +96,14 @@ _CACHE = {}
 
 
 def lingua(projeto, padrao="pt") -> str:
-    """A língua do roteiro do projeto (o roteiro inteiro, não a fala de uma cena: "Ten supermarkets." é curto demais)."""
+    """A língua do roteiro do projeto (o roteiro inteiro, não a fala de uma cena: "Ten supermarkets." é curto demais).
+
+    A língua que o Radar declara no projeto.json ("lingua", o código) vale primeiro (2026-11-20): pelo texto só dava
+    para reconhecer pt, en, es, ja e ko, e um vídeo em francês, alemão ou chinês caía no padrão — os motions e os
+    textos da tela eram pedidos em português. Sem a declaração, o texto; sem o texto, a língua da voz do perfil."""
+    declarada = str((getattr(projeto, "dados", None) or {}).get("lingua") or "").strip().lower()
+    if declarada in NOMES:
+        return declarada
     try:
         arquivo = projeto.pasta / "roteiro.txt"
         chave = (str(arquivo), arquivo.stat().st_mtime_ns)
@@ -96,7 +114,14 @@ def lingua(projeto, padrao="pt") -> str:
             texto = arquivo.read_text(encoding="utf-8")[:30000]
         except OSError:
             texto = ""
-        _CACHE[chave] = lingua_do_texto(texto) or padrao
+        voz = str(((getattr(projeto, "perfil", None) or {}).get("voz") or {}).get("idioma_da_voz") or "")
+        voz = voz.lower().split("-")[0]
+        voz = voz if voz in NOMES else ""
+        # a voz numa língua que o texto não sabe reconhecer manda: francês tem "le" e era lido como espanhol
+        if voz and voz not in ("pt", "en", "es", "ja", "ko"):
+            _CACHE[chave] = voz
+        else:
+            _CACHE[chave] = lingua_do_texto(texto) or voz or padrao
     return _CACHE[chave]
 
 

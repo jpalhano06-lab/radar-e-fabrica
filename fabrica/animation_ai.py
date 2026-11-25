@@ -196,6 +196,10 @@ PALAVRAS_POR_ITEM = 5  # o texto de cada item; o documento (linhas de um papel c
 _PALAVRAS_LIVRES = {"mais", "menos", "como", "para", "pelo", "pela", "pelos", "pelas", "isso", "esse", "essa", "este",
                     "esta", "cada", "muito", "muita", "sobre", "entre", "quando", "onde", "sendo", "hoje", "antes",
                     "depois", "parte", "total", "fonte", "nunca", "sempre", "porque", "também", "tambem"}
+# e as palavras funcionais das três línguas (animacoes_achar.FUNCIONAIS, do estudo da Dotti em 2026-11-22): antes a
+# lista era só em português, e "with", "about" e "desde" num título contavam como palavra inventada
+_PALAVRAS_LIVRES |= {unicodedata.normalize("NFKD", p).encode("ascii", "ignore").decode()
+                     for p in set().union(*animacoes.animacoes_achar.FUNCIONAIS.values()) if len(p) >= 4}
 
 
 def config(projeto) -> dict:

@@ -46,6 +46,13 @@ FILTRO_CC = "EgIwAQ%3D%3D"  # o filtro "Creative Commons" da busca do YouTube
 PRAZO_TRECHO = 180  # segundos para o trecho chegar; garimpo.prazo troca
 NOTA_MINIMA = 64  # nota do quadro real para o trecho ficar; material de terceiro precisa ganhar o lugar
 CORTE_EMBAIXO = 0.12  # fração da altura tirada de baixo quando o texto queimado é legenda ou tarja
+# A limpeza do trecho baixado (limpar_trecho), medida nos pixels, sem chamar modelo
+QUADROS_DA_LIMPEZA = 10  # quadros por segundo lidos do trecho, em cinza e pequenos
+TAMANHO_DA_LIMPEZA = (320, 180)
+CORTE_DO_EDITOR = 30.0  # diferença média (0 a 255) entre dois quadros seguidos que conta como corte do editor
+PEDACO_MINIMO = 3.0  # segundos: pedaço menor que isto (ou que a cena) não serve, e o trecho fica como veio
+CANTO_DO_LOGO = 0.22  # lado do canto examinado, em fração da largura e da altura
+APERTO_MAXIMO = 0.2  # o maior aperto (fração tirada de cada lado) aceito para deixar o logo fora do quadro
 # só a imagem: o som do vídeo de outro canal não tem o que fazer aqui. H.264 até 1080p é o que se emenda melhor
 FORMATO = "bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/b[height<=1080]"
 
@@ -323,7 +330,8 @@ def folha_de_quadros(candidato, destino, cfg=None, http=None) -> dict:
             r = cliente.get(storyboard["fragments"][i]["url"])
             r.raise_for_status()
             grades[i] = Image.open(io.BytesIO(r.content)).convert("RGB")
-    except (httpx.HTTPError, OSError, KeyError):
+    except (httpx.HTTPError, OSError, KeyError, ValueError, Image.DecompressionBombError):
+        # ValueError: imagem com texto embutido gigante (PIL MAX_TEXT_CHUNK), como a que travou o cd-2 em 24/11/2026
         return {}
     finally:
         if http is None:
@@ -648,17 +656,90 @@ def texto_queimado(frase, cfg=None) -> str:
     return ""
 
 
-def _comando_do_trecho(candidato, destino, inicio, fim, conta) -> list:
+def _comando_do_trecho(candidato, destino, inicio, fim, conta, clientes=None, inteiro=False) -> list:
+    """clientes: outros clientes do YouTube (a outra rota). inteiro: o vídeo todo, para cortar aqui."""
     saida = str(Path(destino).with_suffix("")) + ".%(ext)s"
     # --print: a busca nem sempre traz o canal, e o crédito precisa dele
     comando = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-progress", "--no-playlist",
                "--no-simulate", "--print", "%(channel)s",
                "--force-overwrites", "--socket-timeout", "30", "--retries", "2", "-f", FORMATO,
-               "--remux-video", "mp4", "--force-keyframes-at-cuts",
-               "--download-sections", f"*{inicio:.1f}-{fim:.1f}", "-o", saida]
+               "--remux-video", "mp4"]
+    if not inteiro:
+        comando += ["--force-keyframes-at-cuts", "--download-sections", f"*{inicio:.1f}-{fim:.1f}"]
+    if clientes:
+        comando += ["--extractor-args", f"youtube:player_client={clientes}"]
+    comando += ["-o", saida]
     if conta:
         comando += ["--cookies", str(conta)]
     return comando + [candidato["arquivo"]]
+
+
+# O vídeo que o YouTube não deixa tocar fora dele (incorporação desligada), o formato que o cliente de sempre não
+# recebe e o corte que o ffmpeg não consegue fazer no meio do download: outra rota costuma trazer o mesmo trecho.
+# Vídeo apagado, privado ou com direitos bloqueados não tem rota: desiste na hora.
+_PEDE_OUTRA_ROTA = ("playback on other websites", "embedding", "not available on this app", "watch on youtube",
+                    "requested format is not available", "only images are available", "http error 403",
+                    "unable to download video data", "ffmpeg", "postprocessing", "conversion failed",
+                    "this video is not available")
+_SEM_ROTA = ("private video", "has been removed", "copyright", "account associated with this video has been terminated",
+             "members-only", "join this channel")
+OUTROS_CLIENTES = "tv,web_safari,mweb"
+INTEIRO_ATE = 900.0  # segundos: vídeo até este tamanho pode vir inteiro, para o corte ser feito aqui
+
+
+_RECUSA = ("http error 403", "http error 429", "403: forbidden", "429: too many requests", "too many requests")
+
+
+def _recusa_do_youtube(*erros) -> bool:
+    """O YouTube recusou a URL (403 ou 429): outra rota até pode passar, mas o vídeo inteiro não."""
+    return any(m in str(e).lower() for e in erros for m in _RECUSA)
+
+
+def _outra_rota_ajuda(erro: str) -> bool:
+    texto = str(erro).lower()
+    return any(m in texto for m in _PEDE_OUTRA_ROTA) and not any(m in texto for m in _SEM_ROTA)
+
+
+def _cortar_aqui(inteiro, destino, inicio, fim) -> None:
+    """O corte preciso: recodifica a partir do segundo pedido, sem depender de quadro-chave."""
+    rodar(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{inicio:.2f}", "-i", inteiro, "-t", f"{fim - inicio:.2f}",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-an", destino])
+
+
+def _baixar_por_rotas(candidato, destino, inicio, fim, conta, prazo, log=print) -> tuple:
+    """(código, erro, saída) do trecho. Primeiro o caminho de sempre; se o erro é de rota, outros clientes do
+    YouTube; e se ainda assim falhar, o vídeo inteiro (até INTEIRO_ATE segundos) com o corte preciso feito aqui."""
+    codigo, erro, saida = _rodar_com_prazo(_comando_do_trecho(candidato, destino, inicio, fim, conta), prazo)
+    if codigo == 0 or _e_reclamacao_de_conta(erro) or not _outra_rota_ajuda(erro):
+        return codigo, erro, saida
+    vid = candidato.get("id")
+    log(f"  garimpo: {vid} recusou o caminho de sempre ({_motivo_do_erro(erro)[:70]}); tentando outra rota")
+    codigo, erro2, saida = _rodar_com_prazo(
+        _comando_do_trecho(candidato, destino, inicio, fim, conta, clientes=OUTROS_CLIENTES), prazo)
+    if codigo == 0:
+        return codigo, erro2, saida
+    duracao = float(candidato.get("yt_duracao") or 0)
+    if _e_reclamacao_de_conta(erro2) or not 0 < duracao <= INTEIRO_ATE or _recusa_do_youtube(erro, erro2):
+        # 403/429 nas duas rotas é o YouTube recusando a URL, não esta máquina: baixar o vídeo inteiro seria pagar
+        # centenas de MB pela mesma recusa. O candidato sai e o garimpo segue para o próximo (como a Dotti faz)
+        return codigo, erro2 or erro, saida
+    destino = Path(destino)
+    inteiro = destino.with_name(destino.stem + ".inteiro.mp4")
+    log(f"  garimpo: {vid} vem inteiro ({duracao / 60:.0f} min) para o corte ser feito aqui")
+    try:
+        codigo, erro3, saida = _rodar_com_prazo(
+            _comando_do_trecho(candidato, inteiro, inicio, fim, conta, clientes=OUTROS_CLIENTES, inteiro=True),
+            prazo * 3)
+        if codigo != 0 or not inteiro.exists():
+            return codigo or 1, erro3 or erro2 or erro, saida
+        try:
+            _cortar_aqui(inteiro, destino, inicio, fim)
+        except RuntimeError as falha:
+            return 1, f"ERROR: o corte preciso falhou ({str(falha)[-120:]})", saida
+        return 0, "", saida
+    finally:
+        for sobra in destino.parent.glob(destino.stem + ".inteiro.*"):
+            sobra.unlink(missing_ok=True)
 
 
 def _rodar_com_prazo(comando, prazo) -> tuple:
@@ -709,7 +790,7 @@ def baixar_trecho(candidato, destino, cfg=None, log=print, inicio=None) -> dict:
     motivo, saida = "", ""
     for conta in [*_contas_livres(contas_de_cookies(cfg)), None]:
         with _copia_da_conta(conta) as copia:
-            codigo, erro, saida = _rodar_com_prazo(_comando_do_trecho(candidato, destino, inicio, fim, copia), prazo)
+            codigo, erro, saida = _baixar_por_rotas(candidato, destino, inicio, fim, copia, prazo, log)
         if codigo == 0:
             break
         motivo = _motivo_do_erro(erro)
@@ -783,3 +864,135 @@ def cortar_embaixo(arquivo, capa, fracao=CORTE_EMBAIXO) -> None:
         temporario.unlink(missing_ok=True)
         raise TrechoIndisponivel(f"não deu para cortar o trecho ({str(erro)[-120:]})") from erro
     capa_do_trecho(arquivo, capa)
+
+
+# A limpeza do trecho (estudo da Dotti, 2026-11-22: o robô dela corta o logo de canal no canto e tira do trecho
+# o corte do editor original). Os dois saem dos mesmos quadros, lidos uma vez, sem modelo:
+# - corte do editor: dois quadros seguidos muito diferentes, bem acima do normal do trecho. O trecho fica com o
+#   maior pedaço sem corte, se ele cobrir a cena; senão fica como veio.
+# - logo no canto: pixels que não mudam e têm borda, num canto só, enquanto o meio do quadro se mexe. Plano
+#   parado (tripé) não dá para separar logo de cenário, e fica como veio. O quadro aperta o suficiente para o
+#   logo sair, no máximo APERTO_MAXIMO de cada lado.
+# A limpeza nunca derruba o trecho: o que ela não consegue ler fica como estava.
+
+def _quadros_cinza(arquivo):
+    """Os quadros do trecho em cinza, pequenos, num array (quadros, altura, largura) de float32."""
+    import numpy as np
+
+    largura, altura = TAMANHO_DA_LIMPEZA
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(arquivo), "-vf",
+                        f"fps={QUADROS_DA_LIMPEZA},scale={largura}:{altura},format=gray", "-f", "rawvideo", "-"],
+                       capture_output=True)
+    if r.returncode:
+        raise OSError(r.stderr.decode("utf-8", "replace")[-120:])
+    quantos = len(r.stdout) // (largura * altura)
+    dados = np.frombuffer(r.stdout[:quantos * largura * altura], np.uint8)
+    return dados.reshape(quantos, altura, largura).astype(np.float32)
+
+
+def cortes_do_editor(quadros, fps=QUADROS_DA_LIMPEZA) -> list:
+    """Os segundos em que começa um plano novo (o primeiro quadro depois do corte)."""
+    import numpy as np
+
+    if len(quadros) < 3:
+        return []
+    diferencas = np.abs(np.diff(quadros, axis=0)).mean(axis=(1, 2))
+    # câmera em movimento tem diferença alta o tempo todo: o corte é o salto acima do normal deste trecho
+    limiar = max(CORTE_DO_EDITOR, 4 * float(np.median(diferencas)))
+    return [round((i + 1) / fps, 2) for i, d in enumerate(diferencas) if d > limiar]
+
+
+def maior_pedaco(cortes, duracao, fps=QUADROS_DA_LIMPEZA) -> tuple:
+    """(início, fim) do maior pedaço entre os cortes. O fim para no último quadro do plano, antes do corte."""
+    bordas = [0.0, *cortes, duracao]
+    pedacos = [(ini, fim - (1 / fps if fim < duracao else 0)) for ini, fim in zip(bordas, bordas[1:])]
+    return max(pedacos, key=lambda p: p[1] - p[0])
+
+
+def canto_do_logo(quadros) -> dict | None:
+    """O canto com logo parado e o aperto que o tira do quadro: {"canto": "cima-esq", "aperto": 0.12}, ou None."""
+    import numpy as np
+
+    if len(quadros) < 4:
+        return None
+    variacao = quadros.std(axis=0)[:-1, :-1]
+    media = quadros.mean(axis=0)
+    borda = np.maximum(np.abs(np.diff(media, axis=0))[:, :-1], np.abs(np.diff(media, axis=1))[:-1, :]) > 24
+    altura, largura = borda.shape
+    meio = (slice(altura // 4, 3 * altura // 4), slice(largura // 4, 3 * largura // 4))
+    movimento = float(np.median(variacao[meio]))
+    if movimento < 8:
+        return None  # plano parado: tudo fica igual, logo e cenário
+    sinal = (variacao < max(3.0, 0.2 * movimento)) & borda
+    ca, cl = int(altura * CANTO_DO_LOGO), int(largura * CANTO_DO_LOGO)
+    cantos = {"cima-esq": (0, 0), "cima-dir": (0, largura - cl), "baixo-esq": (altura - ca, 0),
+              "baixo-dir": (altura - ca, largura - cl)}
+    parte = {nome: float(sinal[y:y + ca, x:x + cl].mean()) for nome, (y, x) in cantos.items()}
+    canto = max(parte, key=parte.get)
+    outros = sorted(v for nome, v in parte.items() if nome != canto)
+    # um canto só: cenário parado costuma pegar mais de um canto, e o logo fica num
+    if parte[canto] < 0.03 or parte[canto] < 3 * max(outros[1], float(sinal[meio].mean()), 0.002):
+        return None
+    y0, x0 = cantos[canto]
+    ys, xs = np.nonzero(sinal[y0:y0 + ca, x0:x0 + cl])
+    ys, xs = ys + y0, xs + x0
+    # percentis em vez de mínimo e máximo: um pixel solto não pode apertar o quadro inteiro
+    fy = (np.percentile(ys, 98) + 1) / altura if canto.startswith("cima") else (altura - np.percentile(ys, 2)) / altura
+    fx = (np.percentile(xs, 98) + 1) / largura if canto.endswith("esq") else (largura - np.percentile(xs, 2)) / largura
+    return {"canto": canto, "aperto": round(float(min(fx, fy)) + 0.02, 3)}
+
+
+def limpar_trecho(arquivo, minimo=PEDACO_MINIMO, cfg=None, log=print) -> dict:
+    """Tira do trecho o corte do editor e o logo de canal no canto. Devolve o que fez: {"deslocamento": segundos
+    tirados do começo, "cortes": quantos, "logo": canto}, ou {} quando o trecho ficou como veio. A capa é refeita
+    por quem chama. ``garimpo.cortar_editor: false`` e ``garimpo.tirar_logo: false`` desligam cada parte."""
+    cfg = cfg or {}
+    quer_cortes, quer_logo = cfg.get("cortar_editor") is not False, cfg.get("tirar_logo") is not False
+    if not (quer_cortes or quer_logo):
+        return {}
+    arquivo = Path(arquivo)
+    try:
+        quadros = _quadros_cinza(arquivo)
+    except (OSError, ValueError):
+        return {}
+    duracao = len(quadros) / QUADROS_DA_LIMPEZA
+    inicio, fim = 0.0, duracao
+    cortes = cortes_do_editor(quadros) if quer_cortes else []
+    if cortes:
+        inicio, fim = maior_pedaco(cortes, duracao)
+        if fim - inicio < max(minimo, PEDACO_MINIMO):
+            log(f"  garimpo {arquivo.name}: {len(cortes)} corte(s) do editor e nenhum pedaço cobre "
+                f"{max(minimo, PEDACO_MINIMO):.1f} s; fica como veio")
+            inicio, fim, cortes = 0.0, duracao, []
+    logo = None
+    if quer_logo:
+        logo = canto_do_logo(quadros[int(inicio * QUADROS_DA_LIMPEZA):int(fim * QUADROS_DA_LIMPEZA) + 1])
+        if logo and logo["aperto"] > APERTO_MAXIMO:
+            log(f"  garimpo {arquivo.name}: logo grande demais no canto {logo['canto']} para tirar apertando")
+            logo = None
+    if not cortes and not logo:
+        return {}
+    filtros = []
+    if logo:
+        k, f = 1 - logo["aperto"], logo["aperto"]
+        x = f"iw*{f:.3f}" if logo["canto"].endswith("esq") else "0"
+        y = f"ih*{f:.3f}" if logo["canto"].startswith("cima") else "0"
+        filtros.append(f"crop=trunc(iw*{k:.3f}/2)*2:trunc(ih*{k:.3f}/2)*2:{x}:{y}")
+    filtros.append("scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080")
+    temporario = arquivo.with_name(arquivo.stem + ".limpo.mp4")
+    try:
+        rodar(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{inicio:.2f}", "-i", arquivo, "-t", f"{fim - inicio:.2f}",
+               "-vf", ",".join(filtros), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+               "-an", temporario])
+        os.replace(temporario, arquivo)
+    except (RuntimeError, OSError) as erro:
+        temporario.unlink(missing_ok=True)
+        log(f"  garimpo {arquivo.name}: a limpeza falhou e o trecho fica como veio ({str(erro)[-80:]})")
+        return {}
+    # cortes em quadros seguidos são uma transição só (fade, flash): contam uma vez
+    transicoes = sum(1 for i, t in enumerate(cortes) if i == 0 or t - cortes[i - 1] > 1.5 / QUADROS_DA_LIMPEZA)
+    feito = {"deslocamento": round(inicio, 2), "cortes": transicoes, "logo": logo["canto"] if logo else ""}
+    partes = ([f"{transicoes} corte(s) do editor, fica o pedaço de {inicio:.1f} a {fim:.1f} s"] if cortes else []) + \
+             ([f"logo no canto {logo['canto']} fora do quadro (aperto {logo['aperto']:.0%})"] if logo else [])
+    log(f"  garimpo {arquivo.name}: " + "; ".join(partes))
+    return feito

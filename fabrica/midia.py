@@ -1404,14 +1404,32 @@ def _aplicar_com_prazo(futuros, lotes, aplicar, projeto, comeco, log):
     """_aplicar_ao_terminar com o prazo da busca: passou dele, os lotes que ainda não começaram e só têm cenas da busca
     rápida são cancelados. Devolve (primeiro erro, números das cenas canceladas)."""
     prazo = prazo_da_busca(projeto)
+    cfg = projeto.config.get("midia") or {}
+    # o prazo pelo rendimento (do estudo da Dotti, 2026-11-22: "cota no pool"): depois de um mínimo de busca, se no
+    # ritmo de agora as cenas que faltam levariam mais que midia.rendimento_limite_s, as da busca rápida que ainda não
+    # começaram vão para a IA, sem esperar o prazo fixo. A Dotti para quando o que falta passa de 120 s
+    minimo = float(cfg.get("rendimento_depois_de_min", 3) or 0) * 60
+    limite = float(cfg.get("rendimento_limite_s", 180) or 0)
     cancelados = set()
     interrupcao = None
     avisou = False
+    motivo = ""
     for futuro, lote in zip(futuros, lotes):
-        if prazo and time.time() - comeco > prazo and all(busca_rapida(projeto, c) for c in lote) and futuro.cancel():
+        passou = time.time() - comeco
+        if not motivo and prazo and passou > prazo:
+            motivo = f"a busca passou de {prazo / 60:.0f} min"
+        elif not motivo and limite and minimo and passou > minimo:
+            # o lote cancelado conta como "done" no Future: fica fora das duas contas, senão inflaria o ritmo
+            feitos = sum(1 for f in futuros if f.done() and not f.cancelled())
+            faltam = sum(1 for f in futuros if not f.done())
+            if feitos and faltam / (feitos / passou) > limite:
+                motivo = (f"no ritmo de agora ({feitos / passou * 60:.1f} lotes por minuto) os {faltam} lotes que faltam "
+                          f"levariam {faltam / (feitos / passou) / 60:.0f} min")
+        # decidido o corte, ele vale para o resto da busca (como a Dotti, que para o garimpo uma vez)
+        if motivo and all(busca_rapida(projeto, c) for c in lote) and futuro.cancel():
             cancelados.update(c["n"] for c in lote)
             if not avisou:
-                log(f"  a busca passou de {prazo / 60:.0f} min: as cenas depois do começo que faltam vão para a IA")
+                log(f"  {motivo}: as cenas depois do começo que faltam vão para a IA")
                 avisou = True
             continue
         try:
@@ -2135,7 +2153,10 @@ def _miniatura(http, url):
                 if time.monotonic() > limite:  # miniatura chegando aos pouquinhos: fica fora da folha
                     return None
         return Image.open(io.BytesIO(bytes(conteudo))).convert("RGB")
-    except (httpx.HTTPError, OSError):
+    except (httpx.HTTPError, OSError, ValueError, Image.DecompressionBombError):
+        # ValueError: PNG com texto embutido gigante ("Decompressed data too large for PngImagePlugin.MAX_TEXT_CHUNK").
+        # Escapava daqui e derrubava a Busca de acervo inteira, que repetia sem fim no mesmo candidato (cd-2, 24/11/2026,
+        # 42 tentativas). Miniatura que não abre fica fora da folha, como as outras
         return None
 
 
@@ -2619,8 +2640,13 @@ def _trazer_midia(projeto, cena, candidato, http, base):
             # de onde ele veio exatamente, e a capa é um quadro do trecho, não a arte da miniatura
             from . import garimpo
 
-            trecho = garimpo.baixar_trecho(candidato, arquivo, garimpo.cfg_do_projeto(projeto),
+            cfg_garimpo = garimpo.cfg_do_projeto(projeto)
+            trecho = garimpo.baixar_trecho(candidato, arquivo, cfg_garimpo,
                                            inicio=_momento_pelos_quadros(projeto, cena, candidato, base))
+            # corte do editor e logo de canal no canto saem antes da capa: a capa e o julgamento veem o trecho limpo
+            duracao_da_cena = float(cena.get("fim") or 0) - float(cena.get("ini") or 0)
+            limpeza = garimpo.limpar_trecho(arquivo, duracao_da_cena, cfg_garimpo)
+            trecho["inicio"] += limpeza.get("deslocamento", 0.0)
             garimpo.capa_do_trecho(arquivo, capa)
             canal = candidato.get("autor") or trecho.get("canal") or ""
             candidato = {**candidato, "pagina": f"{candidato['pagina']}&t={int(trecho['inicio'])}", "autor": canal,
