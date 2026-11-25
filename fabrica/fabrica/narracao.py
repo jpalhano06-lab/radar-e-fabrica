@@ -18,7 +18,7 @@ import wave
 
 import httpx
 
-from . import conferir_voz, custos_reais, fish, genaipro, openspeaker, voz_local
+from . import conferir_voz, custos_reais, fish, genaipro, openspeaker, previsao_narracao, voz_local
 from . import texto as tx
 from .util import duracao_audio, rodar
 
@@ -226,42 +226,50 @@ def narrar(projeto, log=print, sem_gastar=False) -> float:
     saldo_antes = _saldo_genaipro() if na_genaipro and pendentes else None
     com_fish = not projeto.offline and voz.get("provedor") == "fish"
     juntos_local = int(voz_local.config().get("blocos_ao_mesmo_tempo", 1)) if local else 1
-    if (pago or com_fish or juntos_local > 1) and len(pendentes) > 1:
-        # a GenAIPro e a Fish trabalham por pedido, então vários blocos são gravados ao mesmo tempo. A voz local
-        # usa a placa de vídeo do computador: um bloco de cada vez, a não ser que o config.yaml peça mais
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        juntos = juntos_local if local else int(fish.config().get("blocos_ao_mesmo_tempo", 3)) if com_fish \
-            else BLOCOS_AO_MESMO_TEMPO
-        onde = (f"na voz {preparada['codigo']}" if local else "na Fish Audio" if com_fish
-                else "no OpenSpeaker" if voz.get("provedor") == "openspeaker" else "na GenAIPro")
-        log(f"  narrando {len(pendentes)} blocos {onde}, {juntos} de cada vez")
-        with ThreadPoolExecutor(max_workers=juntos) as grupo:
-            tarefas = {grupo.submit(gravar, i): i for i in pendentes}
-            prontos, erro = 0, None
-            for tarefa in as_completed(tarefas):
-                i = tarefas[tarefa]
-                try:
-                    tarefa.result()
-                except (Exception, SystemExit) as e:
-                    erro = erro or e
-                    continue
+    # quanto a voz costuma levar, pelas narrações anteriores, e o aviso quando passa do normal (previsao_narracao)
+    medir_voz = pago or com_fish or local
+    vigia = previsao_narracao.vigiar(voz, sum(len(blocos[i].texto) for i in pendentes) if medir_voz else 0, log)
+    try:
+        if (pago or com_fish or juntos_local > 1) and len(pendentes) > 1:
+            # a GenAIPro e a Fish trabalham por pedido, então vários blocos são gravados ao mesmo tempo. A voz local
+            # usa a placa de vídeo do computador: um bloco de cada vez, a não ser que o config.yaml peça mais
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            juntos = juntos_local if local else int(fish.config().get("blocos_ao_mesmo_tempo", 3)) if com_fish \
+                else BLOCOS_AO_MESMO_TEMPO
+            onde = (f"na voz {preparada['codigo']}" if local else "na Fish Audio" if com_fish
+                    else "no OpenSpeaker" if voz.get("provedor") == "openspeaker" else "na GenAIPro")
+            log(f"  narrando {len(pendentes)} blocos {onde}, {juntos} de cada vez")
+            with ThreadPoolExecutor(max_workers=juntos) as grupo:
+                tarefas = {grupo.submit(gravar, i): i for i in pendentes}
+                prontos, erro = 0, None
+                for tarefa in as_completed(tarefas):
+                    i = tarefas[tarefa]
+                    try:
+                        tarefa.result()
+                    except (Exception, SystemExit) as e:
+                        erro = erro or e
+                        continue
+                    if pago:
+                        cobrar(i)
+                    prontos += 1
+                    log(f"  bloco {i + 1} pronto ({prontos} de {len(pendentes)})")
+            _registrar_gasto_da_narracao(projeto, blocos, narrados, voz, saldo_antes, log)
+            if erro:
+                raise erro
+        else:
+            try:
+                for i in pendentes:
+                    log(f"  narrando bloco {i + 1} de {len(blocos)}")
+                    gravar(i)
+                    if pago:
+                        cobrar(i)
+            finally:
                 if pago:
-                    cobrar(i)
-                prontos += 1
-                log(f"  bloco {i + 1} pronto ({prontos} de {len(pendentes)})")
-        _registrar_gasto_da_narracao(projeto, blocos, narrados, voz, saldo_antes, log)
-        if erro:
-            raise erro
-    else:
-        try:
-            for i in pendentes:
-                log(f"  narrando bloco {i + 1} de {len(blocos)}")
-                gravar(i)
-                if pago:
-                    cobrar(i)
-        finally:
-            if pago:
-                _registrar_gasto_da_narracao(projeto, blocos, narrados, voz, saldo_antes, log)
+                    _registrar_gasto_da_narracao(projeto, blocos, narrados, voz, saldo_antes, log)
+        if medir_voz and pendentes:
+            vigia.anotar()
+    finally:
+        vigia.parar()
 
     if preparada and voz_local.config().get("desligar_depois", True):
         voz_local.desligar()

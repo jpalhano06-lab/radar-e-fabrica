@@ -279,6 +279,43 @@ def gratuita(rota) -> bool:
     return rota.endswith(":free") or rota == "openrouter/free" or rota.startswith(("groq:", "stealth/"))
 
 
+# As pagas que revezam (openrouter.pagas_juntas, 2026-11-22). Antes, com os gratuitos esgotados, toda chamada ia para
+# a primeira paga da lista (o Gemini 2.5 Flash-Lite), batia no limite do minuto dele e esperava a volta: com três
+# vídeos eram centenas de chamadas na mesma fila. Agora cada chamada começa por uma paga diferente da roda, e uma
+# irmã no limite do minuto passa a vez para a próxima, sem esperar.
+_GIRO = [0]
+_GIRO_TRAVA = threading.Lock()
+
+
+def pagas_juntas(projeto) -> list:
+    return [m for m in ((projeto.config.get("openrouter") or {}).get("pagas_juntas") or []) if m]
+
+
+def _revezar(projeto, rotas: list) -> list:
+    """As rotas com as pagas da roda em ordem girada (as outras pagas ficam atrás delas, na ordem da lista)."""
+    roda = [r for r in rotas if r in pagas_juntas(projeto) and not gratuita(r)]
+    if len(roda) < 2:
+        return rotas
+    with _GIRO_TRAVA:
+        k = _GIRO[0] % len(roda)
+        _GIRO[0] += 1
+    girada = roda[k:] + roda[:k]
+    if not gratis_primeiro(projeto):
+        # a paga rápida na frente (como a Dotti): a roda gira no lugar dela, e os gratuitos ficam onde a lista diz
+        primeira = next(i for i, r in enumerate(rotas) if r in roda)
+        resto = [r for r in rotas[primeira:] if r not in roda]
+        return rotas[:primeira] + girada + resto
+    gratis = [r for r in rotas if gratuita(r)]
+    return gratis + girada + [r for r in rotas if not gratuita(r) and r not in roda]
+
+
+def gratis_primeiro(projeto) -> bool:
+    """openrouter.gratis_primeiro: true (o jeito antigo) põe todo gratuito antes de qualquer pago; false segue a ordem
+    da lista. Do estudo da Dotti (2026-11-22): os gratuitos falhavam de 130 a 460 vezes por vídeo (cota do dia ou do
+    minuto) e cada falha custava tempo antes de a chamada cair na paga, que atendia de qualquer jeito."""
+    return bool((projeto.config.get("openrouter") or {}).get("gratis_primeiro", True))
+
+
 def _espera_por_melhor(projeto, rotas, rota, limite_gratis=None):
     """(segundos, rota) até uma rota MELHOR que esta voltar, se ela está fora só por pouco (o limite do minuto);
     (None, None) se não há o que esperar, ou se a volta demora mais do que vale a pena.
@@ -296,7 +333,10 @@ def _espera_por_melhor(projeto, rotas, rota, limite_gratis=None):
     limite_rapida = cfg.get("espera_pela_rapida", 30)
     agora = time.time()
     candidatas = []
+    roda = set(pagas_juntas(projeto))
     for melhor in (rotas[:rotas.index(rota)] if rota in rotas else []):
+        if rota in roda and melhor in roda and not gratuita(melhor):
+            continue  # entre as pagas da roda ninguém espera ninguém: a irmã livre atende na hora
         volta = _FORA_DO_AR.get(melhor, 0) - agora
         if volta <= 0:
             continue  # essa já voltou: a volta do laço tenta ela antes desta
@@ -328,7 +368,9 @@ def perguntar(projeto, etapa, instrucoes, pedido, esquema, log=print, modelo=Non
     # todos os gratuitos antes de qualquer pago, na ordem da lista: na cadeia do agente o DeepSeek pago vinha antes
     # do Groq e dos gratuitos do OpenRouter
     gratis = [r for r in rotas if gratuita(r)]
-    rotas = gratis + [r for r in rotas if not gratuita(r)]
+    if gratis_primeiro(projeto):
+        rotas = gratis + [r for r in rotas if not gratuita(r)]
+    rotas = _revezar(projeto, rotas)
     # o que a chamada passou, para tempos.anotar_chamada: cada rota tentada, as puladas por estarem fora do ar e as
     # esperas paradas (pela rota melhor que esta e pela confirmação do pago)
     comeco, tentadas, puladas, esperas, ok = time.time(), [], set(), {}, False
@@ -721,6 +763,13 @@ _OUTRO_ALFABETO = re.compile(r"[Ѐ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ"
 _ALFABETO_DA_LINGUA = {
     "ja": re.compile(r"[Ѐ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ가-힯]+"),
     "ko": re.compile(r"[Ѐ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿぀-ヿ＀-￯]+"),
+    # 2026-11-20: o Radar faz vídeo nestas línguas também, e o filtro apagava o alfabeto delas da tela
+    "zh": re.compile(r"[Ѐ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ가-힯]+"),
+    "ru": re.compile(r"[֐-׿؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+"),
+    "uk": re.compile(r"[֐-׿؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+"),
+    "bg": re.compile(r"[֐-׿؀-ۿऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+"),
+    "ar": re.compile(r"[Ѐ-ӿ֐-׿ऀ-ॿ฀-๿ᄀ-ᇿ぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+"),
+    "hi": re.compile(r"[Ѐ-ӿ֐-׿؀-ۿ฀-๿ᄀ-ᇿ぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+"),
 }
 
 

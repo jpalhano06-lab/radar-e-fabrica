@@ -492,6 +492,11 @@ def conferir_dados(modelo, dados, dur, tempos, fala=""):
 
     if modelo not in MODELOS:
         return None, [f"o modelo {modelo!r} não existe; escolha um destes: {', '.join(MODELOS)}"]
+    if modelo in _formas.MODELOS:
+        extras = {k: v for k, v in (dados or {}).items() if k in ("_lingua", "_imagens")}
+        d, erros = _formas.conferir(modelo, dados, tempo, lambda palavras: _inventadas(palavras, fala),
+                                    (dados or {}).get("_lingua", ""))
+        return {**d, **extras}, erros
     d = dict(dados or {})
     if modelo == "frase":
         palavras = [p for p in (item(p, 24) for p in (d.get("palavras") or [])[:10]) if p]
@@ -569,7 +574,20 @@ def conferir_dados(modelo, dados, dur, tempos, fala=""):
     return d, erros
 
 
+# as formas do estudo da Dotti (2026-11-22): título de seção, nome, data, termo, pergunta, impacto, karaokê, rede,
+# ticker, quiz, teaser, chamada, carrossel, foto, provas e mapa-múndi (animacoes_formas.py)
+from . import animacoes_formas as _formas  # noqa: E402
+
+MODELOS.update(_formas.MODELOS)
+CATALOGO += _formas.CATALOGO
+
+
 def partes(modelo, dados, dur):
     """(css, html, js) do modelo já com os dados conferidos."""
     css, html, js = MODELOS[modelo](dados, dur)
+    if modelo in _formas.MODELOS:
+        # as formas novas posicionam peças por left/top/bottom: dentro desta área, a conta é a da tela útil (1700 x 760),
+        # e nada desce para a faixa da legenda do vídeo nem cola na borda da tela
+        css = "#fx-area { position: relative; width: 1700px; height: 760px; }\n" + css
+        html = f'<div id="fx-area">{html}</div>'
     return {"css": CSS_BASE + css, "html": html, "js": js}

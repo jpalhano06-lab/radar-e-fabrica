@@ -819,8 +819,11 @@ def _gerar_uma(projeto, cena, referencias, tentativas):
     usar = referencias if com_referencia else []
 
     erro, suavizado = None, False
-    from . import tempos
+    from . import tempos, vez
+    # imagens.processos é o total da fábrica, somando os vídeos (vez.pegar): por vídeo, três juntos pediam 48
+    total = int((projeto.config.get("imagens") or {}).get("processos", 6))
     for tentativa in range(tentativas):
+        vaga = vez.pegar("imagens", total)
         comeco = time.time()
         try:
             prov = provedor(projeto.perfil)
@@ -898,6 +901,8 @@ def _gerar_uma(projeto, cena, referencias, tentativas):
                 prompt, suavizado = novo, True
                 continue
             time.sleep(4 * (tentativa + 1))
+        finally:
+            vez.soltar(vaga)
     raise erro
 
 

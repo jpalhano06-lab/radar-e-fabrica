@@ -235,6 +235,10 @@ _ERRO_PERMANENTE = re.compile(
     re.I)
 _ESPERAS = [5, 10, 20, 30, 45, 60]   # segundos: parado é pior, então nunca espera muito
 ESPERA_LONGA = 300                    # depois das tentativas rápidas, de 5 em 5 minutos, sem desistir
+# erro de código (não de serviço) que se repete igual: para e pede correção em vez de girar para sempre
+_TIPOS_DE_DEFEITO = (ValueError, TypeError, KeyError, IndexError, AttributeError, NameError, ZeroDivisionError,
+                     AssertionError)
+REPETICOES_DE_DEFEITO = 8              # as 6 rápidas e duas de 5 min: uns 13 minutos iguais
 
 
 class ParadaPrecisaDeVoce(Exception):
@@ -276,12 +280,20 @@ def _atualizar(task_id: str, **campos) -> None:
     _salvar_criacao(task_id)
 
 
+LOGS_NA_MEMORIA = 1000
+
+
 def _log_tarefa(task_id: str, msg) -> None:
     salvar = False
     with TAREFAS_LOCK:
         t = TAREFAS.get(task_id)
         if t is not None:
-            t.setdefault("logs", []).append(str(msg))
+            logs = t.setdefault("logs", [])
+            logs.append(str(msg))
+            # o registro na memória não cresce sem fim: com as cotas cheias são milhares de avisos por vídeo, e o
+            # _salvar_criacao copiava a lista inteira dentro da trava (o arquivo guarda só as últimas 300)
+            if len(logs) > LOGS_NA_MEMORIA * 2:
+                del logs[:-LOGS_NA_MEMORIA]
             salvar = t.get("tipo") == "criacao" and time.time() - t.get("_salvo_em", 0) > 5
     if salvar:
         _salvar_criacao(task_id)
@@ -364,8 +376,28 @@ def _segurar_se_pausado(task_id: str, nome) -> None:
     _atualizar(task_id, pausado=False, mensagem=antes or "Retomando...")
 
 
+def _defeito_do_programa(err: BaseException) -> bool:
+    """Erro que vem do próprio código (ou de um arquivo que ele não soube tratar), não de um serviço fora do ar.
+    Rede, cota e serviço chegam como httpx/OSError/RuntimeError e passam longe daqui. JSON e texto que não decodificam
+    ficam de fora porque um serviço caído responde página de erro no lugar do JSON, e isso passa sozinho."""
+    if isinstance(err, (json.JSONDecodeError, UnicodeError)):
+        return False
+    return isinstance(err, _TIPOS_DE_DEFEITO)
+
+
+def _onde(err: BaseException) -> str:
+    """O arquivo e a linha de dentro da fábrica onde o erro nasceu, para o log dizer onde olhar."""
+    import traceback
+    quadros = [q for q in traceback.extract_tb(err.__traceback__) if "fabrica" in q.filename.replace("\\", "/")]
+    if not quadros:
+        return ""
+    q = quadros[-1]
+    return f" ({Path(q.filename).name}:{q.lineno}, {q.name})"
+
+
 def _etapa_tentando(task_id: str, nome, rotulo: str, funcao):
     tentativa = 0
+    ultimo, repetido = None, 0
     while True:
         _segurar_se_pausado(task_id, nome)
         try:
@@ -376,9 +408,19 @@ def _etapa_tentando(task_id: str, nome, rotulo: str, funcao):
                 raise ParadaPrecisaDeVoce(msg) from None
             if nome and not (PROJETOS / nome / "projeto.json").exists():
                 raise  # o projeto foi apagado: não há o que continuar
+            # o mesmo defeito do programa, com o mesmo texto, volta igual em toda tentativa: esperar não muda nada.
+            # O cd-2 (24/11/2026) girou 42 vezes de 5 em 5 min num ValueError do Pillow sem ninguém saber. Depois de
+            # REPETICOES_DE_DEFEITO iguais seguidas (as rápidas e mais duas longas) para e mostra onde está
+            assinatura = (err.__class__.__name__, msg)
+            repetido = repetido + 1 if assinatura == ultimo else 1
+            ultimo = assinatura
+            if _defeito_do_programa(err) and repetido >= REPETICOES_DE_DEFEITO:
+                raise ParadaPrecisaDeVoce(
+                    f"{rotulo}: o mesmo erro do programa {repetido} vezes seguidas, tentar de novo não resolve "
+                    f"({err.__class__.__name__}: {msg}){_onde(err)}. Peça a correção e clique em Retomar") from None
             espera = _ESPERAS[tentativa] if tentativa < min(TENTATIVAS_POR_ETAPA, len(_ESPERAS)) else ESPERA_LONGA
             tentativa += 1
-            _log_tarefa(task_id, f"  {rotulo}: {msg}")
+            _log_tarefa(task_id, f"  {rotulo}: {msg}{_onde(err)}")
             _log_tarefa(task_id, f"  tentando de novo em {espera}s, de onde parou (tentativa {tentativa + 1})")
             _atualizar(task_id, mensagem=f"{rotulo}: um serviço falhou, tentando de novo em {espera}s...")
             _esperar(nome, espera)
@@ -612,7 +654,10 @@ def _esteira(nome: str, task_id: str) -> None:
                    mensagem=("Gravando a narração enquanto o agente monta o JSON das cenas..."
                              if agente else "Gerando áudio da narração e marcando tempo das palavras..."))
         try:
-            _etapa(task_id, "Narração", lambda: narracao.narrar(p, log=log_w))
+            # um vídeo por vez (vez.py): 0,33 s por cena sozinha, 1,44 com outra junto (medido em 2026-11-22)
+            from . import vez
+            with vez.na_vez("narracao", p, log_w, "narração"):
+                _etapa(task_id, "Narração", lambda: narracao.narrar(p, log=log_w))
         finally:
             if agente:
                 agente.shutdown(wait=False)
@@ -748,7 +793,10 @@ def _esteira(nome: str, task_id: str) -> None:
     # de IA ruim é feita de novo. Nunca para o vídeo
     try:
         _atualizar(task_id, progresso_pct=96, mensagem="Trocando por imagem de IA as cenas que ainda não combinam com a fala...")
-        with tempos.medir(p, "Garantia das cenas", log=log_w):
+        # um vídeo por vez (vez.py): 0,47 s por cena sozinha, 0,92 com outra junto (medido em 2026-11-22)
+        from . import vez
+        with vez.na_vez("garantia", p, log_w, "garantia das cenas"), \
+                tempos.medir(p, "Garantia das cenas", log=log_w):
             corrigir.garantir(p, log=log_w)
     except ParadaPrecisaDeVoce:
         raise
@@ -813,7 +861,10 @@ def _esteira(nome: str, task_id: str) -> None:
         if not animacoes.ligada(p):
             return
         try:
-            with tempos.medir(p, "Animações (diagramas, textos, mapas)", log=log_w):
+            # um vídeo por vez (vez.py): 0,51 s por cena sozinho, 1,12 com outro junto (medido em 2026-11-22)
+            from . import vez
+            with vez.na_vez("animacoes", p, log_w, "animações"), \
+                    tempos.medir(p, "Animações (diagramas, textos, mapas)", log=log_w):
                 resumo_anim = animacoes.gerar(p, log=log_w, trava=trava_do_projeto(nome))
             _atualizar(task_id, animacoes={"feitas": resumo_anim["feitas"], "prontas": resumo_anim["prontas"],
                                            "ficaram_com_foto": sorted(resumo_anim["falharam"])})
@@ -826,7 +877,9 @@ def _esteira(nome: str, task_id: str) -> None:
         if not trilha.ligada(p):
             return
         try:
-            with tempos.medir(p, "Trilha", log=log_w):
+            # um vídeo por vez (vez.py): 0,42 s por cena sozinha, 2,71 com outra junto (medido em 2026-11-22)
+            from . import vez
+            with vez.na_vez("trilha", p, log_w, "trilha"), tempos.medir(p, "Trilha", log=log_w):
                 trilha.gerar(p, log=log_w)
         except (Exception, SystemExit) as erro_trilha:
             log_w(f"  a trilha não saiu agora, o render tenta de novo: {erro_trilha}")
@@ -2232,6 +2285,74 @@ async def saude():
     return {"ok": True}
 
 
+# O diagnóstico da memória (2026-11-21: a fábrica chegou a 9 GB com três vídeos, o PC ficou sem RAM e nem a /api/saude
+# respondia). O POST liga o tracemalloc e guarda a foto de partida; o GET diz o que mais cresceu desde ela, os tipos
+# de objeto mais numerosos e o tamanho das tarefas guardadas. Desligado não custa nada.
+_MEMORIA_BASE: Dict[str, Any] = {}
+
+
+@app.post("/api/diag/memoria")
+def ligar_diag_memoria():
+    import tracemalloc
+    if not tracemalloc.is_tracing():
+        tracemalloc.start(6)
+    _MEMORIA_BASE["foto"] = tracemalloc.take_snapshot()
+    _MEMORIA_BASE["em"] = time.time()
+    return {"ok": True}
+
+
+@app.get("/api/diag/pilhas")
+async def diag_pilhas(quadros: int = 8):
+    """O que cada linha de execução está fazendo agora. É async: responde mesmo com as linhas do servidor ocupadas."""
+    import sys
+    import traceback
+    nomes = {t.ident: t.name for t in threading.enumerate()}
+    saida = []
+    for ident, quadro in sys._current_frames().items():
+        pilha = traceback.extract_stack(quadro)[-quadros:]
+        saida.append({"nome": nomes.get(ident, str(ident)),
+                      "pilha": [f"{f.filename.rsplit(os.sep, 1)[-1]}:{f.lineno} {f.name}" for f in pilha]})
+    return {"linhas": saida}
+
+
+@app.get("/api/diag/memoria")
+def diag_memoria(linhas: int = 25, objetos: bool = False, agrupar: str = "lineno"):
+    """Leve por padrão: com a fábrica em vários GB, varrer os objetos (objetos=1) ou agrupar pela pilha inteira
+    (agrupar=traceback) passava dos 10 min."""
+    import gc
+    import sys
+    import tracemalloc
+    from collections import Counter
+    contagem, tamanho = Counter(), Counter()
+    for o in (gc.get_objects() if objetos else ()):
+        nome = type(o).__qualname__
+        contagem[nome] += 1
+        try:
+            tamanho[nome] += sys.getsizeof(o)
+        except Exception:
+            pass
+    with TAREFAS_LOCK:
+        tarefas = [(tid, t.get("tipo"), t.get("status"), len(t.get("logs") or [])) for tid, t in TAREFAS.items()]
+    saida: Dict[str, Any] = {
+        "tipos": [{"tipo": n, "quantos": q, "mb": round(tamanho[n] / 2**20, 1)} for n, q in contagem.most_common(linhas)],
+        "tarefas": {"quantas": len(tarefas), "logs": sum(t[3] for t in tarefas),
+                    "maiores": sorted(tarefas, key=lambda t: -t[3])[:10]},
+        "threads": [t.name for t in threading.enumerate()],
+    }
+    if tracemalloc.is_tracing() and "foto" in _MEMORIA_BASE:
+        agora = tracemalloc.take_snapshot()
+        atual, pico = tracemalloc.get_traced_memory()
+        saida["tracemalloc"] = {
+            "minutos": round((time.time() - _MEMORIA_BASE["em"]) / 60, 1),
+            "atual_mb": round(atual / 2**20, 1), "pico_mb": round(pico / 2**20, 1),
+            "cresceu": [{"mb": round(d.size_diff / 2**20, 2), "blocos": d.count_diff,
+                         "onde": [f"{f.filename.rsplit(os.sep, 2)[-1]}:{f.lineno}" for f in d.traceback][-6:]}
+                        for d in agora.compare_to(_MEMORIA_BASE["foto"],
+                                                  "traceback" if agrupar == "traceback" else "lineno")[:linhas]],
+        }
+    return saida
+
+
 # A listagem é pedida o tempo todo — o painel e o Radar (Produzir, Acompanhar e Resultados) voltam a ela a cada
 # poucos segundos — e o que ela tem de caro quase nunca muda: ler as cenas, conferir no disco o arquivo de cada
 # uma e procurar a capa. Com 31 projetos e 11 mil cenas somadas isso levava 4 s por chamada e a tela ficava
@@ -2289,12 +2410,41 @@ def _lido_do_projeto(pasta: Path) -> Dict[str, Any]:
     return lido
 
 
+# Uma listagem por vez, e quem chega em até 5 s leva a mesma resposta (2026-11-21: com dois vídeos na Busca de acervo
+# a listagem passava de 60 s; o Radar e o painel pedem de novo a cada poucos segundos, as listagens se empilhavam,
+# ocupavam todas as linhas do servidor e a fábrica parava de responder: nada entregava e a fila não andava).
+_LISTA_TRAVA = threading.Lock()
+_LISTA_ULTIMA: List[Any] = [0.0, None]
+LISTA_VALE_S = 5
+
+
 @app.get("/api/projetos")
 def listar_projetos():
     """Lista todos os projetos existentes em projetos/."""
+    with _LISTA_TRAVA:
+        if _LISTA_ULTIMA[1] is not None and time.time() - _LISTA_ULTIMA[0] < LISTA_VALE_S:
+            return _LISTA_ULTIMA[1]
+        resposta = _listar_projetos()
+        _LISTA_ULTIMA[:] = [time.time(), resposta]
+        return resposta
+
+
+def _listar_projetos():
     if not PROJETOS.exists():
         return {"projetos": []}
 
+    # a trava das tarefas uma vez só para todos os projetos: pegá-la uma vez por projeto (201) com três vídeos
+    # gerando imagens, que a pegam a cada linha de registro, fazia a listagem passar de 120 s (2026-11-21)
+    with TAREFAS_LOCK:
+        ativas = set(CRIACOES_ATIVAS)
+        # o render que ainda está gravando: o final.mp4 já existe antes de ele terminar (os metadados, a cópia para
+        # Downloads), e o Radar dava o vídeo por entregue no meio (o oxfam-uk em 2026-11-21)
+        renderizando = {t.get("projeto") for t in TAREFAS.values() if t.get("status") == "renderizando"}
+        na_memoria: Dict[str, Dict[str, Any]] = {}
+        for t in TAREFAS.values():   # a última criação de cada projeto vence, como no reversed() de antes
+            if t.get("tipo") == "criacao" and t.get("projeto"):
+                na_memoria[t["projeto"]] = {k: t.get(k) for k in
+                                            ("status", "mensagem", "progresso_pct", "aguardando_ate", "precisa_voce")}
     lista = []
     for p in sorted(PROJETOS.iterdir()):
         if p.is_dir() and (p / "projeto.json").exists():
@@ -2308,24 +2458,30 @@ def listar_projetos():
                 "cenas_count": lido["cenas_count"],
                 "duracao": lido["duracao"],
                 "tem_final": (p / "final.mp4").exists(),
+                "renderizando": p.name in renderizando,
                 "tem_narracao": (p / "narracao.wav").exists(),
                 # o painel só libera o "Editar" quando nenhuma cena está sem imagem ou vídeo; com a esteira ainda
                 # trabalhando não conta como pronto, e isso fica fora do guardado porque muda sem o disco mudar
-                "cenas_completas": lido["completas"] and p.name not in CRIACOES_ATIVAS,
+                "cenas_completas": lido["completas"] and p.name not in ativas,
                 # o que a esteira de criação está fazendo agora, para o painel não mostrar "processando" à toa
-                "criacao": _resumo_criacao(p.name),
+                "criacao": _resumo_criacao(p.name, ativas, na_memoria),
                 "capa": lido["capa"],
             })
 
     return {"projetos": lista}
 
 
-def _resumo_criacao(nome: str) -> Dict[str, Any]:
-    """rodando: a esteira está trabalhando neste vídeo agora. Senão, o último estado gravado dela."""
-    with TAREFAS_LOCK:
-        rodando = nome in CRIACOES_ATIVAS
-        na_memoria = next((dict(t) for t in reversed(list(TAREFAS.values()))
-                           if t.get("projeto") == nome and t.get("tipo") == "criacao"), None)
+def _resumo_criacao(nome: str, ativas: Optional[set] = None,
+                    memoria: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """rodando: a esteira está trabalhando neste vídeo agora. Senão, o último estado gravado dela. A listagem passa o
+    que já leu das tarefas (ativas, memoria) para não pegar a trava de novo a cada projeto."""
+    if ativas is None or memoria is None:
+        with TAREFAS_LOCK:
+            rodando = nome in CRIACOES_ATIVAS
+            na_memoria = next((dict(t) for t in reversed(list(TAREFAS.values()))
+                               if t.get("projeto") == nome and t.get("tipo") == "criacao"), None)
+    else:
+        rodando, na_memoria = nome in ativas, memoria.get(nome)
     estado = na_memoria or _ler_criacao(nome) or {}
     return {
         "rodando": rodando,
@@ -4220,6 +4376,8 @@ def criar_app(frontend_dir: Optional[str] = None):
     # a cada 15 min, o que a chave do OpenRouter gastou contra o que a fábrica registrou (relatorios/vazamento.csv)
     from . import consumo
     consumo.vigiar(log=print)
+    # a planilha do consumo só se refaz com a fábrica parada (ela segurava o processo inteiro, 2026-11-21)
+    consumo.ocupada_quando(_ha_tarefa_andando)
     return app
 
 

@@ -148,23 +148,88 @@ def _assinatura_blocos(blocos) -> str:
     return hashlib.sha1(base.encode()).hexdigest()[:12]
 
 
-def _pedido(blocos) -> str:
+# o clima de partida da trilha em cada tema das animações (animacoes.estilo.tema): o modelo ainda escolhe bloco a
+# bloco, mas um vídeo de terror não começa em "alegre" e, sem o modelo, as regras saem no clima do tema
+CLIMA_DO_TEMA = {"terror": "tensao", "hacker": "tensao", "reaberto": "tensao", "investigacao": "misterio",
+                 "dossie": "misterio", "arquivo": "misterio", "cinema": "epico", "noticiario": "tensao",
+                 "cinetico": "epico", "jornal": "curiosidade", "caderno": "curiosidade", "planilha": "curiosidade",
+                 "colagem": "curiosidade"}
+
+
+# a música própria de cada tema (do estudo da Dotti, 2026-11-22: cada estilo dela tem a sua música). Aqui a música é
+# tocada pelo código, então cada tema ganha uma assinatura fixa: o mesmo tom no vídeo inteiro, o modo, a faixa de
+# andamento e o timbre do arpejo. O modelo continua escolhendo o clima, a progressão e a intensidade bloco a bloco
+MUSICA_DO_TEMA = {
+    "terror": {"tonalidade": "C#", "modo": "menor", "andamento": (58, 70), "timbre": "drone", "pulso": True},
+    "hacker": {"tonalidade": "E", "modo": "menor", "andamento": (92, 110), "timbre": "pluck", "pulso": True},
+    "noticiario": {"tonalidade": "F", "modo": "dorico", "andamento": (88, 104), "timbre": "pluck", "pulso": True},
+    "reaberto": {"tonalidade": "D", "modo": "menor", "andamento": (64, 80), "timbre": "piano"},
+    "investigacao": {"tonalidade": "D", "modo": "menor", "andamento": (64, 80), "timbre": "piano"},
+    "dossie": {"tonalidade": "A", "modo": "menor", "andamento": (66, 82), "timbre": "piano"},
+    "arquivo": {"tonalidade": "A", "modo": "menor", "andamento": (66, 82), "timbre": "piano"},
+    "cinema": {"tonalidade": "C", "modo": "menor", "andamento": (70, 88), "timbre": "sino", "intensidade_minima": 3},
+    "cinetico": {"tonalidade": "C", "modo": "menor", "andamento": (90, 110), "timbre": "pluck", "intensidade_minima": 3},
+    "jornal": {"tonalidade": "G", "modo": "dorico", "andamento": (80, 96), "timbre": "piano"},
+    "caderno": {"tonalidade": "G", "modo": "maior", "andamento": (76, 92), "timbre": "piano"},
+    "planilha": {"tonalidade": "BB", "modo": "dorico", "andamento": (82, 98), "timbre": "pluck"},
+    "colagem": {"tonalidade": "G", "modo": "lidio", "andamento": (80, 96), "timbre": "sino"},
+}
+TIMBRES = ("sino", "piano", "pluck", "drone")
+
+
+def com_musica_do_tema(tema, secoes) -> list:
+    """As seções com a assinatura musical do tema por cima (o mesmo tom em todas, o modo, o andamento dentro da faixa
+    e o timbre). Sem tema conhecido, ficam como vieram."""
+    m = MUSICA_DO_TEMA.get(tema)
+    if not m:
+        return secoes
+    saida = []
+    for s in secoes:
+        baixo, alto = m["andamento"]
+        nova = {**s, "tonalidade": m["tonalidade"], "modo": m["modo"], "timbre": m["timbre"],
+                "andamento": min(max(int(s.get("andamento") or baixo), baixo), alto),
+                "intensidade": max(int(s.get("intensidade") or 1), m.get("intensidade_minima", 1))}
+        if m.get("pulso") and nova["intensidade"] >= 3:
+            nova["pulso"] = True
+        saida.append(nova)
+    return saida
+
+
+def _tema(projeto) -> str:
+    try:
+        from . import animacoes
+        return animacoes.tema(projeto)
+    except Exception:  # noqa: BLE001 (o tema é só uma pista)
+        return ""
+
+
+def _clima_do_tema(projeto) -> str:
+    try:
+        from . import animacoes
+        return CLIMA_DO_TEMA.get(animacoes.tema(projeto), "")
+    except Exception:  # noqa: BLE001 (o tema é só uma pista)
+        return ""
+
+
+def _pedido(blocos, clima_do_tema="") -> str:
     linhas = []
     for b in blocos:
         texto = " ".join(b["textos"])
         if len(texto) > 700:
             texto = texto[:450] + " [...] " + texto[-200:]
         linhas.append(f"BLOCO id={b['id']} ({b['fim'] - b['ini']:.0f} s){' — ' + b['nome'] if b['nome'] else ''}\n{texto}")
-    return "Blocos do roteiro, em ordem:\n\n" + "\n\n".join(linhas)
+    pista = (f"O vídeo tem o visual de tema que pede o clima \"{clima_do_tema}\" como base: parta dele e mude só "
+             "onde a história mudar de verdade.\n\n") if clima_do_tema else ""
+    return pista + "Blocos do roteiro, em ordem:\n\n" + "\n\n".join(linhas)
 
 
-def _secao_valida(bruta, bloco, anterior):
+def _secao_valida(bruta, bloco, anterior, clima_padrao="misterio"):
     """Confere o que o modelo escreveu e completa pelo clima. Nunca recusa: o que não serve vira o padrão do clima."""
     bruta = bruta if isinstance(bruta, dict) else {}
     clima = str(bruta.get("clima") or "").strip().lower()
     clima = clima.replace("é", "e").replace("ã", "a").replace("ê", "e")
     if clima not in CLIMAS:
-        clima = anterior["clima"] if anterior else "misterio"
+        clima = anterior["clima"] if anterior else (clima_padrao if clima_padrao in CLIMAS else "misterio")
     padrao = CLIMAS[clima]
     tom = str(bruta.get("tonalidade") or "").strip().upper().replace("♯", "#").replace("♭", "B")
     tom = tom[:2] if tom[:2] in NOTAS else tom[:1]
@@ -209,9 +274,11 @@ def compor(projeto, log=print, forcar=False):
         except ValueError:
             pass
     respostas, autor = {}, "regras"
+    clima_do_tema = _clima_do_tema(projeto)
     if not projeto.offline:
         try:
-            resposta = openrouter_local.perguntar(projeto, "trilha", INSTRUCOES, _pedido(blocos), ESQUEMA, log=log,
+            resposta = openrouter_local.perguntar(projeto, "trilha", INSTRUCOES, _pedido(blocos, clima_do_tema),
+                                                  ESQUEMA, log=log,
                                                   modelo=openrouter_local.principal(projeto), temperatura=0.4)
             respostas = {s.get("id"): s for s in resposta.get("secoes") or [] if isinstance(s, dict)}
             autor = "modelo"
@@ -219,8 +286,9 @@ def compor(projeto, log=print, forcar=False):
             log(f"  trilha: o modelo não respondeu ({str(erro)[:120]}); a partitura sai pelas regras de cada clima")
     secoes, anterior = [], None
     for b in blocos:
-        anterior = _secao_valida(respostas.get(b["id"]), b, anterior)
+        anterior = _secao_valida(respostas.get(b["id"]), b, anterior, clima_do_tema or "misterio")
         secoes.append(anterior)
+    secoes = com_musica_do_tema(_tema(projeto), secoes)
     partitura = {"assinatura": assinatura, "autor": autor, "secoes": secoes}
     destino.parent.mkdir(parents=True, exist_ok=True)
     destino.write_text(json.dumps(partitura, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -321,8 +389,17 @@ def _tocar_secao(np, secao, inicio_global, sorteio):
         peso_baixo = 0.0 if intens == 1 else 0.075
         esquerda[a:a + n] += peso_baixo * baixo
         direita[a:a + n] += peso_baixo * baixo
-        # arpejo de sino: mais notas quanto maior a intensidade
-        if intens >= 2:
+        timbre = secao.get("timbre") or "sino"
+        if timbre == "drone":
+            # o terror: no lugar do arpejo, um drone grave da raiz e da quinta que respira devagar
+            env_d = np.clip(t / 1.8, 0, 1) * np.cos(np.clip((t - tamanho) / cauda, 0, 1) * np.pi / 2) ** 2
+            respira = 0.6 + 0.4 * np.sin(2 * np.pi * 0.11 * (t + inicio_global + t0))
+            drone = (np.sin(2 * np.pi * _freq(raiz) * t) + 0.5 * np.sin(2 * np.pi * _freq(raiz + 7) * t * 1.002)
+                     + 0.2 * np.sin(2 * np.pi * _freq(raiz + 12) * t * 0.997)) * env_d * respira
+            esquerda[a:a + n] += 0.06 * drone
+            direita[a:a + n] += 0.06 * drone
+        # arpejo: mais notas quanto maior a intensidade, no timbre do tema (sino, piano ou pluck)
+        if intens >= 2 and timbre != "drone":
             passo = {2: 2 * batida, 3: batida, 4: batida / 2, 5: batida / 2}[intens]
             notas_arp = [x + 12 for x in vozes] + [vozes[0] + 24]
             j, ta = 0, 0.0
@@ -333,9 +410,19 @@ def _tocar_secao(np, secao, inicio_global, sorteio):
                 if m > 0:
                     tt = np.arange(m, dtype=np.float32) / TAXA
                     f = _freq(nota)
-                    som = (np.sin(2 * np.pi * f * tt) + 0.35 * np.sin(2 * np.pi * f * 2 * tt)
-                           + 0.12 * np.sin(2 * np.pi * f * 3.01 * tt))
-                    som *= np.exp(-tt * 3.2) * np.clip(tt / 0.006, 0, 1)
+                    if timbre == "piano":
+                        # mais harmônicos e queda mais rápida, como uma corda percutida
+                        som = (np.sin(2 * np.pi * f * tt) + 0.5 * np.sin(2 * np.pi * f * 2 * tt)
+                               + 0.25 * np.sin(2 * np.pi * f * 3 * tt) + 0.12 * np.sin(2 * np.pi * f * 4.01 * tt))
+                        som *= np.exp(-tt * 4.5) * np.clip(tt / 0.003, 0, 1)
+                    elif timbre == "pluck":
+                        # pluck de sintetizador: onda quase quadrada, curtinha
+                        som = np.tanh(3 * np.sin(2 * np.pi * f * tt)) * 0.6
+                        som *= np.exp(-tt * 9.0) * np.clip(tt / 0.002, 0, 1)
+                    else:
+                        som = (np.sin(2 * np.pi * f * tt) + 0.35 * np.sin(2 * np.pi * f * 2 * tt)
+                               + 0.12 * np.sin(2 * np.pi * f * 3.01 * tt))
+                        som *= np.exp(-tt * 3.2) * np.clip(tt / 0.006, 0, 1)
                     forca = 0.045 * (0.75 + 0.5 * sorteio.random())
                     lado = 0.5 + 0.35 * math.sin(j * 1.7)
                     esquerda[ini:ini + m] += forca * (1 - lado) * 2 * som

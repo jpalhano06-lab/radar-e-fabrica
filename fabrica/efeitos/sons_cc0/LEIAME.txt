@@ -1,0 +1,5 @@
+Sons gravados das animações (fabrica/camadas.py, GRAVADOS).
+
+Origem: pacotes Impact Sounds, Interface Sounds e UI Audio da Kenney (https://kenney.nl), licença Creative Commons
+Zero (CC0 1.0, domínio público). Baixados em 2026-11-22, com a autorização do usuário. Só os arquivos usados foram
+guardados; a licença de cada pacote está na pasta dele (License.txt). O crédito à Kenney não é obrigatório.

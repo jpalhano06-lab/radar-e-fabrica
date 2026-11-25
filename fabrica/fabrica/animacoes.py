@@ -39,6 +39,7 @@ from . import ajustes_animacao
 from .animacoes_modelos import CATALOGO, MODELOS, conferir_dados
 from .animacoes_modelos import VERSAO as VERSAO_DESIGN
 from .animacoes_modelos import partes as partes_do_modelo
+from . import animacoes_achar, animacoes_formas  # depois dos modelos: as formas se registram neles
 from .util import rodar
 
 TIPOS_PADRAO = ("diagrama", "texto_tela", "linha_do_tempo", "mapa")
@@ -89,6 +90,9 @@ TEMAS = {
                 "painel": "rgba(226, 209, 170, 0.95)", "alerta": "#A8321F", "veu": "226, 209, 170", "escurecer": 0.94},
     "reaberto": {"destaque": "#F2C200", "texto": "#EFEFEF", "secundaria": "#9A9A9A",
                  "painel": "rgba(16, 16, 16, 0.88)", "alerta": "#E11D2E", "escurecer": 0.76},
+    # quadro de investigação: cortiça escura, fichas claras e o fio vermelho que liga uma pista à outra
+    "investigacao": {"destaque": "#D7263D", "texto": "#F5EFE3", "secundaria": "#C9B79C",
+                     "painel": "rgba(58, 40, 26, 0.88)", "alerta": "#F2B705", "escurecer": 0.74},
 }
 
 # O que muda além da cor: textura, letra e moldura de cada tema, por cima dos desenhos de sempre. Os ids são da página
@@ -118,6 +122,12 @@ DESENHOS = {
                'left: 70px; top: 44px; width: 340px; height: 44px; background: var(--destaque); opacity: .28; '
                'border-radius: 10px 10px 0 0; } #conteudo::after { content: ""; position: absolute; inset: 88px 70px 170px; '
                'border: 2px solid var(--secundaria); opacity: .4; }',
+    "investigacao": '#veu { background-image: radial-gradient(rgba(201, 183, 156, .10) 1px, transparent 1.6px); '
+                    'background-size: 9px 9px; } #conteudo::before { content: ""; position: absolute; left: 120px; '
+                    'right: 160px; top: 150px; height: 3px; background: var(--destaque); transform: rotate(-4deg); '
+                    'opacity: .7; } #conteudo::after { content: ""; position: absolute; left: 108px; top: 136px; '
+                    'width: 26px; height: 26px; border-radius: 50%; background: var(--destaque); '
+                    'box-shadow: 2px 3px 0 rgba(0, 0, 0, .45); }',
     "reaberto": '#conteudo::after { content: ""; position: absolute; left: -60px; right: -60px; top: 96px; height: 34px; '
                 'transform: rotate(-3deg); background: repeating-linear-gradient(45deg, var(--destaque) 0 40px, #111 40px 80px); }',
 }
@@ -164,6 +174,12 @@ def node_pronto() -> str:
                 pronto = ""
         _NODE["npx"] = pronto
         return pronto
+
+
+def tema(projeto) -> str:
+    """O tema das animações do vídeo (animacoes.estilo.tema), ou "" sem tema."""
+    nome = str((config(projeto).get("estilo") or {}).get("tema") or "").strip().lower()
+    return nome if nome in TEMAS else ""
 
 
 def _estilo(projeto) -> dict:
@@ -288,6 +304,14 @@ def _assinatura_render(projeto, item, ancora) -> str:
 
 
 SOM_DO_MODELO = {"numero": "contador", "lista": "passagem", "fluxo": "passagem", "linha_do_tempo": "passagem"}
+# o volume de cada som (dB depois de o pico ir a -1 dBFS), contra a voz normalizada do render: o acento (o carimbo, a
+# palavra batida) fica uns 6 dB abaixo da voz, os outros de 10 a 16 dB abaixo, para nunca cobrir a fala. Do estudo da
+# Dotti (2026-11-22): os efeitos dela são calibrados assim, cada um no seu nível, em vez de um volume só para todos
+NIVEL_DO_SOM = {"forte": -7.0, "medio": -11.0, "suave": -15.0}
+# a entrada das outras animações soa como o tema: papel nos temas de papel, bipe no hacker, grave no terror
+SOM_DO_TEMA = {"jornal": "papel", "caderno": "papel", "planilha": "papel", "colagem": "papel", "arquivo": "papel",
+               "dossie": "papel", "investigacao": "papel", "hacker": "bipe", "terror": "grave", "reaberto": "grave",
+               "cinema": "grave"}
 
 
 def sons_na_linha(projeto, log=print) -> list:
@@ -297,7 +321,21 @@ def sons_na_linha(projeto, log=print) -> list:
         return []
     from . import camadas
 
-    sons = [(item["ini"], camadas.som(SOM_DO_MODELO.get(item.get("modelo"), "pop"))) for item in validas(projeto)]
+    do_tema = SOM_DO_TEMA.get(tema(projeto), "pop")
+    sons = []
+    vezes = {}  # quantas vezes cada som já tocou no vídeo: a gravação varia entre as versões dela (camadas.GRAVADOS)
+    for item in validas(projeto):
+        eventos = animacoes_formas.eventos_de_som(item.get("modelo"), item.get("dados"))
+        if eventos:
+            # as formas novas: um som em cada momento (o carimbo bate, a máquina escreve), no nível de cada um
+            for t, nome, nivel in eventos:
+                if item["ini"] + t >= item["fim"]:
+                    continue
+                vezes[nome] = vezes.get(nome, -1) + 1
+                sons.append((item["ini"] + t, camadas.som(nome, vezes[nome]), NIVEL_DO_SOM[nivel]))
+        else:
+            # os modelos de antes: um som na entrada, no volume do perfil (efeitos.volume_db), como sempre
+            sons.append((item["ini"], camadas.som(SOM_DO_MODELO.get(item.get("modelo")) or do_tema)))
     if sons:
         log(f"  som nos textos da tela: {len(sons)} evento(s)")
     return sons
@@ -408,9 +446,9 @@ def situacao(projeto, cena, itens=None) -> str:
     return "possivel" if elegivel(projeto, cena) else ""
 
 
-def elegivel(projeto, cena, pedida=False) -> bool:
-    """A cena é de um tipo que se anima e tem fala. Cena em que a pessoa escolheu ficar com a foto só volta a ser
-    animada se ela pedir. A imagem da cena não importa: a animação vai por cima de qualquer uma."""
+def _cabe_camada(projeto, cena, pedida=False) -> bool:
+    """A cena aceita uma camada por cima, seja qual for o tipo dela: tem fala, a pessoa não desligou, não é um clipe
+    de motion e não está no começo do vídeo, que é de vídeo real."""
     if (cena.get("animacao") or {}).get("desligada") and not pedida:
         return False
     if (cena.get("midia") or {}).get("fonte") in ("motion_ia", "animation_ai"):
@@ -418,7 +456,166 @@ def elegivel(projeto, cena, pedida=False) -> bool:
     from . import animation_ai
     if not pedida and float(cena.get("ini") or 0) < animation_ai.inicio_sem_animacao(projeto):
         return False  # o começo do vídeo é de vídeo real, sem texto por cima
-    return cena.get("visual") in tipos(projeto) and bool((cena.get("texto") or "").strip())
+    return bool((cena.get("texto") or "").strip())
+
+
+def elegivel(projeto, cena, pedida=False) -> bool:
+    """A cena é de um tipo que se anima e tem fala. Cena em que a pessoa escolheu ficar com a foto só volta a ser
+    animada se ela pedir. A imagem da cena não importa: a animação vai por cima de qualquer uma."""
+    return cena.get("visual") in tipos(projeto) and _cabe_camada(projeto, cena, pedida)
+
+
+# ------------------------------------------------------------------- cards de número e ritmo
+
+# A narração escreve os números por extenso, para a voz ler certo ("four hundred billion dollars"): não há dígito no
+# roteiro. O card automático procura um número por extenso com palavra de grandeza, de porcentagem ou de dinheiro.
+# "Six years" e "dois cachorros" não viram card: só o número que pesa na história.
+_NUMEROS = {
+    "en": ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+           "seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand "
+           "million millions billion billions trillion trillions point half dozen"),
+    "pt": ("zero um uma dois duas tres quatro cinco seis sete oito nove dez onze doze treze quatorze catorze quinze "
+           "dezesseis dezessete dezoito dezenove vinte trinta quarenta cinquenta sessenta setenta oitenta noventa cem "
+           "cento duzentos duzentas trezentos trezentas quatrocentos quinhentos seiscentos setecentos oitocentos "
+           "novecentos mil milhao milhoes bilhao bilhoes trilhao trilhoes virgula meio meia"),
+    "es": ("cero uno una dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince dieciseis "
+           "diecisiete dieciocho diecinueve veinte treinta cuarenta cincuenta sesenta setenta ochenta noventa cien "
+           "ciento doscientos trescientos cuatrocientos quinientos seiscientos setecientos ochocientos novecientos mil "
+           "millon millones billon billones coma medio media"),
+}
+_PESO = {
+    "en": "hundred thousand million millions billion billions trillion trillions percent dollars dollar",
+    "pt": "cem cento mil milhao milhoes bilhao bilhoes trilhao trilhoes reais dolares dolar",
+    "es": "cien ciento mil millon millones billon billones dolares dolar euros",
+}
+_LIGA = {"and", "e", "y"}
+PRIORIDADE = {"linha_do_tempo": 4, "mapa": 4, "diagrama": 3, "texto_tela": 2}  # o card automático fica com 1
+INTERVALO_MINIMO = 5.0  # segundos livres entre o fim de uma animação e o começo da seguinte
+POR_MINUTO = 6
+
+
+def numero_que_pesa(texto, lingua) -> str:
+    """O número por extenso que vira card ("four hundred billion dollars", "trinta por cento"), ou "". Só em inglês,
+    português e espanhol; nas outras línguas não há card automático."""
+    numeros, peso = set(_NUMEROS.get(lingua, "").split()), set(_PESO.get(lingua, "").split())
+    if not numeros:
+        return ""
+    for frase in re.split(r"[.,;:!?]", texto or ""):  # o número não passa de uma frase para a outra
+        achado = _numero_na_frase(re.findall(r"[\w$%]+", frase), numeros, peso)
+        if achado:
+            return achado
+    return ""
+
+
+def _numero_na_frase(palavras, numeros, peso) -> str:
+    normais = [_normal(p).replace(" ", "") for p in palavras]
+
+    def porcento(j):  # "percent", "per cent", "por cento", "por ciento" a partir de j: quantas palavras
+        if j < len(normais) and normais[j] in ("percent", "porcento", "porciento", "%"):
+            return 1
+        if j + 1 < len(normais) and normais[j] in ("per", "por") and normais[j + 1] in ("cent", "cento", "ciento"):
+            return 2
+        return 0
+
+    i = 0
+    while i < len(palavras):
+        if normais[i] not in numeros or normais[i] in _LIGA:
+            i += 1
+            continue
+        j, pesou = i, False
+        while j < len(palavras):
+            if normais[j] in numeros or normais[j] in peso:
+                pesou = pesou or normais[j] in peso
+                j += 1
+            elif normais[j] in _LIGA and j + 1 < len(normais) and normais[j + 1] in numeros:
+                j += 1
+            elif porcento(j):
+                j += porcento(j)
+                pesou = True
+                break
+            else:
+                break
+        pesos = {x for x in normais[i:j] if x in peso}
+        # ano por extenso ("two thousand twenty", "mil novecentos e trinta") e grandeza sozinha ("millions of")
+        ano = pesos <= {"thousand", "mil"} and normais[i] in ("two", "dois", "dos", "mil")
+        sozinha = all(x in peso for x in normais[i:j])
+        nome = i > 0 and normais[i - 1] in ("fortune", "p", "forbes", "global")  # "S and P five hundred"
+        if pesou and not ano and not sozinha and not nome:
+            return " ".join(palavras[i:j])
+        i = j
+    return ""
+
+
+def _cenas_com_numero(projeto, cenas, ocupadas) -> list:
+    """As cenas de foto ou vídeo cuja fala traz um número que pesa (só a família numero de _cenas_automaticas)."""
+    return [c for c in _cenas_automaticas(projeto, cenas, ocupadas) if c.get("_familia") == "numero"]
+
+
+def _cenas_automaticas(projeto, cenas, ocupadas) -> list:
+    """As cenas de foto ou vídeo que a fábrica acha sozinha na fala para animar (animacoes_achar.py): título de
+    seção, inscreva-se, mapa, data, número, nome, termo, foto em destaque, pergunta, karaokê e impacto. Cada uma vem
+    com a família, a forma indicada e a dica para o modelo. Desliga tudo com animacoes.formas_automaticas: false;
+    uma família com animacoes.formas_desligadas: [nome, ...]; o card de número com animacoes.cards_automaticos: false.
+    O teaser (o que vem a seguir) fica desligado sem animacoes.teaser: true."""
+    cfg = config(projeto)
+    desligadas = set(cfg.get("formas_desligadas") or [])
+    if not cfg.get("teaser", False):
+        desligadas |= set(animacoes_achar.DESLIGADAS_PADRAO)
+    if not cfg.get("cards_automaticos", True):
+        desligadas.add("numero")
+    if not cfg.get("formas_automaticas", True):
+        desligadas |= set(animacoes_achar.ORDEM) - {"numero"}
+    if desligadas >= set(animacoes_achar.ORDEM):
+        return []
+    livres = [c for c in cenas if c["n"] not in ocupadas and c.get("visual") not in tipos(projeto)
+              and _cabe_camada(projeto, c)]
+    mapa = projeto.ler_json("roteiro_mapa.json") if projeto.existe("roteiro_mapa.json") else {}
+    lingua = idioma.lingua(projeto)
+    saida = []
+    for c, familia, forma, dica in animacoes_achar.candidatas(livres, lingua, mapa if isinstance(mapa, dict) else {},
+                                                              desligadas, numero_que_pesa):
+        saida.append({**c, "visual": "texto_tela", "_familia": familia, "_forma": forma, "_dica": dica,
+                      "texto_tela": dica.split(": ", 1)[-1].strip('"') if familia == "numero" else ""})
+    return saida
+
+
+def _prioridade(item) -> float:
+    if item.get("familia"):
+        return animacoes_achar.PRIORIDADE.get(item["familia"], 1)
+    return 1 if item.get("automatico") else PRIORIDADE.get(item.get("visual"), 2)
+
+
+def espacar(projeto, novos, fixos) -> list:
+    """Das animações novas, as que cabem no ritmo: pelo menos animacoes.intervalo_minimo segundos livres entre
+    duas e no máximo animacoes.por_minuto começando em qualquer minuto. As que já existem (fixos) ficam; entre as
+    novas, a de família mais forte (linha do tempo e mapa, depois diagrama, texto na tela e, por último, o card
+    automático) escolhe primeiro, e no empate a mais cedo. Zero nos dois desliga a regra."""
+    cfg = config(projeto)
+    intervalo = float(cfg.get("intervalo_minimo", INTERVALO_MINIMO) or 0)
+    por_minuto = int(cfg.get("por_minuto", POR_MINUTO) or 0)
+    if intervalo <= 0 and por_minuto <= 0:
+        return list(novos)
+    aceitos = []
+    for item in fixos:
+        ancora = _ancorar(projeto, item, pela_fala=True)
+        if ancora:
+            aceitos.append((ancora["ini"], ancora["fim"]))
+    com_tempo = []
+    for item in novos:
+        ancora = _ancorar(projeto, item, pela_fala=True)
+        if ancora:
+            com_tempo.append((item, ancora["ini"], ancora["fim"]))
+    saida = []
+    for item, ini, fim in sorted(com_tempo, key=lambda x: (-_prioridade(x[0]), x[1])):
+        if intervalo > 0 and any(max(ini, a) - min(fim, b) < intervalo for a, b in aceitos):
+            continue
+        if por_minuto > 0:
+            comecos = sorted([a for a, _ in aceitos] + [ini])
+            if any(sum(1 for t in comecos if s <= t < s + 60) > por_minuto for s in comecos if ini - 60 < s <= ini):
+                continue
+        aceitos.append((ini, fim))
+        saida.append(item)
+    return sorted(saida, key=lambda i: i["c_ini"])
 
 
 # ---------------------------------------------------------------------------------------------- o pedido
@@ -432,7 +629,11 @@ Modelos e o formato exato de "dados" de cada um:
 """ + CATALOGO + """
 Como escolher: número com o que ele mede -> numero; dois lados opostos -> contraste; um assunto que une várias coisas
 -> radial; enumeração -> lista; processo em etapas -> fluxo; datas ou épocas -> linha_do_tempo; lugar, distância ou
-rota -> mapa; afirmação de impacto sem nada disso -> frase. Use o pedido do diretor de arte como pista, mas quem manda
+rota -> mapa (ou mapa_mundi, para lugares de verdade no mundo); começo de capítulo -> secao; pessoa ou empresa citada
+-> nome; ano -> data; palavra técnica apresentada -> termo; pergunta -> pergunta; frase curtíssima que bate -> impacto;
+frase exclamada para ler junto -> karaoke; quem se liga a quem -> rede; notícia -> ticker; alternativas -> quiz;
+pedido de inscrição -> chamada; várias coisas citadas uma a uma -> carrossel; a coisa da foto -> foto; investigação,
+golpe ou crime -> provas; afirmação de impacto sem nada disso -> frase. Use o pedido do diretor de arte como pista, mas quem manda
 é o que a narração deste trecho diz.
 
 O TEMPO MANDA: todo "t" é o segundo em que aquela palavra é falada, tirado da lista de tempos do pedido. Cada elemento
@@ -463,6 +664,8 @@ def _pedido(item, ancora, vizinhas, erros):
         f"Frases anteriores: \"{vizinhas[0]}\"" if vizinhas[0] else "",
         f"Frase seguinte: \"{vizinhas[1]}\"" if vizinhas[1] else "",
         f"O que o diretor de arte pediu: {pedido.get('mostrar')}" if pedido.get("mostrar") else "",
+        (f"Modelo indicado pela fábrica: {pedido['modelo']} (use este, a menos que a fala claramente não caiba nele)"
+         if pedido.get("modelo") in MODELOS else ""),
         f"Texto sugerido para a tela: {pedido.get('texto_tela')}" if pedido.get("texto_tela") else "",
     ]
     if erros:
@@ -572,7 +775,10 @@ def _conferir(projeto, pasta, clipe=False) -> list:
     """Os erros que a conferência do HyperFrames achou (texto sobreposto, saindo da tela, regras quebradas).
     clipe=True para a página de tela inteira e fundo opaco do motion_ia.py: vale o contraste, e texto fora da tela ou
     fora do card reprova mesmo marcado só como informação."""
-    r = _hyperframes(projeto, ["check", "--json"], pasta, 300)
+    # a camada transparente não confere o contraste (o véu garante a leitura e o resultado já era ignorado) e olha 5
+    # momentos em vez de 9: 8,5 s caíram para 6,8 s por animação (medido em 2026-11-22)
+    args = ["check", "--json"] + ([] if clipe else ["--no-contrast", "--samples=5"])
+    r = _hyperframes(projeto, args, pasta, 300)
     try:
         dados = json.loads(r.stdout[r.stdout.find("{"):])
     except ValueError:
@@ -690,8 +896,8 @@ def _textos_dos_dados(dados) -> list:
     saida = []
     if isinstance(dados, dict):
         for chave, valor in dados.items():
-            if chave in ("t", "palavra", "cor", "icone", "forma", "estilo"):
-                continue
+            if chave in ("t", "palavra", "cor", "icone", "forma", "estilo", "variante") or str(chave).startswith("_"):
+                continue  # as chaves com _ são da fábrica (a língua, as fotos, a distância), não texto do modelo
             saida += _textos_dos_dados(valor)
     elif isinstance(dados, list):
         for valor in dados:
@@ -708,6 +914,35 @@ def _lingua_da_tela(dados, lingua, fala) -> list:
         return []
     return [f"o texto da tela está em outra língua que a do vídeo ({', '.join(fora[:4])}): escreva tudo em "
             f"{idioma.nome(lingua)}, com as palavras da narração"]
+
+
+def _copiar_fotos(projeto, item, pasta, quantas) -> list:
+    """As imagens das cenas do trecho (e das seguintes, até `quantas`) copiadas para a pasta da animação, para o
+    carrossel e a foto em destaque. Vídeo entra pela capa. Caminhos relativos à página."""
+    if not projeto.existe("cenas.json"):
+        return []
+    cenas = projeto.ler_json("cenas.json")["cenas"]
+    origem = item.get("cenas_origem") or []
+    if not origem:
+        return []
+    posicao = next((k for k, c in enumerate(cenas) if c["n"] == origem[0]), None)
+    if posicao is None:
+        return []
+    destino = pasta / "assets" / "fotos"
+    destino.mkdir(parents=True, exist_ok=True)
+    saida = []
+    for c in cenas[posicao:posicao + max(quantas, len(origem))]:
+        midia = c.get("midia") or {}
+        arquivo = midia.get("capa") or (midia.get("arquivo") if midia.get("tipo") in ("imagem", "foto") else "")
+        caminho = projeto.pasta / arquivo if arquivo else None
+        if not caminho or not caminho.exists():
+            continue
+        alvo = destino / f"{len(saida)}{caminho.suffix.lower() or '.jpg'}"
+        shutil.copy2(caminho, alvo)
+        saida.append(f"assets/fotos/{alvo.name}")
+        if len(saida) >= quantas:
+            break
+    return saida
 
 
 def _trechos(projeto, cenas, candidatas) -> list:
@@ -786,6 +1021,9 @@ def _animar(projeto, item, vizinhas, forcar, log, limite=None):
 
     def desenhar(modelo, dados):
         """Escreve a página da camada com a duração pelo conteúdo e devolve essa duração."""
+        dados = {**dados, "_lingua": lingua}
+        if modelo in animacoes_formas.COM_FOTO:
+            dados["_imagens"] = _copiar_fotos(projeto, item, pasta, animacoes_formas.COM_FOTO[modelo])
         duracao = duracao_do_conteudo(projeto, dados, limite)
         (pasta / "index.html").write_text(
             _montar_html(partes_do_modelo(modelo, dados, duracao), duracao, largura, altura, estilo,
@@ -802,6 +1040,8 @@ def _animar(projeto, item, vizinhas, forcar, log, limite=None):
     ajustes_animacao.copiar_fontes(pasta, _estilo(projeto))
     escolha = None
     lingua = idioma.lingua(projeto)
+    if animacoes_formas.falta_rotulo(lingua):
+        log(f"  animações: os rótulos fixos (capítulo, a seguir, inscreva-se) não têm a língua {lingua}: saem em inglês")
     sugestao = (item.get("pedido") or {}).get("texto_tela") or ""
     if sugestao and idioma.outra_lingua(sugestao, lingua, fala):
         # o overlay sugerido pelo roteirista veio em outra língua (o "10 SUPERMERCADOS" de um vídeo em inglês): não vai
@@ -812,7 +1052,7 @@ def _animar(projeto, item, vizinhas, forcar, log, limite=None):
     if not forcar and item.get("modelo") in MODELOS and item.get("modelo") not in fora:
         # a mesma fala: só o tempo (outra voz) ou o design mudou, então reaproveita o que o modelo escolheu
         dados = _remapear(item.get("dados"), item.get("tempos") or [], tempos)
-        dados, erros = conferir_dados(item["modelo"], dados, dur, tempos, fala)
+        dados, erros = conferir_dados(item["modelo"], {**(dados or {}), "_lingua": lingua}, dur, tempos, fala)
         erros = erros or _lingua_da_tela(dados, lingua, fala)  # o plano antigo em outra língua é feito de novo
         if not erros:
             duracao = desenhar(item["modelo"], dados)
@@ -826,7 +1066,8 @@ def _animar(projeto, item, vizinhas, forcar, log, limite=None):
                 _pedido(item, ancora, vizinhas, erros), ESQUEMA, log=log,
                 modelo=openrouter_local.principal(projeto), temperatura=0.4 if tentativa else 0.2)
             modelo = str(resposta.get("modelo") or "").strip()
-            dados, erros = conferir_dados(modelo, resposta.get("dados"), dur, tempos, fala)
+            bruto = resposta.get("dados") if isinstance(resposta.get("dados"), dict) else {}
+            dados, erros = conferir_dados(modelo, {**bruto, "_lingua": lingua}, dur, tempos, fala)
             if modelo in fora:
                 erros = [f"o modelo {modelo} foi desligado neste canal; use outro"]
             erros = erros or _lingua_da_tela(dados, lingua, fala)
@@ -895,18 +1136,37 @@ def gerar(projeto, numeros=None, forcar=False, log=print, trava=None, so_existen
     if numeros is None:
         alvo = [i for i in itens if not i.get("desligada")]
         livres = [] if so_existentes else [c for c in cenas if c["n"] not in cobertas and elegivel(projeto, c)]
+        automaticas = [] if so_existentes else _cenas_automaticas(projeto, cenas,
+                                                                   set(cobertas) | {c["n"] for c in livres})
     else:
         alvo = list({id(cobertas[n]): cobertas[n] for n in numeros if n in cobertas}.values())
         livres = [c for c in cenas if c["n"] in numeros and c["n"] not in cobertas and elegivel(projeto, c, pedida=True)]
-    for trecho in _trechos(projeto, cenas, livres):
+        automaticas = []
+    novos = []
+    for trecho in _trechos(projeto, cenas, livres) + [[c] for c in automaticas]:
         novo = _novo_item(trecho, palavras)
         if novo is None:
             continue
+        if trecho[0].get("_familia"):
+            # achada sozinha na fala (animacoes_achar.py): a família vale no ritmo e a forma vai como indicação
+            novo["automatico"] = True
+            novo["familia"] = trecho[0]["_familia"]
+            novo["pedido"]["mostrar"] = trecho[0]["_dica"]
+            novo["pedido"]["modelo"] = trecho[0]["_forma"]
         if len(trecho) == 1:
             antiga = _reaproveitar_antiga(projeto, trecho[0])
             if antiga:
                 novo.update(modelo=antiga["modelo"], dados=antiga.get("dados"))
-        alvo.append(novo)
+        novos.append(novo)
+    if numeros is None and novos:
+        # o ritmo vale para o que a criação anima sozinha, não para a animação que a pessoa pediu no editor
+        antes = len(novos)
+        novos = espacar(projeto, novos, [i for i in itens if not i.get("desligada")])
+        if len(novos) < antes:
+            log(f"  animações: {antes - len(novos)} trecho(s) ficaram com a foto pelo ritmo (no mínimo "
+                f"{config(projeto).get('intervalo_minimo', INTERVALO_MINIMO)} s entre duas e no máximo "
+                f"{config(projeto).get('por_minuto', POR_MINUTO)} por minuto)")
+    alvo += novos
     if not alvo:
         return resumo
     textos = {c["n"]: (c.get("texto") or "").strip() for c in cenas}

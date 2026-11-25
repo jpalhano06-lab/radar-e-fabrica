@@ -16,7 +16,12 @@ Vale só dentro do mesmo servidor (os vídeos que o site e o Radar mandam); a li
 import threading
 from contextlib import contextmanager
 
-PADRAO = {"render_juntar": 1, "conferencia_completadas": 1}
+# Medido de novo em 2026-11-22, nos vídeos desde 10/11 (segundos por cena, sozinho e com outro vídeo na mesma etapa):
+# trilha 0,42 e 2,71; narração 0,33 e 1,44; animações 0,51 e 1,12; clipes adiantados 0,41 e 0,89; garantia 0,47 e
+# 0,92. Todas passam de 2 vezes mais lentas juntas, então entraram na fila de uma de cada vez. A busca de acervo
+# ficou de fora: junto ela foi até mais rápida (1,75 e 1,18).
+PADRAO = {"render_juntar": 1, "conferencia_completadas": 1, "render_clipes": 1, "narracao": 1, "garantia": 1,
+          "animacoes": 1, "trilha": 1}
 _TRAVA = threading.Lock()
 _SEMAFOROS: dict[str, threading.BoundedSemaphore] = {}
 _MINHAS = threading.local()   # as vagas que ESTE fio está segurando agora, para soltar quando ele fica parado
@@ -61,6 +66,27 @@ def na_vez(nome: str, projeto, log=print, rotulo: str = ""):
         except ValueError:
             pass
         s.release()
+
+
+# Vagas da fábrica inteira, somando todos os vídeos (2026-11-22). Os limites do config.yaml (imagens.processos, por
+# exemplo) valiam por vídeo: com três vídeos eram 48 imagens pedidas de uma vez a um provedor que aguenta 16, e o
+# resto virava erro 429 e espera. Aqui o mesmo número passa a ser o total.
+_GLOBAIS: dict[str, threading.BoundedSemaphore] = {}
+
+
+def pegar(nome: str, total: int):
+    """Pega uma vaga do total da fábrica (espera se não houver). Devolve o que entregar a soltar(); None sem limite."""
+    if not total or total <= 0:
+        return None
+    with _TRAVA:
+        s = _GLOBAIS.setdefault(nome, threading.BoundedSemaphore(int(total)))
+    s.acquire()
+    return s
+
+
+def soltar(vaga) -> None:
+    if vaga is not None:
+        vaga.release()
 
 
 @contextmanager

@@ -15,6 +15,7 @@ import re
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from pathlib import Path
 
 from . import abertura, animacoes, animation_ai, avatar, efeitos, efeitos_foto, motion_ia, rostos, textos, trilha
@@ -67,7 +68,9 @@ FAIXAS_DE_CINEMA = "drawbox=x=0:y=0:w=iw:h=ih*0.12:color=black:t=fill,drawbox=x=
 # transições entre as cenas: cada clipe entra e sai numa cor, sem sobrepor um ao outro, para os clipes continuarem se
 # emendando sem codificar de novo. Sem `transicao` no perfil é corte seco, e os clipes prontos não mudam de nome.
 TRANSICOES = {"preto": ("black", 0.14), "branco": ("white", 0.10), "brasa": ("0xFF6A00", 0.14), "flash": ("white", 0.05)}
-CAMADAS = ("brasas", "poeira")
+# as transições de luz (camadas.transicao: queima, superexposição, dissolve e derreter): a luz cobre o corte por cima
+TRANSICOES_DE_LUZ = ("queima", "superexposicao", "dissolve", "derreter")
+CAMADAS = ("brasas", "poeira", "douradas", "vazando")
 
 
 def _com_transicao(filtro: str, cfg, quadros, fps) -> str:
@@ -99,7 +102,7 @@ def configuracao(projeto, vertical=False):
     if visual in VISUAIS:
         cfg["visual"] = visual
     transicao = str(projeto.perfil.get("transicao") or "").strip().lower()
-    if transicao in TRANSICOES:
+    if transicao in TRANSICOES or transicao in TRANSICOES_DE_LUZ:
         cfg["transicao"] = transicao
     camada = str(projeto.perfil.get("camada") or "").strip().lower()
     if camada in CAMADAS:
@@ -376,7 +379,11 @@ def adiantar_clipes(projeto, log=print):
                              if not t["destino"].exists()]
                 processos = max(1, (cfg.get("processos") or _parte_da_maquina(max(1, (os.cpu_count() or 4) // 2))) // 2)
                 log(f"  adiantando {len(pendentes)} clipes em segundo plano")
-                with ThreadPoolExecutor(processos) as executor:
+                # um vídeo por vez (vez.py): FFmpeg no processador, dois juntos levavam 2,2 vezes cada (medido em
+                # 2026-11-22, 0,41 s por cena sozinho e 0,89 junto, 386 rodadas)
+                from . import vez
+                with vez.na_vez("render_clipes", projeto, log, "clipes adiantados") if pendentes else nullcontext(), \
+                        ThreadPoolExecutor(processos) as executor:
                     for futuro in [executor.submit(_clipe, t, pasta_fotos, pasta_textos, projeto.perfil, cfg)
                                    for t in pendentes]:
                         try:
@@ -615,6 +622,23 @@ def _clipe(tarefa, pasta_fotos, pasta_textos, perfil, cfg):
         grafo.append(f"[{n}:v]scale={largura}:{altura},setsar=1,format=gbrp[particulas]")
         grafo.append(f"[{fim_do_grafo}]format=gbrp[fundo];[fundo][particulas]blend=all_mode=screen:shortest=1[comcamada]")
         fim_do_grafo = "comcamada"
+    if cfg.get("transicao") in TRANSICOES_DE_LUZ and duracao > 1.0:
+        # a segunda metade da luz no começo do clipe, preto no meio e a primeira metade no fim: somadas por cima, o
+        # corte entre dois clipes cai no pico da luz
+        from . import camadas as _camadas
+
+        n = entradas.count("-i")  # o índice da entrada nova
+        metade = _camadas.METADE
+        entradas += ["-i", _camadas.transicao(cfg["transicao"])]
+        meio = duracao - 2 * metade
+        grafo.append(f"[{n}:v]scale={largura}:{altura},setsar=1,fps={fps},format=gbrp,split[la][lb]")
+        grafo.append(f"[la]trim=start={metade:.3f},setpts=PTS-STARTPTS[l1]")
+        grafo.append(f"color=c=black:s={largura}x{altura}:r={fps}:d={meio:.3f},format=gbrp[l2]")
+        grafo.append(f"[lb]trim=end={metade:.3f},setpts=PTS-STARTPTS[l3]")
+        grafo.append("[l1][l2][l3]concat=n=3:v=1:a=0[luz]")
+        grafo.append(f"[{fim_do_grafo}]format=gbrp[base_luz];[base_luz][luz]blend=all_mode=screen:shortest=0:"
+                     f"repeatlast=1[comluz]")
+        fim_do_grafo = "comluz"
     grafo.append(f"[{fim_do_grafo}]format=yuv420p[v]")
 
     rodar([

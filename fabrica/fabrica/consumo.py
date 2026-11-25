@@ -151,9 +151,27 @@ def agendar() -> None:
     _relogio.start()
 
 
+# Quem diz se a fábrica está trabalhando (o servidor liga em ocupada_quando). Refazer a planilha é Python puro sobre
+# todo o registro (325 mil chamadas em 2026-11-21: uns 3 milhões de células no openpyxl); feito a cada 2 min no meio
+# da produção, segurava o processo inteiro e subia a memória a 9 GB: a listagem passava de 120 s, o Radar não via o
+# vídeo pronto e a fila parava. Com a fábrica trabalhando, ela espera; o registro (o CSV) segue anotando tudo.
+_ocupada = lambda: False  # noqa: E731
+
+
+def ocupada_quando(funcao) -> None:
+    global _ocupada
+    _ocupada = funcao
+
+
 def _no_relogio():
     global _relogio
     _relogio = None
+    try:
+        if _ocupada():
+            agendar()  # refaz quando a fábrica parar
+            return
+    except Exception:  # noqa: BLE001 - na dúvida, não segura: segue como antes
+        pass
     try:
         if not gerar_planilha(log=lambda *_: None):
             agendar()  # o arquivo estava aberto no Excel: tenta de novo depois
@@ -162,9 +180,22 @@ def _no_relogio():
         agendar()
 
 
+LINHAS_NA_SAIDA = 20000  # registro maior que isso não refaz a planilha na saída do comando
+
+
+def _linhas_do_registro() -> int:
+    """Pelo tamanho do arquivo (uns 150 bytes por linha): contar as linhas de verdade custaria ler tudo na saída."""
+    try:
+        return REGISTRO.stat().st_size // 150
+    except OSError:
+        return 0
+
+
 @atexit.register
 def _ao_sair():
-    if _pendente:
+    # com 325 mil chamadas no registro (2026-11-22) refazer na saída prendia todo comando que chamou um modelo por
+    # minutos depois de terminar. Registro grande fica para o servidor parado ou o "fabrica consumo"
+    if _pendente and _linhas_do_registro() <= LINHAS_NA_SAIDA:
         try:
             gerar_planilha(log=lambda *_: None)
         except Exception:  # noqa: BLE001
